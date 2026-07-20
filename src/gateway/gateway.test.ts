@@ -720,7 +720,7 @@ module.exports = {
   );
 
   it(
-    "runs wizard over ws and writes auth token config",
+    "runs wizard over ws, contains zero exits, and writes auth token config",
     { timeout: GATEWAY_E2E_TIMEOUT_MS },
     async () => {
       const { envSnapshot, tempHome } = await setupGatewayTempHome({
@@ -740,7 +740,7 @@ module.exports = {
         bind: "loopback",
         auth: { mode: "token", token: wizardToken },
         controlUiEnabled: false,
-        wizardRunner: async (_opts, _runtime, prompter) => {
+        wizardRunner: async (_opts, runtime, prompter) => {
           await prompter.intro("Wizard E2E");
           await prompter.note("write token");
           const token = await prompter.text({ message: "token" });
@@ -748,6 +748,7 @@ module.exports = {
             gateway: { auth: { mode: "token", token } },
           });
           await prompter.outro("ok");
+          runtime.exit(0);
         },
       });
 
@@ -798,6 +799,7 @@ module.exports = {
           true,
         );
         expect(next.status).toBe("done");
+        await expect(client.request("health", {})).resolves.toBeDefined();
 
         await expect
           .poll(
@@ -835,6 +837,47 @@ module.exports = {
         expect(resToken.ok).toBe(true);
       } finally {
         await server2.close({ reason: "wizard auth verify" });
+        await removeGatewayTempHome(tempHome);
+        envSnapshot.restore();
+      }
+    },
+  );
+
+  it(
+    "reports nonzero wizard exits without terminating the gateway",
+    { timeout: GATEWAY_E2E_TIMEOUT_MS },
+    async () => {
+      const { envSnapshot, tempHome } = await setupGatewayTempHome({
+        prefix: "openclaw-wizard-exit-home-",
+        minimalGateway: true,
+      });
+      const wizardToken = nextGatewayId("wiz-exit");
+      const port = await getFreeGatewayPort();
+      const server = await startGatewayServer(port, {
+        bind: "loopback",
+        auth: { mode: "token", token: wizardToken },
+        controlUiEnabled: false,
+        wizardRunner: async (_opts, runtime) => runtime.exit(23),
+      });
+      const client = await connectGatewayClient({
+        url: `ws://127.0.0.1:${port}`,
+        token: wizardToken,
+        clientDisplayName: "vitest-wizard-exit",
+      });
+
+      try {
+        const result = await client.request<{
+          done: boolean;
+          status: "running" | "done" | "cancelled" | "error";
+          error?: string;
+        }>("wizard.start", { mode: "local" });
+        expect(result.done).toBe(true);
+        expect(result.status).toBe("error");
+        expect(result.error).toContain("23");
+        await expect(client.request("health", {})).resolves.toBeDefined();
+      } finally {
+        await disconnectGatewayClient(client);
+        await server.close({ reason: "wizard nonzero exit test complete" });
         await removeGatewayTempHome(tempHome);
         envSnapshot.restore();
       }
