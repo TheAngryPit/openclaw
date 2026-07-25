@@ -124,20 +124,6 @@ describe("package-openclaw-for-docker", () => {
     },
   );
 
-  it.runIf(process.platform !== "win32")(
-    "uses the npm resolver PATH when npm is absent from the caller PATH",
-    async () => {
-      const env = { ...process.env, PATH: "" };
-      const output = await runCommandForTest("npm", ["--version"], process.cwd(), {
-        captureStdout: true,
-        env,
-        timeoutMs: 30_000,
-      });
-
-      expect(output.trim()).toMatch(/^\d+\.\d+\.\d+$/u);
-    },
-  );
-
   it.runIf(process.platform === "win32")(
     "kills pnpm.cmd descendants when the package command times out",
     async () => {

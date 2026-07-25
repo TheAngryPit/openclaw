@@ -222,10 +222,11 @@ function run(command, args, cwd, options = {}) {
     );
     const useProcessGroup = process.platform !== "win32";
     const env = options.env ?? process.env;
+    // Keep POSIX command selection stable; only Windows needs explicit npm/pnpm shim handling.
     const invocation =
-      command === "pnpm"
+      process.platform === "win32" && command === "pnpm"
         ? resolvePnpmRunner({ cwd, env, npmExecPath: env.npm_execpath, pnpmArgs: args })
-        : command === "npm"
+        : process.platform === "win32" && command === "npm"
           ? resolveNpmRunner({ env, npmArgs: args })
           : { args, command, shell: false };
     const child = spawn(invocation.command, invocation.args, {
