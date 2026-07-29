@@ -1,5 +1,6 @@
 // Setup finalize tests cover writing final onboarding config and artifacts.
 import fs from "node:fs/promises";
+import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createWizardPrompter as buildWizardPrompter } from "../../test/helpers/wizard-prompter.js";
@@ -48,6 +49,14 @@ const resolveDefaultModelCatalogFacts = vi.hoisted(() =>
 );
 const loadModelCatalog = vi.hoisted(() =>
   vi.fn<(_params?: unknown) => Promise<unknown[]>>(async () => []),
+);
+const loadPublishedModelCatalogOwnerSnapshot = vi.hoisted(() =>
+  vi.fn<
+    (params: { config: OpenClawConfig; readOnly?: boolean }) => Promise<{
+      config: OpenClawConfig;
+      modelCatalog: { entries: unknown[]; routeVariants: unknown[] };
+    }>
+  >(),
 );
 const buildGatewayInstallPlan = vi.hoisted(() =>
   vi.fn(async (_params?: { warn?: (message: string, title?: string) => void }) => ({
@@ -246,10 +255,7 @@ vi.mock("../commands/auth-choice.js", () => ({
 }));
 
 vi.mock("../agents/prepared-model-catalog.js", () => ({
-  loadPreparedModelCatalogSnapshot: async (...args: unknown[]) => {
-    const entries = await loadModelCatalog(...args);
-    return { entries, routeVariants: entries };
-  },
+  loadPublishedPreparedModelCatalogOwnerSnapshot: loadPublishedModelCatalogOwnerSnapshot,
 }));
 
 vi.mock("./setup.secret-input.js", () => ({
@@ -499,6 +505,14 @@ describe("finalizeSetupWizard", () => {
     resolveDefaultModelCatalogFacts.mockReturnValue({ found: true });
     loadModelCatalog.mockReset();
     loadModelCatalog.mockResolvedValue([]);
+    loadPublishedModelCatalogOwnerSnapshot.mockReset();
+    loadPublishedModelCatalogOwnerSnapshot.mockImplementation(async (params) => {
+      const entries = await loadModelCatalog(params);
+      return {
+        config: params.config,
+        modelCatalog: { entries, routeVariants: entries },
+      };
+    });
   });
 
   it("resolves gateway password SecretRef for probe but omits auth from TUI hatch", async () => {
@@ -734,8 +748,46 @@ describe("finalizeSetupWizard", () => {
       routeVariants: catalog,
     });
     expect(resolveDefaultModelAuthStatus).toHaveBeenCalledWith(nextConfig, {
-      agentDir: "/tmp/custom-agent",
+      agentDir: path.resolve("/tmp/custom-agent"),
       observedRoutes,
+    });
+  });
+
+  it("uses the published owner config when finalization overlaps a config replacement", async () => {
+    const requestedConfig = {
+      agents: {
+        defaults: { model: "openai/requested" },
+        list: [{ id: "main", agentDir: "/tmp/published-agent" }],
+      },
+    } satisfies OpenClawConfig;
+    const publishedConfig = {
+      agents: {
+        defaults: { model: "openai/published" },
+        list: [{ id: "main", agentDir: "/tmp/published-agent" }],
+      },
+    } satisfies OpenClawConfig;
+    const catalog = [{ id: "published", name: "Published", provider: "openai" }];
+    loadPublishedModelCatalogOwnerSnapshot.mockResolvedValueOnce({
+      config: publishedConfig,
+      modelCatalog: { entries: catalog, routeVariants: catalog },
+    });
+    const prompter = buildWizardPrompter({
+      confirm: vi.fn(async () => false),
+    });
+
+    await finalizeSetupWizard(
+      createModelAuthFinalizeArgs({ prompter, nextConfig: requestedConfig }),
+    );
+
+    expect(loadPublishedModelCatalogOwnerSnapshot).toHaveBeenCalledWith({
+      config: requestedConfig,
+      readOnly: true,
+    });
+    expect(resolveDefaultModelCatalogFacts).toHaveBeenCalledWith(publishedConfig, catalog, {
+      routeVariants: catalog,
+    });
+    expect(resolveDefaultModelAuthStatus).toHaveBeenCalledWith(publishedConfig, {
+      agentDir: path.resolve("/tmp/published-agent"),
     });
   });
 
@@ -769,7 +821,7 @@ describe("finalizeSetupWizard", () => {
           list: [{ id: "main", agentDir: "/tmp/custom-agent" }],
         },
       }),
-      { agentDir: "/tmp/custom-agent" },
+      { agentDir: path.resolve("/tmp/custom-agent") },
     );
     expectNoteContains(
       prompter,
