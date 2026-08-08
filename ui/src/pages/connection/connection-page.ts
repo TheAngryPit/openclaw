@@ -306,7 +306,7 @@ export class ConnectionPage extends OpenClawLightDomElement {
       },
       onConnect: () => this.connect(),
       canForgetBrowser,
-      onForgetBrowser: () => this.forgetBrowserDevice(),
+      onForgetBrowser: () => void this.forgetBrowserDevice(),
       onRefresh: () => void this.context.channels.refresh(false),
     });
     return html`
