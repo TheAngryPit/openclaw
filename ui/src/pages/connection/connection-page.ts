@@ -12,7 +12,12 @@ import {
   type ApplicationContext,
   type ApplicationGatewaySnapshot,
 } from "../../app/context.ts";
-import { loadGatewaySessionSelection, loadSettings, type UiSettings } from "../../app/settings.ts";
+import {
+  loadGatewaySessionSelection,
+  loadSettings,
+  persistSessionToken,
+  type UiSettings,
+} from "../../app/settings.ts";
 import { showConfirmDialog } from "../../components/confirm-dialog.ts";
 import { renderDocsLink } from "../../components/settings-ui.ts";
 import { renderSettingsWorkspace } from "../../components/settings-workspace.ts";
@@ -262,6 +267,7 @@ export class ConnectionPage extends OpenClawLightDomElement {
     if (deviceId) {
       clearDeviceAuthToken({ deviceId, gatewayUrl, role: "operator" });
     }
+    persistSessionToken(gatewayUrl, "");
     this.settings = { ...this.settings, token: "" };
     this.password = "";
     this.resetSensitiveUi();

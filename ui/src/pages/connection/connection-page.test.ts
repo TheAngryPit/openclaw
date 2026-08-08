@@ -8,6 +8,12 @@ import type {
   ApplicationGateway,
   ApplicationGatewaySnapshot,
 } from "../../app/context.ts";
+import {
+  loadSettings,
+  persistSessionToken,
+  resolveGatewayTokenForUrlEdit,
+  saveSettings,
+} from "../../app/settings.ts";
 import { showConfirmDialog } from "../../components/confirm-dialog.ts";
 import { loadDeviceAuthToken, storeDeviceAuthToken } from "../../lib/nodes/index.ts";
 import { createStorageMock } from "../../test-helpers/storage.ts";
@@ -25,11 +31,13 @@ function deferred<T>() {
 
 beforeEach(() => {
   vi.stubGlobal("localStorage", createStorageMock());
+  vi.stubGlobal("sessionStorage", createStorageMock());
 });
 
 afterEach(() => {
   document.body.replaceChildren();
   localStorage.clear();
+  sessionStorage.clear();
   vi.mocked(showConfirmDialog).mockReset();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -132,6 +140,13 @@ describe("ConnectionPage browser credential recovery", () => {
   };
 
   function createRecoveryState() {
+    const persistedSettings = {
+      ...loadSettings(),
+      gatewayUrl: currentToken.gatewayUrl,
+      token: "secret-token",
+    };
+    saveSettings(persistedSettings);
+    persistSessionToken("wss://other.gateway.test", "other-shared-token");
     localStorage.setItem(
       "openclaw-device-identity-v1",
       JSON.stringify({
@@ -176,7 +191,7 @@ describe("ConnectionPage browser credential recovery", () => {
         connect,
       },
     } as unknown as ApplicationContext;
-    state.settings = { token: "secret-token" };
+    state.settings = persistedSettings;
     state.password = "placeholder";
     return { connect, state };
   }
@@ -206,6 +221,14 @@ describe("ConnectionPage browser credential recovery", () => {
     expect(localStorage.getItem("unrelated-preference")).toBe("preserved");
     expect(state.settings.token).toBe("");
     expect(state.password).toBe("");
+    const reconstructed = new ConnectionPage() as unknown as {
+      settings: { gatewayUrl: string; token: string };
+    };
+    expect(reconstructed.settings.gatewayUrl).toBe(currentToken.gatewayUrl);
+    expect(reconstructed.settings.token).toBe("");
+    expect(
+      resolveGatewayTokenForUrlEdit(currentToken.gatewayUrl, "wss://other.gateway.test", ""),
+    ).toBe("other-shared-token");
     expect(connect).toHaveBeenCalledOnce();
     expect(connect).toHaveBeenCalledWith({ token: "", bootstrapToken: "", password: "" });
   });
