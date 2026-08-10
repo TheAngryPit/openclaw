@@ -13,6 +13,8 @@ import {
   resolvePlaywrightChromiumExecutablePath,
   startControlUiE2eServer,
   type ControlUiE2eServer,
+  type MockGatewayControls,
+  type MockGatewayRequest,
 } from "../test-helpers/control-ui-e2e.ts";
 
 const chromiumExecutablePath = resolvePlaywrightChromiumExecutablePath(chromium.executablePath());
@@ -123,6 +125,20 @@ async function captureProof(page: Page, name: string): Promise<void> {
   await page.screenshot({ fullPage: true, path: path.join(proofDir, name) });
 }
 
+async function waitForNextConnect(
+  gateway: MockGatewayControls,
+  previousCount: number,
+): Promise<MockGatewayRequest> {
+  await expect
+    .poll(async () => (await gateway.getRequests("connect")).length, { timeout: 10_000 })
+    .toBe(previousCount + 1);
+  const request = (await gateway.getRequests("connect"))[previousCount];
+  if (!request) {
+    throw new Error("Expected another connect request");
+  }
+  return request;
+}
+
 describeControlUiE2e("Control UI device-token reconnect E2E", () => {
   beforeAll(async () => {
     if (!chromiumAvailable) {
@@ -131,7 +147,7 @@ describeControlUiE2e("Control UI device-token reconnect E2E", () => {
       );
     }
     server = await startControlUiE2eServer();
-    browser = await chromium.launch({ executablePath: chromiumExecutablePath });
+    browser = await chromium.launch({ executablePath: chromiumExecutablePath, headless: true });
   });
 
   afterAll(async () => {
@@ -296,4 +312,147 @@ describeControlUiE2e("Control UI device-token reconnect E2E", () => {
     expect(readConnectAuth(wilfredAfterRevoke.connect)?.token).toBeUndefined();
     expect(readConnectAuth(wilfredAfterRevoke.connect)?.deviceToken).toBeUndefined();
   });
+
+  it("forgets only the current Gateway operator credential and reconnects without credentials", async () => {
+    const context = await createContext();
+    const rosita = await openGatewayPage({
+      appBaseUrl: server.baseUrl,
+      context,
+      deviceToken: ROSITA_DEVICE_TOKEN,
+      gatewayUrl: ROSITA_GATEWAY_URL,
+      sharedToken: "shared-rosita",
+    });
+    expect(requireConnectAuth(rosita.connect).token).toBe("shared-rosita");
+
+    const wilfred = await openGatewayPage({
+      appBaseUrl: server.baseUrl,
+      context,
+      deviceToken: WILFRED_DEVICE_TOKEN,
+      gatewayUrl: WILFRED_GATEWAY_URL,
+      sharedToken: "shared-wilfred",
+    });
+    expect(requireConnectAuth(wilfred.connect).token).toBe("shared-wilfred");
+
+    const wilfredForget = await openGatewayPage({
+      appBaseUrl: server.baseUrl,
+      context,
+      deviceToken: WILFRED_DEVICE_TOKEN,
+      gatewayUrl: WILFRED_GATEWAY_URL,
+      route: "settings/connection",
+    });
+    expect(requireConnectAuth(wilfredForget.connect)).toMatchObject({
+      deviceToken: WILFRED_DEVICE_TOKEN,
+      token: WILFRED_DEVICE_TOKEN,
+    });
+
+    const wilfredStoreKey =
+      `openclaw.device.auth.v1:` + normalizeGatewayCredentialScope(WILFRED_GATEWAY_URL);
+    const rositaStoreKey =
+      `openclaw.device.auth.v1:` + normalizeGatewayCredentialScope(ROSITA_GATEWAY_URL);
+    const wilfredSessionTokenKey =
+      `openclaw.control.token.v1:` + normalizeGatewayTokenScope(WILFRED_GATEWAY_URL);
+    const rositaSessionTokenKey =
+      `openclaw.control.token.v1:` + normalizeGatewayTokenScope(ROSITA_GATEWAY_URL);
+    await wilfredForget.page.evaluate(
+      ({ currentSessionKey, currentStoreKey, otherSessionKey }) => {
+        const raw = localStorage.getItem(currentStoreKey);
+        if (!raw) {
+          throw new Error("Expected current Gateway device-auth store");
+        }
+        const store = JSON.parse(raw) as {
+          tokens: Record<string, { role: string; scopes: string[]; token: string }>;
+        };
+        store.tokens.node = {
+          role: "node",
+          scopes: ["node.invoke"],
+          token: "wilfred-node-token",
+        };
+        localStorage.setItem(currentStoreKey, JSON.stringify(store));
+        localStorage.setItem("unrelated-preference", "preserved");
+        sessionStorage.setItem(currentSessionKey, "wilfred-session-token");
+        sessionStorage.setItem(otherSessionKey, "rosita-session-token");
+      },
+      {
+        currentSessionKey: wilfredSessionTokenKey,
+        currentStoreKey: wilfredStoreKey,
+        otherSessionKey: rositaSessionTokenKey,
+      },
+    );
+
+    const tokenFreeConnectHello = {
+      auth: { role: "operator", scopes: OPERATOR_SCOPES },
+      features: { events: [], methods: [] },
+      policy: {
+        maxBufferedBytes: 1_048_576,
+        maxPayload: 1_048_576,
+        tickIntervalMs: 30_000,
+      },
+      protocol: 4,
+      server: { connId: "control-ui-e2e", version: "e2e" },
+      snapshot: {},
+      type: "hello-ok",
+    };
+    expect(requireRecord(tokenFreeConnectHello.auth).deviceToken).toBeUndefined();
+    await wilfredForget.gateway.setMethodResponse("connect", tokenFreeConnectHello);
+
+    const connectCountBeforeForget = (await wilfredForget.gateway.getRequests("connect")).length;
+    const forgetButton = wilfredForget.page.getByRole("button", {
+      name: "Forget this browser",
+      exact: true,
+    });
+    await forgetButton.click();
+    const confirmation = wilfredForget.page
+      .locator("openclaw-modal-dialog")
+      .filter({ hasText: "Forget this browser's operator credential" });
+    await confirmation.getByRole("button", { name: "Forget this browser", exact: true }).click();
+
+    const reconnect = await waitForNextConnect(wilfredForget.gateway, connectCountBeforeForget);
+    expect(readConnectAuth(reconnect)?.token).toBeUndefined();
+    expect(readConnectAuth(reconnect)?.deviceToken).toBeUndefined();
+    expect(readConnectAuth(reconnect)?.password).toBeUndefined();
+    expect(readConnectAuth(reconnect)?.bootstrapToken).toBeUndefined();
+
+    await expect
+      .poll(() =>
+        wilfredForget.page.evaluate(
+          ({ currentKey, currentSessionKey, otherKey, otherSessionKey }) => {
+            const current = JSON.parse(localStorage.getItem(currentKey) ?? "null") as {
+              tokens?: Record<string, { token?: string }>;
+            } | null;
+            const other = JSON.parse(localStorage.getItem(otherKey) ?? "null") as {
+              tokens?: Record<string, { token?: string }>;
+            } | null;
+            return {
+              currentNode: current?.tokens?.node?.token,
+              currentOperator: current?.tokens?.operator,
+              currentSessionToken: sessionStorage.getItem(currentSessionKey),
+              otherOperator: other?.tokens?.operator?.token,
+              otherSessionToken: sessionStorage.getItem(otherSessionKey),
+              unrelatedPreference: localStorage.getItem("unrelated-preference"),
+            };
+          },
+          {
+            currentKey: wilfredStoreKey,
+            currentSessionKey: wilfredSessionTokenKey,
+            otherKey: rositaStoreKey,
+            otherSessionKey: rositaSessionTokenKey,
+          },
+        ),
+      )
+      .toEqual({
+        currentNode: "wilfred-node-token",
+        currentOperator: undefined,
+        currentSessionToken: null,
+        otherOperator: ROSITA_DEVICE_TOKEN,
+        otherSessionToken: "rosita-session-token",
+        unrelatedPreference: "preserved",
+      });
+
+    await wilfredForget.page.reload();
+    const reloadConnect = await wilfredForget.gateway.waitForRequest("connect");
+    expect(readConnectAuth(reloadConnect)?.token).toBeUndefined();
+    expect(readConnectAuth(reloadConnect)?.deviceToken).toBeUndefined();
+    expect(readConnectAuth(reloadConnect)?.password).toBeUndefined();
+    expect(readConnectAuth(reloadConnect)?.bootstrapToken).toBeUndefined();
+  }, 60_000);
 });
