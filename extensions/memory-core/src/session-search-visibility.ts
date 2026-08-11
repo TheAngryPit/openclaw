@@ -230,7 +230,7 @@ export async function filterMemorySearchHitsBySessionVisibility(params: {
       : [];
   }
 
-  const isSessionKeyAllowed = (key: string): boolean => {
+  const isSessionKeyAllowed = (key: string, allowAnchorTranscript = false): boolean => {
     if (!conversationRecall || !anchorSessionKey || !recallAgentId) {
       // A bare global key is local to the selected agent store. Reattach that
       // owner before applying visibility or non-default agents look cross-agent.
@@ -242,8 +242,11 @@ export async function filterMemorySearchHitsBySessionVisibility(params: {
     }
     const candidateEntry = combinedSessionStore[key];
     // Canonical and legacy alias keys can identify one transcript. Exclude the
-    // anchor by transcript identity so an alias cannot re-inject current context.
-    if (key === anchorSessionKey || isSameStoredTranscript(anchorEntry, candidateEntry)) {
+    // live anchor, but let prior archived generations pass the privacy checks below.
+    if (
+      !allowAnchorTranscript &&
+      (key === anchorSessionKey || isSameStoredTranscript(anchorEntry, candidateEntry))
+    ) {
       return false;
     }
     const candidateAgentId = resolveSessionAgentId({ sessionKey: key, config: params.cfg });
@@ -277,12 +280,12 @@ export async function filterMemorySearchHitsBySessionVisibility(params: {
     return [...expanded];
   };
 
-  const areSessionKeysAllowed = (keys: string[]): boolean => {
+  const areSessionKeysAllowed = (keys: string[], allowAnchorTranscript = false): boolean => {
     // Product recall fails closed when aliases disagree about privacy. Ordinary
     // session-tool visibility keeps its existing any-visible-alias behavior.
     return conversationRecall
-      ? expandRecallAliasKeys(keys).every(isSessionKeyAllowed)
-      : keys.some(isSessionKeyAllowed);
+      ? expandRecallAliasKeys(keys).every((key) => isSessionKeyAllowed(key, allowAnchorTranscript))
+      : keys.some((key) => isSessionKeyAllowed(key));
   };
 
   const next: MemorySearchResult[] = [];
@@ -342,7 +345,7 @@ export async function filterMemorySearchHitsBySessionVisibility(params: {
       }
       continue;
     }
-    const allowed = areSessionKeysAllowed(keys);
+    const allowed = areSessionKeysAllowed(keys, identity.archived);
     if (!allowed) {
       continue;
     }
