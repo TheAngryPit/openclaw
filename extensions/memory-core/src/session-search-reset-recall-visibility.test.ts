@@ -141,7 +141,7 @@ describe("reset-generation session search visibility", () => {
 
     expect(filtered).toEqual(hits);
     expect(engineSessions.buildSessionEntry).toHaveBeenCalledTimes(1);
-    expect(engineSessions.buildSessionEntry).toHaveBeenCalledWith("/tmp/sessions/current.jsonl", {
+    expect(engineSessions.buildSessionEntry).toHaveBeenCalledWith("current.jsonl", {
       agentId: "main",
       sessionId: "current",
       sessionKey: anchorSessionKey,

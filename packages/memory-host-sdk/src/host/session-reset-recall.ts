@@ -1,4 +1,4 @@
-export type SessionResetRecallCutoff =
+type SessionResetRecallCutoff =
   | { state: "absent" }
   | { state: "invalid" }
   | { cutoffLine: number; state: "valid" };

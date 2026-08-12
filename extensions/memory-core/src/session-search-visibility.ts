@@ -215,7 +215,7 @@ export async function filterMemorySearchHitsBySessionVisibility(params: {
     if (!recallAgentId || !sessionId || !anchorSessionKey) {
       return Promise.resolve<SessionResetRecallCutoff>({ state: "invalid" });
     }
-    anchorResetCutoffPromise = buildSessionEntry(anchorEntry?.sessionFile || `${sessionId}.jsonl`, {
+    anchorResetCutoffPromise = buildSessionEntry(`${sessionId}.jsonl`, {
       agentId: recallAgentId,
       sessionId,
       sessionKey: anchorSessionKey,
