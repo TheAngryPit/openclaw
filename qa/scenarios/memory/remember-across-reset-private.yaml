@@ -11,7 +11,7 @@ scenario:
     secondary:
       - session-memory.active-memory-qa-channel
       - channels.channel-native-commands
-  objective: Verify current reset continuity and legacy archived-generation recall without admitting shared or other-agent transcripts.
+  objective: Verify SQLite reset continuity and archived-generation recall without admitting deleted, shared, or other-agent transcripts.
   plugins:
     - active-memory
   gatewayConfigPatch:
@@ -42,9 +42,9 @@ scenario:
             maxSummaryChars: 220
   successCriteria:
     - A real `/new` changes the private session lifecycle revision while retaining its durable session id.
-    - A canonical legacy `.jsonl.reset.*` compatibility fixture for that private session is returned by the QA agent memory index.
+    - The real SQLite reset archive for that private session is returned by the QA agent memory index.
     - Active Memory recalls the archived private fact in the same conversation after the current reset.
-    - An indexed shared marker and an independently indexed peer-agent marker are absent from accepted recall evidence.
+    - An indexed deleted private marker, shared marker, and independently indexed peer-agent marker are absent from accepted recall evidence.
   docsRefs:
     - docs/concepts/active-memory.md
     - docs/reference/memory-config.md
@@ -62,13 +62,15 @@ scenario:
     retryCount: 0
     suiteIsolation: isolated
     isolationReason: Resets and indexes isolated QA and peer-agent transcripts while running an ephemeral Gateway child.
-    summary: Reset one private QA conversation, index a canonical legacy reset archive, and prove private-only Active Memory recall in that same conversation.
+    summary: Reset one private QA conversation, index its real SQLite reset archive, and prove private-only Active Memory recall in that same conversation.
     config:
       requiredProviderMode: mock-openai
       conversationId: remember-reset-private
+      deletedConversationId: remember-reset-deleted
       groupConversationId: remember-reset-group
       peerConversationId: remember-reset-peer
       privateFact: lemon pepper wings with blue cheese
+      deletedFact: DELETED-RESET-ONLY cinnamon popcorn with chili salt
       groupFact: GROUP-RESET-ONLY loaded nachos with black olives
       peerFact: PEER-RESET-ONLY smoked tofu skewers
       seedMarker: QA-REMEMBER-RESET-SOURCE-SEEDED
@@ -107,6 +109,9 @@ flow:
         - set: groupDelivery
           value:
             expr: "transport.buildAgentDelivery({ target: `channel:${config.groupConversationId}` })"
+        - set: deletedDelivery
+          value:
+            expr: "transport.buildAgentDelivery({ target: `dm:${config.deletedConversationId}` })"
         - set: peerDelivery
           value:
             expr: "transport.buildAgentDelivery({ target: `dm:${config.peerConversationId}` })"
@@ -116,6 +121,9 @@ flow:
         - set: groupSessionKey
           value:
             expr: "buildAgentSessionKey({ agentId: 'qa', channel: groupDelivery.channel, accountId: transport.accountId, peer: { kind: 'channel', id: groupDelivery.replyTo } })"
+        - set: deletedSessionKey
+          value:
+            expr: "buildAgentSessionKey({ agentId: 'qa', channel: deletedDelivery.channel, accountId: transport.accountId, peer: { kind: 'direct', id: deletedDelivery.replyTo }, dmScope: env.cfg.session?.dmScope, identityLinks: env.cfg.session?.identityLinks })"
         - set: peerSessionKey
           value:
             expr: "buildAgentSessionKey({ agentId: 'peer', channel: peerDelivery.channel, accountId: transport.accountId, peer: { kind: 'direct', id: peerDelivery.replyTo }, dmScope: env.cfg.session?.dmScope, identityLinks: env.cfg.session?.identityLinks })"
@@ -127,6 +135,23 @@ flow:
             - ref: transcriptRoot
             - recursive: true
               force: true
+        - sendInbound:
+            conversation:
+              id:
+                ref: config.deletedConversationId
+              kind: direct
+            senderId:
+              ref: config.deletedConversationId
+            senderName: Remember Reset Deleted Source
+            text:
+              expr: "`Stable QA movie night usual favorite snack preference: ${config.deletedFact}. This source will be deleted. Acknowledge briefly.`"
+        - waitForOutbound:
+            conversation:
+              id:
+                ref: config.deletedConversationId
+              kind: direct
+            timeoutMs:
+              expr: liveTurnTimeoutMs(env, 60000)
         - sendInbound:
             conversation:
               id:
@@ -214,13 +239,33 @@ flow:
         - set: groupSession
           value:
             expr: seededStore[groupSessionKey]
+        - set: deletedSession
+          value:
+            expr: seededStore[deletedSessionKey]
         - set: peerSession
           value:
             expr: peerStore[peerSessionKey]
         - assert:
-            expr: "Boolean(seedSession?.sessionId) && Boolean(groupSession?.sessionId) && Boolean(peerSession?.sessionId)"
+            expr: "Boolean(seedSession?.sessionId) && Boolean(deletedSession?.sessionId) && Boolean(groupSession?.sessionId) && Boolean(peerSession?.sessionId)"
             message:
               expr: "`seeded transcript identities missing: ${JSON.stringify({ source: seedSession, group: groupSession, peer: peerSession })}`"
+        - call: env.gateway.call
+          saveAs: deletedResult
+          args:
+            - sessions.delete
+            - key:
+                ref: deletedSessionKey
+              expectedSessionId:
+                expr: deletedSession.sessionId
+            - timeoutMs:
+                expr: liveTurnTimeoutMs(env, 60000)
+        - assert:
+            expr: "deletedResult?.deleted === true && deletedResult.archived?.some((entry) => String(entry).includes(`${deletedSession.sessionId}.jsonl.deleted.`))"
+            message:
+              expr: "`same-agent private deletion did not produce its archive: ${JSON.stringify(deletedResult)}`"
+        - set: deletedArchiveName
+          value:
+            expr: "path.basename(deletedResult.archived.find((entry) => String(entry).includes(`${deletedSession.sessionId}.jsonl.deleted.`)))"
         - set: resetOutboundIndex
           value:
             expr: "state.getSnapshot().messages.filter((message) => message.direction === 'outbound').length"
@@ -264,27 +309,20 @@ flow:
         - set: qaSessionsDir
           value:
             expr: "path.join(env.gateway.tempRoot, 'state', 'agents', 'qa', 'sessions')"
-        - call: fs.mkdir
+        - call: waitForCondition
+          saveAs: resetArchivePath
           args:
-            - ref: qaSessionsDir
-            - recursive: true
-        - set: resetArchivePath
-          value:
-            expr: "path.join(qaSessionsDir, `${seedSession.sessionId}.jsonl.reset.${new Date().toISOString().replaceAll(':', '-')}`)"
+            - lambda:
+                async: true
+                expr: "await (async () => { const prefix = `${seedSession.sessionId}.jsonl.reset.`; const entries = (await fs.readdir(qaSessionsDir).catch(() => [])).filter((entry) => entry.startsWith(prefix)).toSorted(); return entries.length > 0 ? path.join(qaSessionsDir, entries.at(-1)) : undefined; })()"
+            - expr: liveTurnTimeoutMs(env, 30000)
+            - 250
         - set: resetArchiveName
           value:
             expr: path.basename(resetArchivePath)
-        - set: resetArchiveText
-          value:
-            expr: "[{ type: 'session', version: 3, id: seedSession.sessionId, timestamp: new Date().toISOString(), cwd: env.gateway.workspaceDir }, { type: 'message', id: randomUUID(), parentId: null, timestamp: new Date().toISOString(), message: { role: 'user', content: [{ type: 'text', text: `Stable QA movie night usual favorite snack preference: ${config.privateFact}.` }] } }].map((entry) => JSON.stringify(entry)).join('\\n') + '\\n'"
-        - call: fs.writeFile
-          args:
-            - ref: resetArchivePath
-            - ref: resetArchiveText
-            - utf8
         - assert:
-            expr: "resetArchiveText.includes(config.privateFact)"
-            message: canonical legacy reset archive fixture did not preserve the private fact
+            expr: "resetArchiveName.startsWith(`${seedSession.sessionId}.jsonl.reset.`)"
+            message: real SQLite reset did not produce the expected reset archive
         - call: readConfigSnapshot
           saveAs: preconditionConfig
           args:
@@ -389,6 +427,27 @@ flow:
             - timeoutMs:
                 expr: liveTurnTimeoutMs(env, 60000)
               json: true
+        - call: runQaCli
+          saveAs: deletedSearch
+          args:
+            - ref: env
+            - - memory
+              - search
+              - --agent
+              - qa
+              - --json
+              - --query
+              - expr: config.deletedFact
+              - --max-results
+              - "50"
+              - --min-score
+              - "0"
+            - timeoutMs:
+                expr: liveTurnTimeoutMs(env, 60000)
+              json: true
+        - set: deletedSearchText
+          value:
+            expr: JSON.stringify(deletedSearch)
         - set: groupSearchText
           value:
             expr: JSON.stringify(groupSearch)
@@ -396,6 +455,10 @@ flow:
             expr: "groupSearchText.includes(config.groupFact) && groupSearchText.includes(groupSession.sessionId)"
             message:
               expr: "`QA index did not contain the seeded group transcript: ${groupSearchText}`"
+        - assert:
+            expr: "deletedSearchText.includes(config.deletedFact) && deletedSearchText.includes(deletedArchiveName)"
+            message:
+              expr: "`QA index did not contain the deleted private control: ${deletedSearchText}`"
         - assert:
             expr: "qaSearchText.includes(config.privateFact) && qaSearchText.includes(resetArchiveName)"
             message:
@@ -477,10 +540,10 @@ flow:
             message:
               expr: "`Active Memory helper did not accept the archived private fact: ${helperTranscriptText}`"
         - assert:
-            expr: "!helperTranscriptText.includes(config.groupFact) && !helperTranscriptText.includes(groupSession.sessionId) && !helperTranscriptText.includes(config.peerFact) && !helperTranscriptText.includes(peerSession.sessionId)"
+            expr: "!helperTranscriptText.includes(config.deletedFact) && !helperTranscriptText.includes(deletedArchiveName) && !helperTranscriptText.includes(config.groupFact) && !helperTranscriptText.includes(groupSession.sessionId) && !helperTranscriptText.includes(config.peerFact) && !helperTranscriptText.includes(peerSession.sessionId)"
             message:
               expr: "`Active Memory helper crossed a shared or peer-agent boundary: ${helperTranscriptText}`"
         - assert:
             expr: "recallRequests.some((request) => String(request.allInputText ?? '').includes('Remember across conversations QA check') && request.plannedToolName === 'memory_search')"
             message: deterministic post-reset recall did not issue memory_search
-      detailsExpr: "JSON.stringify({ verdict: 'PASS', scenario: 'remember-across-reset-private', channel: 'qa-channel', provider: env.providerMode, gateway: 'ephemeral-child', lifecycleReset: resetSession.lifecycleRevision !== seedSession.lifecycleRevision, durableSessionRetained: resetSession.sessionId === seedSession.sessionId, legacyResetArchiveFixture: true, resetArchiveIndexed: qaSearchText.includes(resetArchiveName), archivedHitAccepted: helperTranscriptText.includes(resetArchiveName), groupTranscriptIndexed: groupSearchText.includes(groupSession.sessionId), peerTranscriptIndexed: JSON.stringify(peerSearch).includes(peerSession.sessionId), privateRecallDelivered: normalizeLowercaseStringOrEmpty(recallOutbound.text).includes(normalizeLowercaseStringOrEmpty(config.expectedNeedle)), sharedExcluded: !helperTranscriptText.includes(groupSession.sessionId), peerAgentExcluded: !helperTranscriptText.includes(peerSession.sessionId), reply: recallOutbound.text })"
+      detailsExpr: "JSON.stringify({ verdict: 'PASS', scenario: 'remember-across-reset-private', channel: 'qa-channel', provider: env.providerMode, gateway: 'ephemeral-child', lifecycleReset: resetSession.lifecycleRevision !== seedSession.lifecycleRevision, durableSessionRetained: resetSession.sessionId === seedSession.sessionId, sqliteResetArchive: true, resetArchiveIndexed: qaSearchText.includes(resetArchiveName), archivedHitAccepted: helperTranscriptText.includes(resetArchiveName), deletedTranscriptIndexed: deletedSearchText.includes(deletedArchiveName), deletedTranscriptExcluded: !helperTranscriptText.includes(deletedArchiveName), groupTranscriptIndexed: groupSearchText.includes(groupSession.sessionId), peerTranscriptIndexed: JSON.stringify(peerSearch).includes(peerSession.sessionId), privateRecallDelivered: normalizeLowercaseStringOrEmpty(recallOutbound.text).includes(normalizeLowercaseStringOrEmpty(config.expectedNeedle)), sharedExcluded: !helperTranscriptText.includes(groupSession.sessionId), peerAgentExcluded: !helperTranscriptText.includes(peerSession.sessionId), reply: recallOutbound.text })"
