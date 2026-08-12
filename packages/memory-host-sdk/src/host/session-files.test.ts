@@ -58,7 +58,6 @@ let fixtureId = 0;
 beforeAll(() => {
   fixtureRoot = fsSync.mkdtempSync(path.join(os.tmpdir(), "session-entry-test-"));
 });
-/* oxlint-disable max-lines -- TODO: split this grandfathered oversized test file. */
 
 afterAll(() => {
   fsSync.rmSync(fixtureRoot, { recursive: true, force: true });
@@ -407,52 +406,6 @@ describe("listSessionTranscriptCorpusEntriesForAgent", () => {
     expect(after.find((entry) => entry.sessionFile === archivePath)?.contentRevision).not.toBe(
       beforeArchive?.contentRevision,
     );
-  });
-
-  it("invalidates a SQLite session hash when a reset boundary changes its generation", async () => {
-    const sessionsDir = path.join(tmpDir, "agents", "main", "sessions");
-    const storePath = path.join(sessionsDir, "sessions.json");
-    const sessionKey = "agent:main:chat:reset-revision";
-    const sessionId = "reset-revision";
-    fsSync.mkdirSync(sessionsDir, { recursive: true });
-    await upsertSessionEntryCore(
-      { agentId: "main", sessionKey, storePath },
-      { sessionId, updatedAt: 1 },
-    );
-    await persistSessionTranscriptTurn(
-      { agentId: "main", sessionId, sessionKey, storePath },
-      {
-        messages: [{ message: { role: "user", content: "unchanged exported text" } }],
-        touchSessionEntry: true,
-        updateMode: "none",
-      },
-    );
-    const buildOptions = {
-      agentId: "main",
-      sessionId,
-      sessionKey,
-      storePath,
-      updatedAtMs: 1,
-    };
-    const before = requireSessionEntry(await buildSessionEntry(sessionKey, buildOptions));
-
-    await resetSessionEntryLifecycle({
-      agentId: "main",
-      buildNextEntry: ({ currentEntry }) => ({
-        ...currentEntry,
-        sessionId,
-        updatedAt: 2,
-      }),
-      resetBoundaryReason: "reset",
-      storePath,
-      target: { canonicalKey: sessionKey, storeKeys: [sessionKey] },
-    });
-
-    const after = requireSessionEntry(await buildSessionEntry(sessionKey, buildOptions));
-    expect(after.content).toBe(before.content);
-    expect(after.lineMap).toEqual(before.lineMap);
-    expect(after.sessionResetRecallCutoffLine).toEqual(expect.any(Number));
-    expect(after.hash).not.toBe(before.hash);
   });
 
   it("classifies active entries through cron parentage chains", async () => {

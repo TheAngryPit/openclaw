@@ -17,6 +17,8 @@ import {
   hashText,
   INVALID_PROJECT_ANNOTATION_KEY,
   MEMORY_EMBEDDING_CACHE_TABLE,
+  MEMORY_INDEX_CHUNK_PROVENANCE_TABLE,
+  MEMORY_INDEX_CHUNK_RECALL_METADATA_TABLE,
   MEMORY_INDEX_FTS_TABLE,
   MEMORY_INDEX_VECTOR_TABLE,
   remapChunkLines,
@@ -24,10 +26,8 @@ import {
   runWithConcurrency,
   stripMemoryAnnotationCarriers,
   type MemoryChunk,
-  type MemorySource,
   type MemoryEntryProvenance,
-  MEMORY_INDEX_CHUNK_PROVENANCE_TABLE,
-  MEMORY_INDEX_CHUNK_RECALL_METADATA_TABLE,
+  type MemorySource,
 } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import { MAX_TIMER_TIMEOUT_MS, resolveTimerTimeoutMs } from "openclaw/plugin-sdk/number-runtime";
 import { sleepWithAbort } from "openclaw/plugin-sdk/runtime-env";
@@ -38,34 +38,6 @@ import {
   recordMemoryBatchFailure,
   resetMemoryBatchFailureState,
 } from "./manager-batch-state.js";
-
-export function chunkSessionContentAtResetBoundary(params: {
-  content: string;
-  cutoffLine?: number;
-  lineMap?: readonly number[];
-  chunking: { tokens: number; overlap: number; perEntry?: boolean };
-}): MemoryChunk[] {
-  const cutoffIndex =
-    params.cutoffLine !== undefined && params.lineMap
-      ? params.lineMap.findIndex((line) => line >= params.cutoffLine!)
-      : -1;
-  if (cutoffIndex <= 0) {
-    return chunkMarkdown(params.content, params.chunking);
-  }
-  const lines = params.content.split("\n");
-  const chunkPartition = (content: string, lineOffset: number) => {
-    const chunks = chunkMarkdown(content, params.chunking);
-    for (const chunk of chunks) {
-      chunk.startLine += lineOffset;
-      chunk.endLine += lineOffset;
-    }
-    return chunks;
-  };
-  return [
-    ...chunkPartition(lines.slice(0, cutoffIndex).join("\n"), 0),
-    ...chunkPartition(lines.slice(cutoffIndex).join("\n"), cutoffIndex),
-  ];
-}
 import {
   collectMemoryCachedEmbeddings,
   loadMemoryEmbeddingCache,
@@ -87,6 +59,7 @@ import {
   resolveMemoryIndexProviderIdentities,
   type MemoryIndexProviderIdentity,
 } from "./manager-reindex-state.js";
+import { chunkSessionContentAtResetBoundary } from "./manager-reset-chunk-boundary.js";
 import {
   MemoryManagerSyncOps,
   type MemoryIndexWorkItem,

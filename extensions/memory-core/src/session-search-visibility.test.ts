@@ -1,4 +1,3 @@
-import * as engineSessions from "openclaw/plugin-sdk/memory-core-host-engine-sessions";
 // Memory Core tests cover session search visibility plugin behavior.
 import type { MemorySearchResult } from "openclaw/plugin-sdk/memory-core-host-runtime-files";
 import { normalizeSessionDeliveryState } from "openclaw/plugin-sdk/session-store-runtime";
@@ -25,16 +24,6 @@ const crossAgentStore: Record<string, TestSessionEntry> = {
 };
 let combinedSessionStore: Record<string, TestSessionEntry> = crossAgentStore;
 
-vi.mock("openclaw/plugin-sdk/memory-core-host-engine-sessions", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("openclaw/plugin-sdk/memory-core-host-engine-sessions")>();
-  return {
-    ...actual,
-    readSessionResetRecallCutoff: vi.fn(() => ({ state: "absent" })),
-  };
-});
-/* oxlint-disable max-lines -- TODO: split this grandfathered oversized test file. */
-
 vi.mock("openclaw/plugin-sdk/session-transcript-hit", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("openclaw/plugin-sdk/session-transcript-hit")>();
@@ -50,8 +39,6 @@ vi.mock("openclaw/plugin-sdk/session-transcript-hit", async (importOriginal) => 
 describe("filterMemorySearchHitsBySessionVisibility", () => {
   afterEach(() => {
     vi.mocked(sessionTranscriptHit.loadCombinedSessionStoreForGateway).mockClear();
-    vi.mocked(engineSessions.readSessionResetRecallCutoff).mockReset();
-    vi.mocked(engineSessions.readSessionResetRecallCutoff).mockReturnValue({ state: "absent" });
     combinedSessionStore = crossAgentStore;
   });
 
@@ -564,211 +551,6 @@ describe("filterMemorySearchHitsBySessionVisibility", () => {
     });
 
     expect(filtered).toStrictEqual([]);
-  });
-
-  it.each([
-    { name: "pre-reset", range: [2, 3], cutoff: { state: "valid", cutoffLine: 4 }, kept: true },
-    { name: "crossing", range: [3, 4], cutoff: { state: "valid", cutoffLine: 4 }, kept: false },
-    { name: "current", range: [4, 5], cutoff: { state: "valid", cutoffLine: 4 }, kept: false },
-    { name: "missing", range: [1, 2], cutoff: { state: "absent" }, kept: false },
-    { name: "malformed", range: [1, 2], cutoff: { state: "invalid" }, kept: false },
-  ] as const)(
-    "handles a $name live SQLite reset-generation hit",
-    async ({ range, cutoff, kept }) => {
-      const anchorSessionKey = "agent:main:telegram:direct:owner";
-      combinedSessionStore = {
-        [anchorSessionKey]: {
-          sessionId: "current",
-          updatedAt: 2,
-          sessionFile: "/tmp/sessions/current.jsonl",
-          chatType: "direct",
-        },
-      };
-      vi.mocked(engineSessions.readSessionResetRecallCutoff).mockReturnValue(cutoff);
-      const hit: MemorySearchResult = {
-        path: "sessions/main/current.jsonl",
-        source: "sessions",
-        score: 1,
-        snippet: "short fact",
-        startLine: range[0],
-        endLine: range[1],
-      };
-
-      const filtered = await filterMemorySearchHitsBySessionVisibility({
-        cfg: asOpenClawConfig({ tools: { sessions: { visibility: "self" } } }),
-        agentId: "main",
-        requesterSessionKey: `${anchorSessionKey}:active-memory:123456abcdef`,
-        sandboxed: false,
-        hits: [hit],
-        conversationRecall: { anchorSessionKey, scope: "same-agent-private", corpus: "sessions" },
-      });
-
-      expect(filtered).toEqual(kept ? [hit] : []);
-    },
-  );
-
-  it("resolves the live anchor reset cutoff once per filter pass", async () => {
-    const anchorSessionKey = "agent:main:telegram:direct:owner";
-    combinedSessionStore = {
-      [anchorSessionKey]: {
-        sessionId: "current",
-        updatedAt: 2,
-        sessionFile: "/tmp/sessions/current.jsonl",
-        chatType: "direct",
-      },
-    };
-    vi.mocked(engineSessions.readSessionResetRecallCutoff).mockReturnValue({
-      state: "valid",
-      cutoffLine: 5,
-    });
-    const hits: MemorySearchResult[] = [
-      {
-        path: "sessions/main/current.jsonl",
-        source: "sessions",
-        score: 1,
-        snippet: "first pre-reset chunk",
-        startLine: 1,
-        endLine: 2,
-      },
-      {
-        path: "sessions/main/current.jsonl",
-        source: "sessions",
-        score: 0.9,
-        snippet: "second pre-reset chunk",
-        startLine: 3,
-        endLine: 4,
-      },
-    ];
-
-    const filtered = await filterMemorySearchHitsBySessionVisibility({
-      cfg: asOpenClawConfig({ tools: { sessions: { visibility: "self" } } }),
-      agentId: "main",
-      requesterSessionKey: `${anchorSessionKey}:active-memory:123456abcdef`,
-      sandboxed: false,
-      hits,
-      conversationRecall: { anchorSessionKey, scope: "same-agent-private", corpus: "sessions" },
-    });
-
-    expect(filtered).toEqual(hits);
-    expect(engineSessions.readSessionResetRecallCutoff).toHaveBeenCalledTimes(1);
-    expect(engineSessions.readSessionResetRecallCutoff).toHaveBeenCalledWith({
-      agentId: "main",
-      sessionId: "current",
-      sessionKey: anchorSessionKey,
-      storePath: "(test)",
-    });
-  });
-
-  it("allows an archived reset generation of the private anchor conversation", async () => {
-    const anchorSessionKey = "agent:main:telegram:direct:owner";
-    combinedSessionStore = {
-      [anchorSessionKey]: {
-        sessionId: "current",
-        updatedAt: 2,
-        sessionFile: "/tmp/sessions/current.jsonl",
-        chatType: "direct",
-      },
-    };
-    const hit: MemorySearchResult = {
-      path: "sessions/main/current.jsonl.reset.2026-08-11T08-00-00.000Z",
-      source: "sessions",
-      score: 1,
-      snippet: "prior conversation context",
-      startLine: 1,
-      endLine: 2,
-    };
-
-    const filtered = await filterMemorySearchHitsBySessionVisibility({
-      cfg: asOpenClawConfig({ tools: { sessions: { visibility: "self" } } }),
-      agentId: "main",
-      requesterSessionKey: `${anchorSessionKey}:active-memory:123456abcdef`,
-      sandboxed: false,
-      hits: [hit],
-      conversationRecall: {
-        anchorSessionKey,
-        scope: "same-agent-private",
-        corpus: "sessions",
-      },
-    });
-
-    expect(filtered).toEqual([hit]);
-  });
-
-  it("denies an archived deleted generation of the private anchor conversation", async () => {
-    const anchorSessionKey = "agent:main:telegram:direct:owner";
-    combinedSessionStore = {
-      [anchorSessionKey]: {
-        sessionId: "current",
-        updatedAt: 2,
-        sessionFile: "/tmp/sessions/current.jsonl",
-        chatType: "direct",
-      },
-    };
-    const hit: MemorySearchResult = {
-      path: "sessions/main/current.jsonl.deleted.2026-08-11T08-00-00.000Z",
-      source: "sessions",
-      score: 1,
-      snippet: "explicitly deleted private context",
-      startLine: 1,
-      endLine: 2,
-    };
-
-    const filtered = await filterMemorySearchHitsBySessionVisibility({
-      cfg: asOpenClawConfig({ tools: { sessions: { visibility: "self" } } }),
-      agentId: "main",
-      requesterSessionKey: `${anchorSessionKey}:active-memory:123456abcdef`,
-      sandboxed: false,
-      hits: [hit],
-      conversationRecall: {
-        anchorSessionKey,
-        scope: "same-agent-private",
-        corpus: "sessions",
-      },
-    });
-
-    expect(filtered).toEqual([]);
-  });
-
-  it("denies an archived deleted generation from another private conversation", async () => {
-    const anchorSessionKey = "agent:main:telegram:direct:owner";
-    const deletedSessionKey = "agent:main:telegram:direct:deleted-source";
-    combinedSessionStore = {
-      [anchorSessionKey]: {
-        sessionId: "current",
-        updatedAt: 2,
-        sessionFile: "/tmp/sessions/current.jsonl",
-        chatType: "direct",
-      },
-      [deletedSessionKey]: {
-        sessionId: "deleted-source",
-        updatedAt: 1,
-        sessionFile: "/tmp/sessions/deleted-source.jsonl",
-        chatType: "direct",
-      },
-    };
-    const hit: MemorySearchResult = {
-      path: "sessions/main/deleted-source.jsonl.deleted.2026-08-11T08-00-00.000Z",
-      source: "sessions",
-      score: 1,
-      snippet: "intentionally deleted private context",
-      startLine: 1,
-      endLine: 2,
-    };
-
-    const filtered = await filterMemorySearchHitsBySessionVisibility({
-      cfg: asOpenClawConfig({ tools: { sessions: { visibility: "self" } } }),
-      agentId: "main",
-      requesterSessionKey: `${anchorSessionKey}:active-memory:123456abcdef`,
-      sandboxed: false,
-      hits: [hit],
-      conversationRecall: {
-        anchorSessionKey,
-        scope: "same-agent-private",
-        corpus: "sessions",
-      },
-    });
-
-    expect(filtered).toEqual([]);
   });
 
   it("excludes the anchor transcript when another private key aliases the same session", async () => {

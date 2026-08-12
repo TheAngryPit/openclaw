@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chunkSessionContentAtResetBoundary } from "./manager-embedding-ops.js";
+import { chunkSessionContentAtResetBoundary } from "./manager-reset-chunk-boundary.js";
 
 describe("chunkSessionContentAtResetBoundary", () => {
   it("never overlaps a pre-reset chunk into the current generation", () => {
