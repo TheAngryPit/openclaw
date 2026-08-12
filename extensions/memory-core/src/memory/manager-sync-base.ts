@@ -67,6 +67,7 @@ export type MemoryIndexEntry = {
   content?: string;
   contentText?: string;
   lineMap?: number[];
+  sessionResetRecallCutoffLine?: number;
   lineProvenance?: MemoryEntryProvenance[];
 };
 

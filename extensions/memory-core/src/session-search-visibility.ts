@@ -1,3 +1,4 @@
+import { readSessionResetRecallCutoff } from "openclaw/plugin-sdk/memory-core-host-engine-sessions";
 // Memory Core plugin module implements session search visibility behavior.
 import type { OpenClawConfig } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import type { MemorySearchResult } from "openclaw/plugin-sdk/memory-core-host-runtime-files";
@@ -186,7 +187,7 @@ export async function filterMemorySearchHitsBySessionVisibility(params: {
       })
     : null;
 
-  const { store: combinedSessionStore } = loadCombinedSessionStoreForGateway(
+  const { store: combinedSessionStore, storePath } = loadCombinedSessionStoreForGateway(
     params.cfg,
     scopedAgentId ? { agentId: scopedAgentId } : {},
   );
@@ -200,6 +201,29 @@ export async function filterMemorySearchHitsBySessionVisibility(params: {
     ? resolveSessionAgentId({ sessionKey: anchorSessionKey, config: params.cfg })
     : undefined;
   const anchorEntry = anchorSessionKey ? combinedSessionStore[anchorSessionKey] : undefined;
+  let anchorResetCutoff: ReturnType<typeof readSessionResetRecallCutoff> | undefined;
+  let anchorResetCutoffResolved = false;
+  const resolveAnchorResetCutoff = () => {
+    if (anchorResetCutoffResolved) {
+      return anchorResetCutoff;
+    }
+    anchorResetCutoffResolved = true;
+    const sessionId = anchorEntry?.sessionId?.trim();
+    if (!recallAgentId || !sessionId || !anchorSessionKey) {
+      return undefined;
+    }
+    try {
+      anchorResetCutoff = readSessionResetRecallCutoff({
+        agentId: recallAgentId,
+        sessionId,
+        sessionKey: anchorSessionKey,
+        storePath,
+      });
+    } catch {
+      anchorResetCutoff = { state: "invalid" };
+    }
+    return anchorResetCutoff;
+  };
   const recallAuthorized = Boolean(
     conversationRecall &&
     !params.sandboxed &&
@@ -348,7 +372,23 @@ export async function filterMemorySearchHitsBySessionVisibility(params: {
       }
       continue;
     }
-    const allowed = areSessionKeysAllowed(keys, identity.archiveReason === "reset");
+    let allowResetAnchor = false;
+    const anchorSessionId = anchorEntry?.sessionId?.trim();
+    if (
+      conversationRecall &&
+      !identity.archived &&
+      recallAgentId &&
+      anchorSessionId &&
+      identity.stem === anchorSessionId &&
+      normalizedOwnerAgentId === normalizeAgentIdForCompare(recallAgentId)
+    ) {
+      const cutoff = resolveAnchorResetCutoff();
+      allowResetAnchor = cutoff?.state === "valid" && hit.endLine < cutoff.cutoffLine;
+    }
+    const allowed = areSessionKeysAllowed(
+      keys,
+      identity.archiveReason === "reset" || allowResetAnchor,
+    );
     if (!allowed) {
       continue;
     }

@@ -2,6 +2,10 @@
 
 export { extractKeywords, isQueryStopWordToken } from "./host/query-expansion.js";
 export {
+  resolveSessionResetRecallCutoff,
+  type SessionResetRecallCutoff,
+} from "./host/session-reset-recall.js";
+export {
   buildSessionEntry,
   listSessionFilesForAgent,
   listSessionTranscriptCorpusEntriesForAgent,
@@ -9,6 +13,7 @@ export {
   loadSessionTranscriptClassificationForAgent,
   normalizeSessionTranscriptPathForComparison,
   parseCanonicalSessionSyncTargetFromPath,
+  readSessionResetRecallCutoff,
   resolveSessionIdentityForTranscriptFile,
   resolveSessionFileForSyncTarget,
   sessionPathForFile,

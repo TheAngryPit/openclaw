@@ -38,6 +38,34 @@ import {
   recordMemoryBatchFailure,
   resetMemoryBatchFailureState,
 } from "./manager-batch-state.js";
+
+export function chunkSessionContentAtResetBoundary(params: {
+  content: string;
+  cutoffLine?: number;
+  lineMap?: readonly number[];
+  chunking: { tokens: number; overlap: number; perEntry?: boolean };
+}): MemoryChunk[] {
+  const cutoffIndex =
+    params.cutoffLine !== undefined && params.lineMap
+      ? params.lineMap.findIndex((line) => line >= params.cutoffLine!)
+      : -1;
+  if (cutoffIndex <= 0) {
+    return chunkMarkdown(params.content, params.chunking);
+  }
+  const lines = params.content.split("\n");
+  const chunkPartition = (content: string, lineOffset: number) => {
+    const chunks = chunkMarkdown(content, params.chunking);
+    for (const chunk of chunks) {
+      chunk.startLine += lineOffset;
+      chunk.endLine += lineOffset;
+    }
+    return chunks;
+  };
+  return [
+    ...chunkPartition(lines.slice(0, cutoffIndex).join("\n"), 0),
+    ...chunkPartition(lines.slice(cutoffIndex).join("\n"), cutoffIndex),
+  ];
+}
 import {
   collectMemoryCachedEmbeddings,
   loadMemoryEmbeddingCache,
@@ -1121,11 +1149,16 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
       (normalizedEntryPath === "MEMORY.md" || normalizedEntryPath === "USER.md");
     const indexingContent =
       options.source === "memory" ? stripMemoryAnnotationCarriers(content) : content;
+    const chunkOptions = { ...this.settings.chunking, perEntry };
     const baseChunks = filterNonEmptyMemoryChunks(
-      chunkMarkdown(indexingContent, {
-        ...this.settings.chunking,
-        perEntry,
-      }),
+      options.source === "sessions"
+        ? chunkSessionContentAtResetBoundary({
+            content: indexingContent,
+            cutoffLine: entry.sessionResetRecallCutoffLine,
+            lineMap: entry.lineMap,
+            chunking: chunkOptions,
+          })
+        : chunkMarkdown(indexingContent, chunkOptions),
     );
     for (const chunk of baseChunks) {
       chunk.provenance = this.resolveChunkProvenance(

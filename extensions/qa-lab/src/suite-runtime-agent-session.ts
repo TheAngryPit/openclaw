@@ -2,6 +2,7 @@
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
+import { resolveSessionResetRecallCutoff } from "openclaw/plugin-sdk/memory-core-host-engine-sessions";
 import {
   listSessionEntries,
   loadTranscriptEventsSync,
@@ -61,11 +62,14 @@ type QaSessionTranscriptSummary = {
   lastAssistantStopReason?: string;
   lastAssistantToolNames?: string[];
   lastMessageRole?: string;
+  resetRecallCutoffLine?: number;
+  probeTextEndLine?: number;
 };
 
 type QaSessionTranscriptSummaryOptions = {
   afterEventCursor?: number;
   allowEmpty?: boolean;
+  probeText?: string;
 };
 
 function isSessionStoreFtsSettleRace(error: unknown) {
@@ -427,7 +431,21 @@ async function readSessionTranscriptSummary(
   if (selectedEvents.length === 0 && options.allowEmpty === true) {
     return emptySessionTranscriptSummary(events.length);
   }
-  return summarizeSessionTranscriptEvents(selectedEvents, normalizedSessionKey, events.length);
+  const summary = summarizeSessionTranscriptEvents(
+    selectedEvents,
+    normalizedSessionKey,
+    events.length,
+  );
+  const cutoff = resolveSessionResetRecallCutoff(events);
+  const probeText = options.probeText?.trim();
+  const probeTextEndLine = probeText
+    ? events.findLastIndex((event) => JSON.stringify(event).includes(probeText)) + 1
+    : 0;
+  return {
+    ...summary,
+    ...(cutoff.state === "valid" ? { resetRecallCutoffLine: cutoff.cutoffLine } : {}),
+    ...(probeTextEndLine > 0 ? { probeTextEndLine } : {}),
+  };
 }
 
 export {

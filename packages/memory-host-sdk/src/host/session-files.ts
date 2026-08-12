@@ -31,6 +31,7 @@ import {
   stripInternalRuntimeContext,
 } from "./openclaw-runtime-session.js";
 import { retryTransientMemoryRead } from "./read-retry.js";
+import { resolveSessionResetRecallCutoff } from "./session-reset-recall.js";
 import {
   listSessionTranscriptCorpusEntriesForAgent,
   listSessionTranscriptCorpusEntriesForAgentSync,
@@ -63,6 +64,8 @@ export type SessionFileEntry = {
   content: string;
   /** Maps each content line (0-indexed) to its 1-indexed JSONL source line. */
   lineMap: number[];
+  /** Internal hard boundary: raw lines below this value belong to reset history. */
+  sessionResetRecallCutoffLine?: number;
   /** Maps each content line (0-indexed) to epoch ms; 0 means unknown timestamp. */
   messageTimestampsMs: number[];
   /** Provenance aligned one-for-one with exported content lines. */
@@ -93,6 +96,14 @@ export type BuildSessionEntryOptions = {
   /** Override for tests or specialized callers that need a tighter parse yield cadence. */
   parseYieldEveryLines?: number;
 };
+
+/** Recomputes the latest SQLite reset boundary for authorization-time race checks. */
+export function readSessionResetRecallCutoff(
+  opts: Required<Pick<BuildSessionEntryOptions, "agentId" | "sessionId" | "storePath">> &
+    Pick<BuildSessionEntryOptions, "sessionKey">,
+) {
+  return resolveSessionResetRecallCutoff(loadTranscriptEventsSync(opts));
+}
 
 export type SessionTranscriptClassification = {
   dreamingNarrativeTranscriptPaths: ReadonlySet<string>;
@@ -775,11 +786,13 @@ export async function buildSessionEntry(
           const records = loadTranscriptEventsSync({
             ...sqliteIdentity,
           });
+          const resetRecallCutoff = resolveSessionResetRecallCutoff(records);
           const raw = serializeTranscriptEvents(records);
           return {
             mtimeMs: opts.updatedAtMs ?? stats.maxSeq,
             path: sessionPathForSessionIdentity(sqliteIdentity.agentId, sqliteIdentity.sessionId),
             raw,
+            resetRecallCutoff,
             size: stats.sizeBytes,
           };
         })()
@@ -971,10 +984,15 @@ export async function buildSessionEntry(
           "\n" +
           messageTimestampsMs.join(",") +
           "\n" +
-          JSON.stringify(lineProvenance),
+          JSON.stringify(lineProvenance) +
+          "\n" +
+          JSON.stringify(rawSource?.resetRecallCutoff ?? { state: "absent" }),
       ),
       content,
       lineMap,
+      ...(rawSource?.resetRecallCutoff.state === "valid"
+        ? { sessionResetRecallCutoffLine: rawSource.resetRecallCutoff.cutoffLine }
+        : {}),
       messageTimestampsMs,
       lineProvenance,
       sessionKind,

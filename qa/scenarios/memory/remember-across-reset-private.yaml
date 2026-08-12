@@ -11,7 +11,7 @@ scenario:
     secondary:
       - session-memory.active-memory-qa-channel
       - channels.channel-native-commands
-  objective: Verify SQLite reset continuity and archived-generation recall without admitting deleted, shared, or other-agent transcripts.
+  objective: Verify SQLite reset continuity and pre-reset generation recall without admitting deleted, shared, or other-agent transcripts.
   plugins:
     - active-memory
   gatewayConfigPatch:
@@ -41,9 +41,9 @@ scenario:
             queryMode: message
             maxSummaryChars: 220
   successCriteria:
-    - A real `/new` changes the private session lifecycle revision while retaining its durable session id.
-    - The real SQLite reset archive for that private session is returned by the QA agent memory index.
-    - Active Memory recalls the archived private fact in the same conversation after the current reset.
+    - A real Gateway session reset changes the private lifecycle revision while retaining its durable session id.
+    - The pre-reset fact is indexed under the canonical SQLite session identity before the current generation cutoff.
+    - Active Memory recalls the pre-reset private fact in the same conversation after the current reset.
     - An indexed deleted private marker, shared marker, and independently indexed peer-agent marker are absent from accepted recall evidence.
   docsRefs:
     - docs/concepts/active-memory.md
@@ -62,7 +62,7 @@ scenario:
     retryCount: 0
     suiteIsolation: isolated
     isolationReason: Resets and indexes isolated QA and peer-agent transcripts while running an ephemeral Gateway child.
-    summary: Reset one private QA conversation, index its real SQLite reset archive, and prove private-only Active Memory recall in that same conversation.
+    summary: Reset one private QA conversation, index its canonical SQLite transcript generations, and prove private-only Active Memory recall in that same conversation.
     config:
       requiredProviderMode: mock-openai
       conversationId: remember-reset-private
@@ -74,14 +74,13 @@ scenario:
       groupFact: GROUP-RESET-ONLY loaded nachos with black olives
       peerFact: PEER-RESET-ONLY smoked tofu skewers
       seedMarker: QA-REMEMBER-RESET-SOURCE-SEEDED
-      resetMarker: QA-REMEMBER-RESET-READY
       recallPrompt: "Remember across conversations QA check: what snack do I usually want for QA movie night? Reply in one short sentence."
       expectedNeedle: lemon pepper wings with blue cheese
       transcriptDir: qa-remember-across-reset-private
 
 flow:
   steps:
-    - name: recalls the archived private generation without crossing ownership boundaries
+    - name: recalls the pre-reset private generation without crossing ownership boundaries
       actions:
         - assert:
             expr: "env.providerMode === config.requiredProviderMode"
@@ -172,6 +171,38 @@ flow:
             timeoutMs:
               expr: liveTurnTimeoutMs(env, 60000)
         - sendInbound:
+            conversation: { id: { ref: config.conversationId }, kind: direct }
+            senderId: { ref: config.conversationId }
+            senderName: Remember Reset Source
+            text: "Filler turn one after the saved fact. Reply briefly."
+        - waitForOutbound:
+            conversation: { id: { ref: config.conversationId }, kind: direct }
+            timeoutMs: { expr: "liveTurnTimeoutMs(env, 60000)" }
+        - sendInbound:
+            conversation: { id: { ref: config.conversationId }, kind: direct }
+            senderId: { ref: config.conversationId }
+            senderName: Remember Reset Source
+            text: "Filler turn two after the saved fact. Reply briefly."
+        - waitForOutbound:
+            conversation: { id: { ref: config.conversationId }, kind: direct }
+            timeoutMs: { expr: "liveTurnTimeoutMs(env, 60000)" }
+        - sendInbound:
+            conversation: { id: { ref: config.conversationId }, kind: direct }
+            senderId: { ref: config.conversationId }
+            senderName: Remember Reset Source
+            text: "Filler turn three after the saved fact. Reply briefly."
+        - waitForOutbound:
+            conversation: { id: { ref: config.conversationId }, kind: direct }
+            timeoutMs: { expr: "liveTurnTimeoutMs(env, 60000)" }
+        - sendInbound:
+            conversation: { id: { ref: config.conversationId }, kind: direct }
+            senderId: { ref: config.conversationId }
+            senderName: Remember Reset Source
+            text: "Filler turn four after the saved fact. Reply briefly."
+        - waitForOutbound:
+            conversation: { id: { ref: config.conversationId }, kind: direct }
+            timeoutMs: { expr: "liveTurnTimeoutMs(env, 60000)" }
+        - sendInbound:
             conversation:
               id:
                 ref: config.groupConversationId
@@ -250,6 +281,40 @@ flow:
             message:
               expr: "`seeded transcript identities missing: ${JSON.stringify({ source: seedSession, group: groupSession, peer: peerSession })}`"
         - call: env.gateway.call
+          saveAs: resetResult
+          args:
+            - sessions.reset
+            - key:
+                ref: sourceSessionKey
+              reason: reset
+            - timeoutMs:
+                expr: liveTurnTimeoutMs(env, 60000)
+        - set: resetSession
+          value:
+            expr: resetResult.entry
+        - assert:
+            expr: "resetResult?.ok === true && Boolean(resetSession?.lifecycleRevision) && resetSession.lifecycleRevision !== seedSession.lifecycleRevision"
+            message:
+              expr: "`gateway session reset did not advance lifecycle: ${JSON.stringify({ result: resetResult, before: seedSession?.lifecycleRevision })}`"
+        - assert:
+            expr: resetSession?.sessionId === seedSession.sessionId
+            message:
+              expr: "`durable session id changed across reset: ${JSON.stringify({ before: seedSession?.sessionId, after: resetSession?.sessionId })}`"
+        - call: readSessionTranscriptSummary
+          saveAs: resetTranscript
+          args:
+            - ref: env
+            - ref: sourceSessionKey
+            - probeText:
+                ref: config.privateFact
+        - assert:
+            expr: "Number.isInteger(resetTranscript.probeTextEndLine) && Number.isInteger(resetTranscript.resetRecallCutoffLine) && resetTranscript.probeTextEndLine < resetTranscript.resetRecallCutoffLine"
+            message:
+              expr: "`seed fact was not strictly before the effective SQLite reset cutoff: ${JSON.stringify(resetTranscript)}`"
+        - set: canonicalSessionPath
+          value:
+            expr: "`sessions/qa/${seedSession.sessionId}.jsonl`"
+        - call: env.gateway.call
           saveAs: deletedResult
           args:
             - sessions.delete
@@ -266,63 +331,6 @@ flow:
         - set: deletedArchiveName
           value:
             expr: "path.basename(deletedResult.archived.find((entry) => String(entry).includes(`${deletedSession.sessionId}.jsonl.deleted.`)))"
-        - set: resetOutboundIndex
-          value:
-            expr: "state.getSnapshot().messages.filter((message) => message.direction === 'outbound').length"
-        - sendInbound:
-            conversation:
-              id:
-                ref: config.conversationId
-              kind: direct
-            senderId:
-              ref: config.conversationId
-            senderName: Remember Reset Source
-            text:
-              expr: "`/new Reply exactly: ${config.resetMarker}`"
-        - waitForOutbound:
-            conversation:
-              id:
-                ref: config.conversationId
-              kind: direct
-            sinceIndex:
-              ref: resetOutboundIndex
-            textIncludes:
-              ref: config.resetMarker
-            timeoutMs:
-              expr: liveTurnTimeoutMs(env, 60000)
-          saveAs: resetReply
-        - call: readRawQaSessionStore
-          saveAs: resetStore
-          args:
-            - ref: env
-        - set: resetSession
-          value:
-            expr: resetStore[sourceSessionKey]
-        - assert:
-            expr: "Boolean(resetSession?.lifecycleRevision) && resetSession.lifecycleRevision !== seedSession.lifecycleRevision"
-            message:
-              expr: "`session lifecycle did not reset: ${JSON.stringify({ before: seedSession?.lifecycleRevision, after: resetSession?.lifecycleRevision })}`"
-        - assert:
-            expr: resetSession?.sessionId === seedSession.sessionId
-            message:
-              expr: "`durable session id changed across reset: ${JSON.stringify({ before: seedSession?.sessionId, after: resetSession?.sessionId })}`"
-        - set: qaSessionsDir
-          value:
-            expr: "path.join(env.gateway.tempRoot, 'state', 'agents', 'qa', 'sessions')"
-        - call: waitForCondition
-          saveAs: resetArchivePath
-          args:
-            - lambda:
-                async: true
-                expr: "await (async () => { const prefix = `${seedSession.sessionId}.jsonl.reset.`; const entries = (await fs.readdir(qaSessionsDir).catch(() => [])).filter((entry) => entry.startsWith(prefix)).toSorted(); return entries.length > 0 ? path.join(qaSessionsDir, entries.at(-1)) : undefined; })()"
-            - expr: liveTurnTimeoutMs(env, 30000)
-            - 250
-        - set: resetArchiveName
-          value:
-            expr: path.basename(resetArchivePath)
-        - assert:
-            expr: "resetArchiveName.startsWith(`${seedSession.sessionId}.jsonl.reset.`)"
-            message: real SQLite reset did not produce the expected reset archive
         - call: readConfigSnapshot
           saveAs: preconditionConfig
           args:
@@ -460,9 +468,9 @@ flow:
             message:
               expr: "`QA index did not contain the deleted private control: ${deletedSearchText}`"
         - assert:
-            expr: "qaSearchText.includes(config.privateFact) && qaSearchText.includes(resetArchiveName)"
+            expr: "qaSearchText.includes(config.privateFact) && qaSearchText.includes(canonicalSessionPath)"
             message:
-              expr: "`QA index did not return the archived private fact: ${qaSearchText}`"
+              expr: "`QA index did not return the pre-reset private fact at its canonical SQLite path: ${qaSearchText}`"
         - call: patchConfig
           args:
             - env:
@@ -534,11 +542,11 @@ flow:
         - assert:
             expr: "normalizeLowercaseStringOrEmpty(recallOutbound.text).includes(normalizeLowercaseStringOrEmpty(config.expectedNeedle))"
             message:
-              expr: "`same-conversation post-reset reply missed the archived private fact: ${recallOutbound.text}`"
+              expr: "`same-conversation post-reset reply missed the pre-reset private fact: ${recallOutbound.text}`"
         - assert:
-            expr: "helperTranscriptText.includes('memory_search') && helperTranscriptText.includes(config.privateFact) && helperTranscriptText.includes(resetArchiveName)"
+            expr: "helperTranscriptText.includes('memory_search') && helperTranscriptText.includes(config.privateFact) && helperTranscriptText.includes(seedSession.sessionId)"
             message:
-              expr: "`Active Memory helper did not accept the archived private fact: ${helperTranscriptText}`"
+              expr: "`Active Memory helper did not accept the canonical pre-reset private fact: ${helperTranscriptText}`"
         - assert:
             expr: "!helperTranscriptText.includes(config.deletedFact) && !helperTranscriptText.includes(deletedArchiveName) && !helperTranscriptText.includes(config.groupFact) && !helperTranscriptText.includes(groupSession.sessionId) && !helperTranscriptText.includes(config.peerFact) && !helperTranscriptText.includes(peerSession.sessionId)"
             message:
@@ -546,4 +554,4 @@ flow:
         - assert:
             expr: "recallRequests.some((request) => String(request.allInputText ?? '').includes('Remember across conversations QA check') && request.plannedToolName === 'memory_search')"
             message: deterministic post-reset recall did not issue memory_search
-      detailsExpr: "JSON.stringify({ verdict: 'PASS', scenario: 'remember-across-reset-private', channel: 'qa-channel', provider: env.providerMode, gateway: 'ephemeral-child', lifecycleReset: resetSession.lifecycleRevision !== seedSession.lifecycleRevision, durableSessionRetained: resetSession.sessionId === seedSession.sessionId, sqliteResetArchive: true, resetArchiveIndexed: qaSearchText.includes(resetArchiveName), archivedHitAccepted: helperTranscriptText.includes(resetArchiveName), deletedTranscriptIndexed: deletedSearchText.includes(deletedArchiveName), deletedTranscriptExcluded: !helperTranscriptText.includes(deletedArchiveName), groupTranscriptIndexed: groupSearchText.includes(groupSession.sessionId), peerTranscriptIndexed: JSON.stringify(peerSearch).includes(peerSession.sessionId), privateRecallDelivered: normalizeLowercaseStringOrEmpty(recallOutbound.text).includes(normalizeLowercaseStringOrEmpty(config.expectedNeedle)), sharedExcluded: !helperTranscriptText.includes(groupSession.sessionId), peerAgentExcluded: !helperTranscriptText.includes(peerSession.sessionId), reply: recallOutbound.text })"
+      detailsExpr: "JSON.stringify({ verdict: 'PASS', scenario: 'remember-across-reset-private', channel: 'qa-channel', provider: env.providerMode, gateway: 'ephemeral-child', lifecycleReset: resetSession.lifecycleRevision !== seedSession.lifecycleRevision, durableSessionRetained: resetSession.sessionId === seedSession.sessionId, canonicalResetBoundary: true, preResetHitIndexed: qaSearchText.includes(canonicalSessionPath), preResetHitAccepted: helperTranscriptText.includes(seedSession.sessionId), deletedTranscriptIndexed: deletedSearchText.includes(deletedArchiveName), deletedTranscriptExcluded: !helperTranscriptText.includes(deletedArchiveName), groupTranscriptIndexed: groupSearchText.includes(groupSession.sessionId), peerTranscriptIndexed: JSON.stringify(peerSearch).includes(peerSession.sessionId), privateRecallDelivered: normalizeLowercaseStringOrEmpty(recallOutbound.text).includes(normalizeLowercaseStringOrEmpty(config.expectedNeedle)), sharedExcluded: !helperTranscriptText.includes(groupSession.sessionId), peerAgentExcluded: !helperTranscriptText.includes(peerSession.sessionId), reply: recallOutbound.text })"
