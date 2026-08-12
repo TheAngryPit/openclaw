@@ -96,7 +96,12 @@ describe("SQLite session reset content revision", () => {
     const after = requireSessionEntry(await buildSessionEntry(sessionKey, buildOptions));
     expect(after.content).toBe(before.content);
     expect(after.lineMap).toEqual(before.lineMap);
-    expect(after.sessionResetRecallCutoffLine).toEqual(expect.any(Number));
+    const cutoffSymbol = Symbol.for("openclaw.memory.sessionResetRecallCutoff");
+    expect(Object.getOwnPropertyDescriptor(after, cutoffSymbol)).toMatchObject({
+      enumerable: false,
+      value: { state: "valid", cutoffLine: expect.any(Number) },
+    });
+    expect(Object.keys(after)).not.toContain(cutoffSymbol.description);
     expect(after.hash).not.toBe(before.hash);
   });
 });

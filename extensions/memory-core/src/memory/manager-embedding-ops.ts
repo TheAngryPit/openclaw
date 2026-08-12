@@ -32,6 +32,7 @@ import {
 import { MAX_TIMER_TIMEOUT_MS, resolveTimerTimeoutMs } from "openclaw/plugin-sdk/number-runtime";
 import { sleepWithAbort } from "openclaw/plugin-sdk/runtime-env";
 import { runSqliteImmediateTransactionSync } from "openclaw/plugin-sdk/sqlite-runtime";
+import { readSessionResetRecallCutoffMetadata } from "../session-reset-recall-metadata.js";
 import type { EmbeddingProvider } from "./embeddings.js";
 import {
   MEMORY_BATCH_FAILURE_LIMIT,
@@ -1127,7 +1128,10 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
       options.source === "sessions"
         ? chunkSessionContentAtResetBoundary({
             content: indexingContent,
-            cutoffLine: entry.sessionResetRecallCutoffLine,
+            cutoffLine: (() => {
+              const cutoff = readSessionResetRecallCutoffMetadata(entry);
+              return cutoff.state === "valid" ? cutoff.cutoffLine : undefined;
+            })(),
             lineMap: entry.lineMap,
             chunking: chunkOptions,
           })

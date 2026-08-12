@@ -13,8 +13,6 @@ export {
   parseCanonicalSessionSyncTargetFromPath,
   parseSqliteSessionFileMarker,
   parseUsageCountedSessionIdFromFileName,
-  readSessionResetRecallCutoff,
-  resolveSessionResetRecallCutoff,
   resolveSessionFileForSyncTarget,
   resolveSessionIdentityForTranscriptFile,
   sessionPathForFile,
@@ -30,5 +28,4 @@ export type {
   SessionTranscriptClassification,
   SessionTranscriptCorpusEntry,
   SessionTranscriptCorpusOptions,
-  SessionResetRecallCutoff,
 } from "../../packages/memory-host-sdk/src/engine-sessions.js";

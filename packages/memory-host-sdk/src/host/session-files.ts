@@ -64,8 +64,6 @@ export type SessionFileEntry = {
   content: string;
   /** Maps each content line (0-indexed) to its 1-indexed JSONL source line. */
   lineMap: number[];
-  /** Internal hard boundary: raw lines below this value belong to reset history. */
-  sessionResetRecallCutoffLine?: number;
   /** Maps each content line (0-indexed) to epoch ms; 0 means unknown timestamp. */
   messageTimestampsMs: number[];
   /** Provenance aligned one-for-one with exported content lines. */
@@ -96,14 +94,6 @@ export type BuildSessionEntryOptions = {
   /** Override for tests or specialized callers that need a tighter parse yield cadence. */
   parseYieldEveryLines?: number;
 };
-
-/** Recomputes the latest SQLite reset boundary for authorization-time race checks. */
-export function readSessionResetRecallCutoff(
-  opts: Required<Pick<BuildSessionEntryOptions, "agentId" | "sessionId" | "storePath">> &
-    Pick<BuildSessionEntryOptions, "sessionKey">,
-) {
-  return resolveSessionResetRecallCutoff(loadTranscriptEventsSync(opts));
-}
 
 export type SessionTranscriptClassification = {
   dreamingNarrativeTranscriptPaths: ReadonlySet<string>;
@@ -972,7 +962,7 @@ export async function buildSessionEntry(
       lineProvenance.push(...renderedLines.map(() => memoryProvenance));
     }
     const content = collected.join("\n");
-    return {
+    const entry: SessionFileEntry = {
       path: memoryPath,
       absPath,
       mtimeMs,
@@ -990,15 +980,19 @@ export async function buildSessionEntry(
       ),
       content,
       lineMap,
-      ...(rawSource?.resetRecallCutoff.state === "valid"
-        ? { sessionResetRecallCutoffLine: rawSource.resetRecallCutoff.cutoffLine }
-        : {}),
       messageTimestampsMs,
       lineProvenance,
       sessionKind,
       ...(generatedByDreamingNarrative ? { generatedByDreamingNarrative: true } : {}),
       ...(generatedByCronRun ? { generatedByCronRun: true } : {}),
     };
+    Object.defineProperty(entry, Symbol.for("openclaw.memory.sessionResetRecallCutoff"), {
+      configurable: false,
+      enumerable: false,
+      value: rawSource?.resetRecallCutoff ?? { state: "absent" },
+      writable: false,
+    });
+    return entry;
   } catch (err) {
     void logSessionFileReadFailure(absPath, err);
     return null;

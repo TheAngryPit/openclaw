@@ -1,5 +1,5 @@
-import { readSessionResetRecallCutoff } from "openclaw/plugin-sdk/memory-core-host-engine-sessions";
 // Memory Core plugin module implements session search visibility behavior.
+import { buildSessionEntry } from "openclaw/plugin-sdk/memory-core-host-engine-sessions";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import type { MemorySearchResult } from "openclaw/plugin-sdk/memory-core-host-runtime-files";
 import { resolveSessionAgentId } from "openclaw/plugin-sdk/memory-host-core";
@@ -15,6 +15,11 @@ import {
   createSessionVisibilityGuard,
   resolveEffectiveSessionToolsVisibility,
 } from "openclaw/plugin-sdk/session-visibility";
+import {
+  readSessionArchiveReasonFromHitPath,
+  readSessionResetRecallCutoffMetadata,
+  type SessionResetRecallCutoff,
+} from "./session-reset-recall-metadata.js";
 
 function normalizeAgentIdForCompare(value: string | undefined): string | undefined {
   return value?.trim().toLowerCase() || undefined;
@@ -201,28 +206,25 @@ export async function filterMemorySearchHitsBySessionVisibility(params: {
     ? resolveSessionAgentId({ sessionKey: anchorSessionKey, config: params.cfg })
     : undefined;
   const anchorEntry = anchorSessionKey ? combinedSessionStore[anchorSessionKey] : undefined;
-  let anchorResetCutoff: ReturnType<typeof readSessionResetRecallCutoff> | undefined;
-  let anchorResetCutoffResolved = false;
+  let anchorResetCutoffPromise: Promise<SessionResetRecallCutoff> | undefined;
   const resolveAnchorResetCutoff = () => {
-    if (anchorResetCutoffResolved) {
-      return anchorResetCutoff;
+    if (anchorResetCutoffPromise) {
+      return anchorResetCutoffPromise;
     }
-    anchorResetCutoffResolved = true;
     const sessionId = anchorEntry?.sessionId?.trim();
     if (!recallAgentId || !sessionId || !anchorSessionKey) {
-      return undefined;
+      return Promise.resolve<SessionResetRecallCutoff>({ state: "invalid" });
     }
-    try {
-      anchorResetCutoff = readSessionResetRecallCutoff({
-        agentId: recallAgentId,
-        sessionId,
-        sessionKey: anchorSessionKey,
-        storePath,
-      });
-    } catch {
-      anchorResetCutoff = { state: "invalid" };
-    }
-    return anchorResetCutoff;
+    anchorResetCutoffPromise = buildSessionEntry(anchorEntry?.sessionFile || `${sessionId}.jsonl`, {
+      agentId: recallAgentId,
+      sessionId,
+      sessionKey: anchorSessionKey,
+      storePath,
+      updatedAtMs: anchorEntry?.updatedAt,
+    })
+      .then(readSessionResetRecallCutoffMetadata)
+      .catch(() => ({ state: "invalid" }));
+    return anchorResetCutoffPromise;
   };
   const recallAuthorized = Boolean(
     conversationRecall &&
@@ -327,7 +329,8 @@ export async function filterMemorySearchHitsBySessionVisibility(params: {
     if (!identity) {
       continue;
     }
-    if (conversationRecall && identity.archiveReason === "deleted") {
+    const archiveReason = readSessionArchiveReasonFromHitPath(hit.path);
+    if (conversationRecall && archiveReason === "deleted") {
       continue;
     }
     const normalizedScopedAgentId = normalizeAgentIdForCompare(scopedAgentId);
@@ -382,13 +385,10 @@ export async function filterMemorySearchHitsBySessionVisibility(params: {
       identity.stem === anchorSessionId &&
       normalizedOwnerAgentId === normalizeAgentIdForCompare(recallAgentId)
     ) {
-      const cutoff = resolveAnchorResetCutoff();
+      const cutoff = await resolveAnchorResetCutoff();
       allowResetAnchor = cutoff?.state === "valid" && hit.endLine < cutoff.cutoffLine;
     }
-    const allowed = areSessionKeysAllowed(
-      keys,
-      identity.archiveReason === "reset" || allowResetAnchor,
-    );
+    const allowed = areSessionKeysAllowed(keys, archiveReason === "reset" || allowResetAnchor);
     if (!allowed) {
       continue;
     }

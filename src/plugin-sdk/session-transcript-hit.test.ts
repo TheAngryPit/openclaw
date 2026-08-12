@@ -46,17 +46,6 @@ describe("extractTranscriptIdentityFromSessionsMemoryHit", () => {
       stem: "deleted-uuid",
       ownerAgentId: "main",
       archived: true,
-      archiveReason: "deleted",
-    });
-    expect(
-      extractTranscriptIdentityFromSessionsMemoryHit(
-        "sessions/main/reset-uuid.jsonl.reset.2026-02-16T22-27-33.000Z",
-      ),
-    ).toEqual({
-      stem: "reset-uuid",
-      ownerAgentId: "main",
-      archived: true,
-      archiveReason: "reset",
     });
   });
 

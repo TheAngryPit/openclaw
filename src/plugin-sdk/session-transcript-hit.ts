@@ -2,10 +2,7 @@
 import path from "node:path";
 import { normalizeOptionalString } from "../../packages/normalization-core/src/string-coerce.js";
 import { uniqueStrings } from "../../packages/normalization-core/src/string-normalization.js";
-import {
-  parseUsageCountedSessionArchiveReasonFromFileName,
-  parseUsageCountedSessionIdFromFileName,
-} from "../config/sessions/artifacts.js";
+import { parseUsageCountedSessionIdFromFileName } from "../config/sessions/artifacts.js";
 import { loadCombinedSessionStoreForGatewayCore as loadGatewaySessionStore } from "../config/sessions/combined-store-gateway.js";
 import type { SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -45,7 +42,6 @@ export type SessionTranscriptHitIdentity = {
   stem: string;
   ownerAgentId?: string;
   archived: boolean;
-  archiveReason?: "reset" | "deleted";
 };
 
 function parseSessionsPath(hitPath: string): { base: string; ownerAgentId?: string } {
@@ -79,13 +75,7 @@ export function extractTranscriptIdentityFromSessionsMemoryHit(
   const { base, ownerAgentId } = parseSessionsPath(hitPath);
   const archivedStem = parseUsageCountedSessionIdFromFileName(base);
   if (archivedStem && base !== `${archivedStem}.jsonl`) {
-    const archiveReason = parseUsageCountedSessionArchiveReasonFromFileName(base);
-    return {
-      stem: archivedStem,
-      ownerAgentId,
-      archived: true,
-      ...(archiveReason ? { archiveReason } : {}),
-    };
+    return { stem: archivedStem, ownerAgentId, archived: true };
   }
   if (base.endsWith(".jsonl")) {
     const stem = base.slice(0, -".jsonl".length);
