@@ -553,46 +553,75 @@ describe("filterMemorySearchHitsBySessionVisibility", () => {
     expect(filtered).toStrictEqual([]);
   });
 
-  it.each([
-    { name: "reset", suffix: "reset.2026-08-11T08-00-00.000Z" },
-    { name: "deleted", suffix: "deleted.2026-08-11T08-00-00.000Z" },
-  ])(
-    "allows an archived $name generation of the private anchor conversation",
-    async ({ suffix }) => {
-      const anchorSessionKey = "agent:main:telegram:direct:owner";
-      combinedSessionStore = {
-        [anchorSessionKey]: {
-          sessionId: "current",
-          updatedAt: 2,
-          sessionFile: "/tmp/sessions/current.jsonl",
-          chatType: "direct",
-        },
-      };
-      const hit: MemorySearchResult = {
-        path: `sessions/main/current.jsonl.${suffix}`,
-        source: "sessions",
-        score: 1,
-        snippet: "prior conversation context",
-        startLine: 1,
-        endLine: 2,
-      };
+  it("allows an archived reset generation of the private anchor conversation", async () => {
+    const anchorSessionKey = "agent:main:telegram:direct:owner";
+    combinedSessionStore = {
+      [anchorSessionKey]: {
+        sessionId: "current",
+        updatedAt: 2,
+        sessionFile: "/tmp/sessions/current.jsonl",
+        chatType: "direct",
+      },
+    };
+    const hit: MemorySearchResult = {
+      path: "sessions/main/current.jsonl.reset.2026-08-11T08-00-00.000Z",
+      source: "sessions",
+      score: 1,
+      snippet: "prior conversation context",
+      startLine: 1,
+      endLine: 2,
+    };
 
-      const filtered = await filterMemorySearchHitsBySessionVisibility({
-        cfg: asOpenClawConfig({ tools: { sessions: { visibility: "self" } } }),
-        agentId: "main",
-        requesterSessionKey: `${anchorSessionKey}:active-memory:123456abcdef`,
-        sandboxed: false,
-        hits: [hit],
-        conversationRecall: {
-          anchorSessionKey,
-          scope: "same-agent-private",
-          corpus: "sessions",
-        },
-      });
+    const filtered = await filterMemorySearchHitsBySessionVisibility({
+      cfg: asOpenClawConfig({ tools: { sessions: { visibility: "self" } } }),
+      agentId: "main",
+      requesterSessionKey: `${anchorSessionKey}:active-memory:123456abcdef`,
+      sandboxed: false,
+      hits: [hit],
+      conversationRecall: {
+        anchorSessionKey,
+        scope: "same-agent-private",
+        corpus: "sessions",
+      },
+    });
 
-      expect(filtered).toEqual([hit]);
-    },
-  );
+    expect(filtered).toEqual([hit]);
+  });
+
+  it("denies an archived deleted generation of the private anchor conversation", async () => {
+    const anchorSessionKey = "agent:main:telegram:direct:owner";
+    combinedSessionStore = {
+      [anchorSessionKey]: {
+        sessionId: "current",
+        updatedAt: 2,
+        sessionFile: "/tmp/sessions/current.jsonl",
+        chatType: "direct",
+      },
+    };
+    const hit: MemorySearchResult = {
+      path: "sessions/main/current.jsonl.deleted.2026-08-11T08-00-00.000Z",
+      source: "sessions",
+      score: 1,
+      snippet: "explicitly deleted private context",
+      startLine: 1,
+      endLine: 2,
+    };
+
+    const filtered = await filterMemorySearchHitsBySessionVisibility({
+      cfg: asOpenClawConfig({ tools: { sessions: { visibility: "self" } } }),
+      agentId: "main",
+      requesterSessionKey: `${anchorSessionKey}:active-memory:123456abcdef`,
+      sandboxed: false,
+      hits: [hit],
+      conversationRecall: {
+        anchorSessionKey,
+        scope: "same-agent-private",
+        corpus: "sessions",
+      },
+    });
+
+    expect(filtered).toEqual([]);
+  });
 
   it("excludes the anchor transcript when another private key aliases the same session", async () => {
     combinedSessionStore = {

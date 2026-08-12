@@ -345,7 +345,7 @@ export async function filterMemorySearchHitsBySessionVisibility(params: {
       }
       continue;
     }
-    const allowed = areSessionKeysAllowed(keys, identity.archived);
+    const allowed = areSessionKeysAllowed(keys, identity.archiveReason === "reset");
     if (!allowed) {
       continue;
     }

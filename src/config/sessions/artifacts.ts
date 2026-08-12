@@ -154,6 +154,19 @@ export function parseUsageCountedSessionIdFromFileName(fileName: string): string
   return null;
 }
 
+/** Extracts the lifecycle reason from a retained reset/delete transcript archive. */
+export function parseUsageCountedSessionArchiveReasonFromFileName(
+  fileName: string,
+): Extract<SessionArchiveReason, "reset" | "deleted"> | null {
+  const normalized = stripSessionArchiveCompressionSuffix(fileName);
+  for (const reason of ["reset", "deleted"] as const) {
+    if (hasArchiveSuffix(normalized, reason)) {
+      return reason;
+    }
+  }
+  return null;
+}
+
 /** Formats an archive timestamp that is safe for filenames. */
 export function formatSessionArchiveTimestamp(nowMs = Date.now()): string {
   return timestampMsToIsoFileStamp(nowMs);
