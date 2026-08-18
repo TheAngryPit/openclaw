@@ -50,7 +50,7 @@ export function peekModels(
   opts: ModelCatalogScope,
 ): ModelCatalogEntry[] | undefined {
   const cached = modelCatalogCacheFor(client).get(modelCatalogCacheKey(opts));
-  return cached && cached.expiresAt > 0 ? cached.models : undefined;
+  return cached && cached.expiresAt > Date.now() ? cached.models : undefined;
 }
 
 export async function revalidateModels(

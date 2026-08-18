@@ -1,7 +1,7 @@
 // Control UI tests cover models behavior.
 import { describe, expect, it, vi } from "vitest";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
-import { loadModels } from "./model-catalog-store.ts";
+import { loadModels, peekModels } from "./model-catalog-store.ts";
 
 describe("loadModels", () => {
   it("requests the configured model list view", async () => {
@@ -50,6 +50,26 @@ describe("loadModels", () => {
 
     expect(request).toHaveBeenCalledTimes(1);
     expect(first).toBe(second);
+  });
+
+  it("stops peeking a prepared catalog after its expiry", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-08-18T00:00:00Z"));
+      const models = [{ id: "prepared", name: "Prepared", provider: "openai" }];
+      const client = {
+        request: vi.fn(async () => ({ models })),
+      } as unknown as GatewayBrowserClient;
+      const scope = { agentId: "main", preparedOnly: true };
+
+      await loadModels(client, scope);
+      expect(peekModels(client, scope)).toEqual(models);
+
+      vi.setSystemTime(new Date("2026-08-19T00:00:00Z"));
+      expect(peekModels(client, scope)).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps model catalogs scoped by agent", async () => {

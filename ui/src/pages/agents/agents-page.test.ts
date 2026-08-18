@@ -435,6 +435,35 @@ describe("AgentsPage gateway lifecycle", () => {
     expect(request).toHaveBeenCalledTimes(2);
   });
 
+  it("revalidates an expired prepared catalog on overview re-entry", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-08-18T00:00:00Z"));
+      const oldModels = [{ id: "old", name: "Old Model", provider: "anthropic" }];
+      const nextModels = [{ id: "new", name: "New Model", provider: "anthropic" }];
+      const request = vi
+        .fn()
+        .mockResolvedValueOnce({ models: oldModels })
+        .mockResolvedValueOnce({ models: nextModels });
+      const page = document.createElement("openclaw-agents-page") as TestAgentsPage;
+      page.routeData = { panel: "overview" } as AgentsRouteData;
+      setPageGateway(page, { request } as unknown as GatewayBrowserClient);
+      page.agentsSelectedId = "main";
+
+      page.loadActivePanelData();
+      await vi.waitFor(() => expect(page.chatModelCatalog).toEqual(oldModels));
+
+      vi.setSystemTime(new Date("2026-08-19T00:00:00Z"));
+      page.ensureModelCatalog();
+      await vi.waitFor(() => expect(page.chatModelCatalog).toEqual(nextModels));
+
+      expect(request).toHaveBeenCalledTimes(2);
+      expectPreparedModelsRequest(request, 2, "main");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects an old-client model catalog after the Gateway client changes", async () => {
     const oldModels = [{ id: "old", name: "Old Model", alias: "opus", provider: "anthropic" }];
     const nextModels = [{ id: "new", name: "Opus 4.8", alias: "opus", provider: "anthropic" }];
