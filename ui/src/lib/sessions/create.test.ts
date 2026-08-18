@@ -20,11 +20,21 @@ describe("requestSessionCreate", () => {
         runStarted: true,
         runId: "initial-send-id",
         messageSeq: 7,
+        session: {
+          key: "agent:main:dashboard:new",
+          kind: "direct",
+          thinkingLevel: "xhigh",
+        },
       })),
     };
 
     await expect(requestSessionCreate(client as never, { message: "hello" })).resolves.toEqual({
       key: "agent:main:dashboard:new",
+      session: {
+        key: "agent:main:dashboard:new",
+        kind: "direct",
+        thinkingLevel: "xhigh",
+      },
       initialRun: { status: "started", runId: "initial-send-id", messageSeq: 7 },
     });
   });

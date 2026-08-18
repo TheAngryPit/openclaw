@@ -25,6 +25,7 @@ import { i18n, t } from "../i18n/index.ts";
 import { normalizeAgentLabel } from "../lib/agents/display.ts";
 import type { BoardFace } from "../lib/board/settings.ts";
 import { invalidateChatMetadataStore } from "../lib/chat/chat-metadata-store.ts";
+import { invalidateModelCatalogStore } from "../lib/chat/model-catalog-store.ts";
 import { canCallGatewayMethod } from "../lib/gateway-methods.ts";
 import { createIdleImport } from "../lib/idle-import.ts";
 import { isWorkboardEnabledInConfigSnapshot } from "../lib/plugin-activation.ts";
@@ -459,6 +460,7 @@ class OpenClawShell
       const client = this.context?.gateway?.snapshot.client;
       if (client) {
         invalidateChatMetadataStore(client);
+        invalidateModelCatalogStore(client);
       }
     }
     this.shellGateway.handleGatewayEvent(event);
@@ -658,6 +660,7 @@ class OpenClawShell
       // cannot keep metadata from crossing logical Gateway connections.
       if (snapshot.client) {
         invalidateChatMetadataStore(snapshot.client);
+        invalidateModelCatalogStore(snapshot.client);
       }
     }
     this.shellGateway.synchronizeGateway(snapshot);

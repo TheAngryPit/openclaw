@@ -5,7 +5,7 @@ import type {
 import type { GatewayAgentRow, ModelCatalogEntry } from "../../api/types.ts";
 import type { ApplicationContext } from "../../app/context.ts";
 import { t } from "../../i18n/index.ts";
-import { peekChatMetadata, revalidateChatMetadata } from "../../lib/chat/chat-metadata-store.ts";
+import { peekModels, revalidateModels } from "../../lib/chat/model-catalog-store.ts";
 import {
   buildQualifiedChatModelValue,
   normalizeChatModelProviderId,
@@ -242,9 +242,11 @@ export class NewSessionModelControl {
       client,
       id: requestId,
     };
-    const cached = peekChatMetadata(client, agentId);
-    if (Array.isArray(cached?.models)) {
-      this.publishMetadataCatalog(cached.models, "refreshing");
+    const cached = peekModels(client, { agentId, preparedOnly: true });
+    if (cached) {
+      // Keep the complete picker stable while the automatic revalidation runs.
+      // A failed refresh remains recorded but cannot displace usable options.
+      this.publishMetadataCatalog(cached, "ready");
     } else {
       this.updateMetadataState({
         ...this.metadataState,
@@ -252,17 +254,19 @@ export class NewSessionModelControl {
       });
     }
 
-    void revalidateChatMetadata(client, agentId, {
+    void revalidateModels(client, {
+      agentId,
+      preparedOnly: true,
       startupRetryWindowMs: 60_000,
     }).then(
-      (result) => {
+      (models) => {
         // Only the request that still owns the control may publish catalog data
         // or restore preferences.
         if (this.activeMetadataRequest?.id !== requestId) {
           return;
         }
         this.activeMetadataRequest = undefined;
-        this.publishMetadataCatalog(Array.isArray(result.models) ? result.models : [], "ready");
+        this.publishMetadataCatalog(models, "ready");
       },
       () => {
         if (this.activeMetadataRequest?.id !== requestId) {

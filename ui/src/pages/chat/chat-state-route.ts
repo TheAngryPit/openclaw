@@ -1,5 +1,6 @@
 import { loadLocalAssistantIdentity } from "../../app/assistant-identity.ts";
 import { patchSettings } from "../../app/settings.ts";
+import { listSelectableAgents } from "../../lib/agents/display.ts";
 import { isRenderableControlUiAvatarUrl } from "../../lib/avatar.ts";
 import type { SessionCapability } from "../../lib/sessions/index.ts";
 import {
@@ -64,6 +65,33 @@ export function saveRouteSessionSettings(state: ChatPageHost, sessionKey: string
     return;
   }
   state.settings = patchSettings({ sessionKey, lastActiveSessionKey: sessionKey });
+}
+
+export function resolveChatModelMetadataAgentId(state: ChatPageHost): string | null {
+  const agentId = resolveChatAgentId(state);
+  const roster = state.agentsList?.agents;
+  if (!roster) {
+    const defaultAgentId = state.assistantAgentId?.trim();
+    return defaultAgentId && normalizeAgentId(defaultAgentId) === agentId ? agentId : null;
+  }
+  return listSelectableAgents(roster).some(
+    (candidate) => normalizeAgentId(candidate.id) === agentId,
+  )
+    ? agentId
+    : null;
+}
+
+export function reconcileChatModelCatalogOwner(state: ChatPageHost): string | null {
+  const agentId = resolveChatModelMetadataAgentId(state);
+  if (state.chatModelCatalogAgentId === agentId) {
+    return agentId;
+  }
+  state.chatMetadataRequestVersion += 1;
+  state.chatModelCatalogAgentId = agentId;
+  state.chatModelCatalog = [];
+  state.chatModelCatalogError = null;
+  state.chatModelsLoading = false;
+  return agentId;
 }
 
 export function patchChatSessionLabel(

@@ -28,11 +28,7 @@ import {
   type AgentsState,
 } from "../../lib/agents/index.ts";
 import { DEFAULT_AGENT_PANEL, type AgentsPanel } from "../../lib/agents/panels.ts";
-import {
-  loadChatMetadata,
-  peekChatMetadata,
-  revalidateChatMetadata,
-} from "../../lib/chat/chat-metadata-store.ts";
+import { peekModels, revalidateModels } from "../../lib/chat/model-catalog-store.ts";
 import { currentConfigObject } from "../../lib/config/config-state-model.ts";
 import {
   createInitialCronState,
@@ -576,9 +572,9 @@ class AgentsPage
       return;
     }
     if (!options.refresh) {
-      const cached = peekChatMetadata(client, agentId);
+      const cached = peekModels(client, { agentId, preparedOnly: true });
       if (cached) {
-        this.chatModelCatalog = cached.models ?? [];
+        this.chatModelCatalog = cached;
         this.chatModelCatalogAgentId = agentId;
         this.chatModelCatalogError = null;
         return;
@@ -599,15 +595,9 @@ class AgentsPage
     const request = { client, generation, agentId };
     this.chatModelCatalogRequest = request;
     this.chatModelCatalogError = null;
-    // Chat metadata carries the selected agent's already-prepared startup models
-    // without initiating the live discovery reserved for explicit picker use.
-    const metadataRequest = options.refresh
-      ? revalidateChatMetadata(client, agentId)
-      : loadChatMetadata(client, agentId);
-    void metadataRequest
-      .then((result) => {
+    void revalidateModels(client, { agentId, preparedOnly: true })
+      .then((models) => {
         if (this.isCurrentRequest(client, generation, agentId)) {
-          const models = result.models ?? [];
           this.chatModelCatalog = models;
           this.chatModelCatalogAgentId = agentId;
           this.chatModelCatalogError = null;

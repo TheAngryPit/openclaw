@@ -15,6 +15,7 @@ import {
   type SessionCreateParams,
 } from "./create.ts";
 import type { SessionPatch, SessionPatchOptions } from "./patch.ts";
+import { reconcileSessionHistory } from "./reconcile.ts";
 import { requestSessionRecovery } from "./recover.ts";
 import type {
   SessionConnectionOwner,
@@ -148,6 +149,23 @@ export function createSessionMutations(host: SessionMutationsHost) {
       // Creation precedes canonical rows; claim placement before any event or
       // list publication can assign this key an ordinary roster position.
       host.notifyCreated(result.key);
+      // Carry its settings across that same publication gap while refresh runs.
+      if (result.session) {
+        const state = host.readState();
+        const createdAgentId = result.session.agentId?.trim() || params.agentId?.trim() || null;
+        const resultScopeChanged = Boolean(
+          state.agentId && createdAgentId && state.agentId !== createdAgentId,
+        );
+        const reconciled = reconcileSessionHistory(
+          resultScopeChanged ? null : state.result,
+          result.session,
+          state.result?.defaults,
+          createdAgentId ? { resultAgentId: createdAgentId } : undefined,
+        );
+        if (reconciled !== state.result) {
+          host.publish({ ...state, result: reconciled, agentId: createdAgentId ?? state.agentId });
+        }
+      }
       if (requestParams.worktree === true || Boolean(requestParams.execNode?.trim())) {
         preparedWorkSessionKeys.add(result.key.trim());
       }

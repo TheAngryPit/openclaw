@@ -1,6 +1,7 @@
 // Control UI model metadata boundary.
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { ModelCatalogEntry } from "../../api/types.ts";
+import { retryGatewayStartupRequest } from "../gateway-startup-retry.ts";
 
 const MODEL_CATALOG_CACHE_TTL_MS = 60_000;
 
@@ -14,6 +15,20 @@ type ModelCatalogCacheEntry = {
 
 const modelCatalogCache = new WeakMap<GatewayBrowserClient, Map<string, ModelCatalogCacheEntry>>();
 
+export function invalidateModelCatalogStore(client: GatewayBrowserClient): void {
+  modelCatalogCache.delete(client);
+}
+
+type ModelCatalogScope = {
+  agentId: string;
+  preparedOnly?: boolean;
+};
+
+type LoadModelsOptions = ModelCatalogScope & {
+  refresh?: boolean;
+  rejectOnFailure?: boolean;
+};
+
 function modelCatalogCacheFor(client: GatewayBrowserClient): Map<string, ModelCatalogCacheEntry> {
   let cache = modelCatalogCache.get(client);
   if (!cache) {
@@ -25,21 +40,57 @@ function modelCatalogCacheFor(client: GatewayBrowserClient): Map<string, ModelCa
 
 export async function loadModels(
   client: GatewayBrowserClient,
-  opts: {
-    agentId: string;
-    preparedOnly?: boolean;
-    refresh?: boolean;
-    rejectOnFailure?: boolean;
-  },
+  opts: LoadModelsOptions,
+): Promise<ModelCatalogEntry[]> {
+  return await loadModelsCached(client, opts, opts.refresh === true);
+}
+
+export function peekModels(
+  client: GatewayBrowserClient,
+  opts: ModelCatalogScope,
+): ModelCatalogEntry[] | undefined {
+  const cached = modelCatalogCacheFor(client).get(modelCatalogCacheKey(opts));
+  return cached && cached.expiresAt > 0 ? cached.models : undefined;
+}
+
+export async function revalidateModels(
+  client: GatewayBrowserClient,
+  opts: ModelCatalogScope & { startupRetryWindowMs?: number },
+): Promise<ModelCatalogEntry[]> {
+  const retryWindowMs = opts.startupRetryWindowMs;
+  const request = () => loadModelsCached(client, { ...opts, rejectOnFailure: true }, true);
+  if (retryWindowMs === undefined) {
+    return await request();
+  }
+  return await retryGatewayStartupRequest({
+    retryWindowMs,
+    request,
+    requestFailure: (error) => {
+      return error instanceof Error
+        ? error
+        : new Error("Model catalog request failed", { cause: error });
+    },
+    timeoutMessage: "Model catalog retry deadline elapsed",
+  });
+}
+
+function modelCatalogCacheKey(opts: ModelCatalogScope): string {
+  return `${opts.agentId.trim()}\0${opts.preparedOnly ? "prepared" : "exact"}`;
+}
+
+async function loadModelsCached(
+  client: GatewayBrowserClient,
+  opts: LoadModelsOptions,
+  bypassCache: boolean,
 ): Promise<ModelCatalogEntry[]> {
   const cache = modelCatalogCacheFor(client);
   const agentId = opts.agentId.trim();
-  const rejectOnFailure = opts?.rejectOnFailure === true;
-  const cacheKey = `${agentId}\0${opts.preparedOnly ? "prepared" : "exact"}`;
+  const rejectOnFailure = opts.rejectOnFailure === true;
+  const cacheKey = modelCatalogCacheKey(opts);
   const preparedCacheKey = `${agentId}\0prepared`;
   const cached = cache.get(cacheKey);
   const now = Date.now();
-  if (!opts.refresh && cached?.models && cached.expiresAt > now) {
+  if (!bypassCache && cached?.models && cached.expiresAt > now) {
     return cached.models;
   }
   if (

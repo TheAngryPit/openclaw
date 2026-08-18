@@ -35,7 +35,11 @@ import {
 } from "./chat-pane-shared.ts";
 import { ChatPaneTaskSuggestions } from "./chat-pane-task-suggestions.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
-import { resolveChatAgentId, saveRouteSessionSettings } from "./chat-state-route.ts";
+import {
+  reconcileChatModelCatalogOwner,
+  resolveChatAgentId,
+  saveRouteSessionSettings,
+} from "./chat-state-route.ts";
 import {
   dismissChatPullRequest,
   listDismissedChatPullRequests,
@@ -266,6 +270,7 @@ export abstract class ChatPaneSession extends ChatPaneTaskSuggestions {
       return null;
     }
     state.sessionKey = nextSessionKey;
+    reconcileChatModelCatalogOwner(state);
     return nextSessionKey;
   }
 

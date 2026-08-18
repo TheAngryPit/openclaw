@@ -1,5 +1,6 @@
+import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
-import { validateSessionsCreateParams } from "../index.js";
+import { SessionsCreateResultSchema, validateSessionsCreateParams } from "../index.js";
 
 describe("sessions.create schema", () => {
   it.each(["read-only", "guarded", "workspace", "full"])(
@@ -23,5 +24,19 @@ describe("sessions.create schema", () => {
 
   it("rejects unknown visibility values", () => {
     expect(validateSessionsCreateParams({ agentId: "main", visibility: "private" })).toBe(false);
+  });
+
+  it("accepts the canonical created session projection", () => {
+    expect(
+      Value.Check(SessionsCreateResultSchema, {
+        ok: true,
+        key: "agent:main:dashboard:test",
+        session: {
+          key: "agent:main:dashboard:test",
+          kind: "direct",
+          thinkingLevel: "xhigh",
+        },
+      }),
+    ).toBe(true);
   });
 });

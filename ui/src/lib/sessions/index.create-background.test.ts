@@ -12,7 +12,17 @@ it("claims created placement while carrying work metadata through background rec
   const key = "agent:main:created-in-background";
   const request = vi.fn(async (method: string) => {
     if (method === "sessions.create") {
-      return { key };
+      return {
+        key,
+        session: {
+          key,
+          kind: "direct",
+          model: "gpt-5.6-sol",
+          modelProvider: "openai",
+          thinkingLevel: "xhigh",
+          updatedAt: 1,
+        },
+      };
     }
     if (method === "sessions.list") {
       return await pendingList;
@@ -44,6 +54,9 @@ it("claims created placement while carrying work metadata through background rec
   expect(created).toHaveBeenCalledWith(key);
   expect(sessions.isPreparedWorkSession(key)).toBe(true);
   expect(sessions.state.modelOverrides[key]).toBe("openai/gpt-5.6-sol");
+  expect(sessions.state.result?.sessions).toContainEqual(
+    expect.objectContaining({ key, thinkingLevel: "xhigh" }),
+  );
 
   resolveList({
     ts: 2,

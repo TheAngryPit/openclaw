@@ -67,6 +67,7 @@ export type ChatPageHost = ChatHost &
     chatAvatarReason: string | null;
     chatModelSwitchPromises: Record<string, Promise<boolean>>;
     chatModelCatalog: ModelCatalogEntry[];
+    chatModelCatalogAgentId: string | null;
     chatModelCatalogError: string | null;
     modelAuthStatusResult: ModelAuthStatusResult | null;
     modelAuthStatusError: string | null;

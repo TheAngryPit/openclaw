@@ -6,6 +6,7 @@ import {
   rememberChatMetadata,
   type ChatMetadataResult,
 } from "../../lib/chat/chat-metadata-store.ts";
+import { loadModels } from "../../lib/chat/model-catalog-store.ts";
 import { formatUiError } from "../../lib/format-error.ts";
 import { loadModelAuthStatus } from "../../lib/model-auth.ts";
 import { isSessionRunActive } from "../../lib/session-run-state.ts";
@@ -16,8 +17,11 @@ import { loadChatHistory } from "./chat-history.ts";
 import { flushChatQueueForEvent } from "./chat-send-actions.ts";
 import { flushChatQueueAfterIdleSessionReconciliation } from "./chat-session.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
-import { resolveChatAgentId } from "./chat-state-route.ts";
-import { loadModels } from "./models.ts";
+import {
+  reconcileChatModelCatalogOwner,
+  resolveChatAgentId,
+  resolveChatModelMetadataAgentId,
+} from "./chat-state-route.ts";
 import {
   reconcileChatRunFromCurrentSessionRow,
   reconcileChatRunFromSessionRow,
@@ -65,9 +69,13 @@ function scheduleChatMetadataRefresh(callback: () => void) {
 }
 
 export async function refreshChatCommands(host: ChatPageHost) {
+  const agentId = resolveChatModelMetadataAgentId(host);
+  if (!agentId) {
+    return;
+  }
   await refreshSlashCommands({
     client: host.client,
-    agentId: resolveChatAgentId(host),
+    agentId,
   });
 }
 
@@ -80,6 +88,7 @@ function applyChatMetadataResult(
   const models = Array.isArray(result.models) ? result.models : undefined;
   if (models) {
     host.chatModelCatalog = models;
+    host.chatModelCatalogAgentId = agentId ?? null;
     host.chatModelCatalogError = null;
   }
   // Missing commands keep the built-ins: commands.list uses the same server builder and fails too.
@@ -91,13 +100,18 @@ function applyChatMetadataResult(
 }
 
 function seedChatModelCatalogFromStore(host: ChatPageHost, client: GatewayBrowserClient): void {
-  const cached = peekChatMetadata(client, resolveChatAgentId(host));
+  const agentId = resolveChatModelMetadataAgentId(host);
+  if (!agentId) {
+    return;
+  }
+  const cached = peekChatMetadata(client, agentId);
   if (!Array.isArray(cached?.models)) {
     return;
   }
   // A warm snapshot turns mount-time loading into refreshing; the in-flight
   // request still owns the authoritative apply.
   host.chatModelCatalog = cached.models;
+  host.chatModelCatalogAgentId = agentId;
   host.chatModelCatalogError = null;
 }
 
@@ -106,7 +120,7 @@ function ownsChatMetadataRequest(request: ChatMetadataRequest): boolean {
     request.host.client === request.client &&
     request.host.connected &&
     request.host.chatMetadataRequestVersion === request.version &&
-    resolveChatAgentId(request.host) === request.agentId
+    resolveChatModelMetadataAgentId(request.host) === request.agentId
   );
 }
 
@@ -114,18 +128,23 @@ export async function refreshChatMetadata(
   host: ChatPageHost,
   opts?: ChatMetadataRefreshOptions,
 ): Promise<void> {
-  const requestVersion = opts?.requestVersion ?? ++host.chatMetadataRequestVersion;
   if (!host.client || !host.connected) {
     host.chatModelsLoading = false;
     host.chatModelCatalog = [];
     host.chatModelCatalogError = null;
     return;
   }
+  const client = host.client;
+  const agentId = reconcileChatModelCatalogOwner(host);
+  if (!agentId) {
+    host.chatModelsLoading = false;
+    host.chatModelCatalogError = null;
+    return;
+  }
+  const requestVersion = opts?.requestVersion ?? ++host.chatMetadataRequestVersion;
   if (host.chatMetadataRequestVersion !== requestVersion) {
     return;
   }
-  const client = host.client;
-  const agentId = resolveChatAgentId(host);
   const request = { host, client, agentId, version: requestVersion };
   host.chatModelsLoading = true;
   seedChatModelCatalogFromStore(host, client);
@@ -137,6 +156,7 @@ export async function refreshChatMetadata(
     applyChatMetadataResult(host, client, agentId, result);
   } catch (error) {
     if (ownsChatMetadataRequest(request)) {
+      host.chatModelCatalogAgentId = agentId;
       host.chatModelCatalogError = formatUiError(error);
     }
   } finally {
@@ -151,19 +171,33 @@ export async function refreshChatModelAuthStatus(host: ChatPageHost, opts?: { re
     return;
   }
   const client = host.client;
+  const agentId = resolveChatModelMetadataAgentId(host);
+  if (!agentId) {
+    return;
+  }
   const connectionEpoch = host.connectionEpoch;
   try {
     const result = await loadModelAuthStatus(client, {
       ...opts,
-      agentId: resolveChatAgentId(host),
+      agentId,
     });
-    if (host.client !== client || !host.connected || host.connectionEpoch !== connectionEpoch) {
+    if (
+      host.client !== client ||
+      !host.connected ||
+      host.connectionEpoch !== connectionEpoch ||
+      resolveChatModelMetadataAgentId(host) !== agentId
+    ) {
       return;
     }
     host.modelAuthStatusResult = result;
     host.modelAuthStatusError = null;
   } catch (err) {
-    if (host.client !== client || !host.connected || host.connectionEpoch !== connectionEpoch) {
+    if (
+      host.client !== client ||
+      !host.connected ||
+      host.connectionEpoch !== connectionEpoch ||
+      resolveChatModelMetadataAgentId(host) !== agentId
+    ) {
       return;
     }
     host.modelAuthStatusResult = { ts: 0, providers: [] };
@@ -176,13 +210,19 @@ export async function refreshChatModelCatalogOnDemand(host: ChatPageHost): Promi
     return;
   }
   const client = host.client;
-  const agentId = resolveChatAgentId(host);
+  const agentId = reconcileChatModelCatalogOwner(host);
+  if (!agentId) {
+    host.chatModelsLoading = false;
+    host.chatModelCatalogError = null;
+    host.requestUpdate?.();
+    return;
+  }
   const connectionEpoch = host.connectionEpoch;
   const ownsRequest = () =>
     host.client === client &&
     host.connected &&
     host.connectionEpoch === connectionEpoch &&
-    resolveChatAgentId(host) === agentId;
+    resolveChatModelMetadataAgentId(host) === agentId;
   host.chatModelsLoading = true;
   host.chatModelCatalogError = null;
   host.requestUpdate?.();
@@ -193,12 +233,14 @@ export async function refreshChatModelCatalogOnDemand(host: ChatPageHost): Promi
     });
     if (ownsRequest()) {
       host.chatModelCatalog = models;
+      host.chatModelCatalogAgentId = agentId;
       host.chatModelCatalogError = null;
     }
   } catch (error) {
     if (ownsRequest()) {
       // Keep the startup/prepared snapshot usable while recording the failed
       // discovery. Reopening the picker starts another uncached load.
+      host.chatModelCatalogAgentId = agentId;
       host.chatModelCatalogError = formatUiError(error);
     }
   } finally {
@@ -318,6 +360,7 @@ async function refreshChat(
 }
 
 export function refreshPageChat(host: ChatPageHost, opts?: ChatRefreshOptions) {
+  reconcileChatModelCatalogOwner(host);
   const ownsStartupMetadata = Boolean(opts?.startup && host.client && host.connected);
   const startupMetadataRequestVersion = ownsStartupMetadata
     ? ++host.chatMetadataRequestVersion

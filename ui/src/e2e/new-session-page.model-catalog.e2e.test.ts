@@ -30,7 +30,7 @@ function catalogDiscoveryRequests(
 }
 
 suite.define(() => {
-  it("shows metadata failure truthfully and recovers when the picker opens", async () => {
+  it("loads the model catalog when chat metadata is unavailable", async () => {
     const context = await suite.browser.newContext({
       locale: "en-US",
       serviceWorkers: "block",
@@ -61,15 +61,10 @@ suite.define(() => {
       agentModel: "openai/gpt-5.6-luna",
       methodResponses: {
         "chat.metadata": {
-          sequence: [
-            {
-              __mockError: {
-                code: "UNAVAILABLE",
-                message: "metadata request timed out",
-              },
-            },
-            { commands: [], models },
-          ],
+          __mockError: {
+            code: "UNAVAILABLE",
+            message: 'prepared chat metadata owner is unavailable for agent "main"',
+          },
         },
       },
       models,
@@ -77,30 +72,24 @@ suite.define(() => {
 
     try {
       await page.goto(`${suite.server.baseUrl}new`);
-      await gateway.waitForRequest("chat.metadata");
+      const modelRequest = await gateway.waitForRequest("models.list");
+      expect(modelRequest.params).toEqual({
+        agentId: "main",
+        preparedOnly: true,
+        view: "configured",
+      });
 
       const modelSelect = page.locator('[data-chat-model-select="true"]');
-      const errorState = page.locator('[data-chat-model-catalog-state="error"]');
-      await pollLocatorText(
-        errorState.locator(".chat-controls__model-catalog-state-label > span"),
-      ).toBe("Models unavailable");
-      expect(await errorState.count()).toBe(1);
-      expect(await page.locator("[data-chat-model-option]").count()).toBe(0);
-
       await modelSelect.click();
-
-      await expect.poll(async () => (await gateway.getRequests("chat.metadata")).length).toBe(2);
-      expect((await gateway.getRequests("chat.metadata"))[1]?.params).toMatchObject({
-        agentId: "main",
-      });
       await expect.poll(() => page.locator("[data-chat-model-option]").count()).toBe(3);
-      expect(await page.locator("[data-chat-model-catalog-state]").count()).toBe(0);
+      expect(await page.locator('[data-chat-model-catalog-state="error"]').count()).toBe(0);
+      expect(await gateway.getRequests("chat.metadata")).toHaveLength(0);
     } finally {
       await context.close();
     }
   });
 
-  it("restores the model picker after startup-sidecars metadata becomes available", async () => {
+  it("restores the model picker after startup-sidecars catalog becomes available", async () => {
     const context = await suite.browser.newContext({
       locale: "en-US",
       serviceWorkers: "block",
@@ -116,7 +105,7 @@ suite.define(() => {
     };
     const gateway = await installMockGateway(page, {
       methodResponses: {
-        "chat.metadata": {
+        "models.list": {
           sequence: [
             {
               __mockError: {
@@ -135,7 +124,7 @@ suite.define(() => {
 
     try {
       await page.goto(`${suite.server.baseUrl}new`);
-      await expect.poll(async () => (await gateway.getRequests("chat.metadata")).length).toBe(2);
+      await expect.poll(async () => (await gateway.getRequests("models.list")).length).toBe(2);
 
       const modelSelect = page.locator(
         '.new-session-page__composer [data-chat-model-select="true"]',
@@ -145,12 +134,13 @@ suite.define(() => {
         .poll(() => page.locator('[data-chat-model-option="openai/gpt-5.6-luna"]').textContent())
         .toContain(recoveredModel.name);
 
-      // The picker's own revalidation lands after the rows render, so wait for it.
-      await expect.poll(async () => (await gateway.getRequests("chat.metadata")).length).toBe(3);
-      expect(await gateway.getRequests("chat.metadata")).toEqual([
-        expect.objectContaining({ params: { agentId: "main" } }),
-        expect.objectContaining({ params: { agentId: "main" } }),
-        expect.objectContaining({ params: { agentId: "main" } }),
+      expect(await gateway.getRequests("models.list")).toEqual([
+        expect.objectContaining({
+          params: { agentId: "main", preparedOnly: true, view: "configured" },
+        }),
+        expect.objectContaining({
+          params: { agentId: "main", preparedOnly: true, view: "configured" },
+        }),
       ]);
     } finally {
       await context.close();
