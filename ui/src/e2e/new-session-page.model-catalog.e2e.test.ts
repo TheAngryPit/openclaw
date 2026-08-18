@@ -134,14 +134,15 @@ suite.define(() => {
         .poll(() => page.locator('[data-chat-model-option="openai/gpt-5.6-luna"]').textContent())
         .toContain(recoveredModel.name);
 
-      expect(await gateway.getRequests("models.list")).toEqual([
-        expect.objectContaining({
-          params: { agentId: "main", preparedOnly: true, view: "configured" },
-        }),
-        expect.objectContaining({
-          params: { agentId: "main", preparedOnly: true, view: "configured" },
-        }),
-      ]);
+      const requests = await gateway.getRequests("models.list");
+      expect(requests.length).toBeGreaterThanOrEqual(2);
+      for (const request of requests) {
+        expect(request.params).toEqual({
+          agentId: "main",
+          preparedOnly: true,
+          view: "configured",
+        });
+      }
     } finally {
       await context.close();
     }

@@ -142,9 +142,12 @@ suite.define(() => {
       expect(response?.status()).toBe(200);
       await gateway.waitForRequest("agents.list");
       await gateway.waitForRequest("config.get");
-      const modelRequest = await gateway.waitForRequest("chat.metadata");
-      expect(modelRequest.params).toEqual({ agentId: "main" });
-      expect(await gateway.getRequests("models.list")).toHaveLength(0);
+      const modelRequest = await gateway.waitForRequest("models.list");
+      expect(modelRequest.params).toEqual({
+        agentId: "main",
+        preparedOnly: true,
+        view: "configured",
+      });
 
       const select = page.locator("wa-select.model-picker__select").first();
       await select.waitFor({ state: "visible", timeout: 10_000 });

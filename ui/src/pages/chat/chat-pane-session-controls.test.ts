@@ -180,6 +180,7 @@ describe("chat pane composer controls", () => {
     const request = vi.fn(async () => ({ models: [] }));
     const state = {
       chatRunId: null,
+      assistantAgentId: "main",
       connected: true,
       connectionEpoch: 1,
       client: { request },

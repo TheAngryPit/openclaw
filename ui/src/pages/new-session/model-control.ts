@@ -246,7 +246,7 @@ export class NewSessionModelControl {
     if (cached) {
       // Keep the complete picker stable while the automatic revalidation runs.
       // A failed refresh remains recorded but cannot displace usable options.
-      this.publishMetadataCatalog(cached, "ready");
+      this.publishMetadataCatalog(cached, "refreshing");
     } else {
       this.updateMetadataState({
         ...this.metadataState,

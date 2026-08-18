@@ -465,6 +465,7 @@ describe("refreshChat", () => {
   it("renders cached models while startup metadata refreshes", async () => {
     const startup = createDeferred<unknown>();
     const host = makeChatHost({
+      assistantAgentId: "main",
       chatModelSwitchPromises: {},
       hello: gatewayHelloForMethods(["chat.metadata", "chat.startup"], []),
       requestHandlers: {
@@ -502,8 +503,8 @@ describe("refreshChat", () => {
       onModelSetup: vi.fn(),
     });
     render(controls.composerControls, container);
-    expect(container.querySelector('[data-chat-model-catalog-state="refreshing"]')).not.toBeNull();
-    expect(container.textContent).toContain("Refreshing models…");
+    expect(container.querySelector("[data-chat-model-catalog-state]")).toBeNull();
+    expect(container.textContent).not.toContain("Refreshing models…");
     expect(container.textContent).not.toContain("Loading models…");
 
     startup.resolve({

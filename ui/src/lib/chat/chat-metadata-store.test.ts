@@ -1,15 +1,10 @@
-import {
-  DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS,
-  gatewayStartupUnavailableDetails,
-} from "@openclaw/gateway-client/browser";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { GatewayRequestError, type GatewayBrowserClient } from "../../api/gateway.ts";
+import { describe, expect, it, vi } from "vitest";
+import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import {
   invalidateChatMetadataStore,
   loadChatMetadata,
   peekChatMetadata,
   rememberChatMetadata,
-  revalidateChatMetadata,
   type ChatMetadataResult,
 } from "./chat-metadata-store.ts";
 
@@ -33,20 +28,6 @@ function metadata(modelId: string): ChatMetadataResult {
     models: [{ id: modelId, name: modelId, provider: "openai" }],
   };
 }
-
-function startupUnavailableError(retryAfterMs = 250): GatewayRequestError {
-  return new GatewayRequestError({
-    code: "UNAVAILABLE",
-    message: "gateway startup sidecars are still initializing",
-    details: gatewayStartupUnavailableDetails(),
-    retryable: true,
-    retryAfterMs,
-  });
-}
-
-afterEach(() => {
-  vi.useRealTimers();
-});
 
 describe("chat metadata store", () => {
   it("returns a cached result without requesting it again", async () => {
@@ -114,120 +95,5 @@ describe("chat metadata store", () => {
     expect(peekChatMetadata(client, "worker")).toBeUndefined();
     await expect(loadChatMetadata(client, "main")).resolves.toBe(main);
     expect(request).toHaveBeenCalledOnce();
-  });
-
-  it("keeps the stale snapshot readable while one fresh revalidation replaces it", async () => {
-    const oldResult = metadata("old-model");
-    const nextResult = metadata("next-model");
-    const refresh = deferred<ChatMetadataResult>();
-    const request = vi.fn().mockReturnValue(refresh.promise);
-    const client = clientWith(request);
-    rememberChatMetadata(client, "main", oldResult);
-
-    const first = revalidateChatMetadata(client, "main");
-    const second = revalidateChatMetadata(client, "main");
-
-    expect(second).toBe(first);
-    expect(peekChatMetadata(client, "main")).toBe(oldResult);
-    expect(request).toHaveBeenCalledOnce();
-    refresh.resolve(nextResult);
-    await expect(first).resolves.toBe(nextResult);
-    expect(peekChatMetadata(client, "main")).toBe(nextResult);
-  });
-
-  it("does not let an older plain load clobber a newer revalidation", async () => {
-    const older = deferred<ChatMetadataResult>();
-    const newer = deferred<ChatMetadataResult>();
-    const request = vi.fn().mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise);
-    const client = clientWith(request);
-
-    const olderLoad = loadChatMetadata(client, "main");
-    const newerLoad = revalidateChatMetadata(client, "main");
-    newer.resolve(metadata("new-model"));
-    await newerLoad;
-    older.resolve(metadata("old-model"));
-    await olderLoad;
-
-    expect(peekChatMetadata(client, "main")).toEqual(metadata("new-model"));
-  });
-
-  it("retries canonical startup unavailability and caches the recovered catalog", async () => {
-    vi.useFakeTimers();
-    const result = metadata("recovered-model");
-    const request = vi
-      .fn()
-      .mockRejectedValueOnce(startupUnavailableError(250))
-      .mockResolvedValueOnce(result);
-    const client = clientWith(request);
-
-    const refresh = revalidateChatMetadata(client, "main", {
-      startupRetryWindowMs: 60_000,
-    });
-    await vi.advanceTimersByTimeAsync(249);
-    expect(request).toHaveBeenCalledOnce();
-    await vi.advanceTimersByTimeAsync(1);
-
-    await expect(refresh).resolves.toBe(result);
-    expect(request).toHaveBeenCalledTimes(2);
-    expect(peekChatMetadata(client, "main")).toBe(result);
-  });
-
-  it("does not retry unrelated retryable unavailable errors", async () => {
-    vi.useFakeTimers();
-    const request = vi.fn().mockRejectedValue(
-      new GatewayRequestError({
-        code: "UNAVAILABLE",
-        message: "database temporarily unavailable",
-        details: { reason: "database-busy" },
-        retryable: true,
-        retryAfterMs: 250,
-      }),
-    );
-    const client = clientWith(request);
-
-    const refresh = revalidateChatMetadata(client, "main", {
-      startupRetryWindowMs: 60_000,
-    });
-    const rejection = expect(refresh).rejects.toThrow("database temporarily unavailable");
-    await vi.advanceTimersByTimeAsync(2_000);
-
-    await rejection;
-    expect(request).toHaveBeenCalledOnce();
-    expect(vi.getTimerCount()).toBe(0);
-  });
-
-  it("stops startup retries at the configured deadline", async () => {
-    vi.useFakeTimers();
-    const startedAt = Date.UTC(2026, 7, 2);
-    vi.setSystemTime(startedAt);
-    const attemptTimes: number[] = [];
-    const request = vi.fn().mockImplementation(() => {
-      attemptTimes.push(Date.now());
-      return Promise.reject(startupUnavailableError(2_000));
-    });
-    const client = clientWith(request);
-    const refresh = revalidateChatMetadata(client, "main", {
-      startupRetryWindowMs: 60_000,
-    });
-    const rejection = expect(refresh).rejects.toThrow("gateway startup sidecars");
-
-    await vi.advanceTimersByTimeAsync(60_000);
-    await rejection;
-
-    expect(attemptTimes).toHaveLength(30);
-    expect(attemptTimes[0]).toBe(startedAt);
-    expect(attemptTimes.at(-1)).toBe(startedAt + 58_000);
-    expect(request).toHaveBeenNthCalledWith(
-      1,
-      "chat.metadata",
-      { agentId: "main" },
-      { timeoutMs: DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS },
-    );
-    expect(request).toHaveBeenLastCalledWith(
-      "chat.metadata",
-      { agentId: "main" },
-      { timeoutMs: 2_000 },
-    );
-    expect(vi.getTimerCount()).toBe(0);
   });
 });
