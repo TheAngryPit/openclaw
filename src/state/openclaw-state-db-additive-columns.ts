@@ -29,6 +29,11 @@ export const CLAW_LAZY_ADDITIVE_STATE_COLUMN_DEFINITIONS = [
   { columnName: "worktree", dataType: "INTEGER", tableName: "session_groups" },
   { columnName: "workspace_dir", dataType: "TEXT", tableName: "installed_plugin_index" },
   { columnName: "allowed_hosts", dataType: "TEXT", tableName: "secret_store_entries" },
+  {
+    columnName: "target_machine_class",
+    dataType: "TEXT",
+    tableName: "worker_session_placement_moves",
+  },
 ] as const satisfies readonly LazyAdditiveStateColumnDefinition[];
 
 function isFirstUseAdditiveStateColumn({

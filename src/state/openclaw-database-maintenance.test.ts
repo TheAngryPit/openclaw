@@ -185,6 +185,7 @@ describe("OpenClaw database maintenance schema validation", () => {
       "session_groups.worktree INTEGER",
       "installed_plugin_index.workspace_dir TEXT",
       "secret_store_entries.allowed_hosts TEXT",
+      "worker_session_placement_moves.target_machine_class TEXT",
     ]);
 
     const database = createGlobalDatabase();
@@ -205,6 +206,11 @@ describe("OpenClaw database maintenance schema validation", () => {
         database.exec(`ALTER TABLE "${tableName}" DROP COLUMN "${columnName}";`);
       }
 
+      expect(() =>
+        assertOpenClawStateDatabaseForMaintenance(database, {
+          pathname: "global.sqlite",
+        }),
+      ).not.toThrow();
       ensureAdditiveStateColumns(database);
       expect(() =>
         assertOpenClawStateDatabaseForMaintenance(database, {
