@@ -30,7 +30,7 @@ import {
   closeCodexAppServerTransportAndWait,
   type CodexAppServerTransport,
 } from "./transport.js";
-import { CODEX_APP_SERVER_VERSION } from "./version.js";
+import { CODEX_APP_SERVER_VERSION, MIN_SUPPORTED_CODEX_APP_SERVER_VERSION } from "./version.js";
 
 const CODEX_APP_SERVER_PARSE_LOG_MAX = 500;
 const CODEX_APP_SERVER_PARSE_BUFFER_MAX = 8 * 1024 * 1024;
@@ -999,7 +999,7 @@ class CodexAppServerVersionError extends Error {
       ? `detected ${detectedVersion}`
       : "OpenClaw could not determine the running Codex version";
     super(
-      `Codex app-server ${CODEX_APP_SERVER_VERSION} is required, but ${detected}. Update the configured Codex app-server binary, or remove custom command overrides to use the managed binary.`,
+      `Codex app-server ${MIN_SUPPORTED_CODEX_APP_SERVER_VERSION} or newer is required, but ${detected}. Update the configured Codex app-server binary, or remove custom command overrides to use the managed binary.`,
     );
     this.name = "CodexAppServerVersionError";
     this.detectedVersion = detectedVersion;
@@ -1008,8 +1008,39 @@ class CodexAppServerVersionError extends Error {
 
 function assertSupportedCodexAppServerVersion(response: CodexInitializeResponse): string {
   const detectedVersion = readCodexVersionFromUserAgent(response.userAgent);
-  if (detectedVersion !== CODEX_APP_SERVER_VERSION) {
+  const detected = detectedVersion?.match(
+    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u,
+  );
+  const minimum = MIN_SUPPORTED_CODEX_APP_SERVER_VERSION.split(".").map(Number);
+  let precedence = 0;
+  if (detected) {
+    for (let index = 0; index < minimum.length; index += 1) {
+      precedence = Number(detected[index + 1]) - (minimum[index] ?? 0);
+      if (precedence !== 0) {
+        break;
+      }
+    }
+  }
+  const invalidNumericPrerelease = detected?.[4]
+    ?.split(".")
+    .some((identifier) => /^\d+$/u.test(identifier) && /^0\d/u.test(identifier));
+  if (
+    !detectedVersion ||
+    !detected ||
+    invalidNumericPrerelease ||
+    precedence < 0 ||
+    (precedence === 0 && Boolean(detected[4]))
+  ) {
     throw new CodexAppServerVersionError(detectedVersion);
+  }
+  if (precedence > 0) {
+    embeddedAgentLog.warn(
+      "codex app-server is newer than OpenClaw's validated managed runtime; continuing with capability validation",
+      {
+        detectedVersion,
+        validatedVersion: CODEX_APP_SERVER_VERSION,
+      },
+    );
   }
   return detectedVersion;
 }

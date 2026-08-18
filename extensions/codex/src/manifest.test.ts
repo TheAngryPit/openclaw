@@ -1,7 +1,10 @@
 // Codex tests cover manifest plugin behavior.
 import fs from "node:fs";
 import { describe, expect, it } from "vitest";
-import { CODEX_APP_SERVER_VERSION } from "./app-server/version.js";
+import {
+  CODEX_APP_SERVER_VERSION,
+  MIN_SUPPORTED_CODEX_APP_SERVER_VERSION,
+} from "./app-server/version.js";
 
 type CodexPackageManifest = {
   dependencies?: Record<string, string>;
@@ -24,6 +27,7 @@ describe("codex package manifest", () => {
 
     expect(packageJson.devDependencies).toHaveProperty("@openclaw/plugin-sdk");
     expect(packageJson.dependencies?.["@openai/codex"]).toBe(CODEX_APP_SERVER_VERSION);
+    expect(MIN_SUPPORTED_CODEX_APP_SERVER_VERSION).toBe(CODEX_APP_SERVER_VERSION);
     expect(packageJson.dependencies).not.toHaveProperty("semver");
     expect(packageJson.openclaw?.release?.requireLatestDependencies).toEqual(["@openai/codex"]);
     expect(packageJson.openclaw?.install?.requiredPlatformPackages).toEqual([
