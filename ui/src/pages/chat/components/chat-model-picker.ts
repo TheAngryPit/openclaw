@@ -238,7 +238,7 @@ function renderCatalogState(
           ? t("chat.modelControls.modelsRefreshFailed")
           : t("chat.modelControls.modelsUnavailable")
         : state.status === "ready"
-          ? `${t("modelSetup.failure.auth")}. ${t("modelSetup.failureGuidance.auth")}`
+          ? t("chat.modelControls.modelsUnavailable")
           : t("chat.modelControls.loadingModels");
   return html`
     <div

@@ -5243,7 +5243,7 @@ describe("chat model controls", () => {
     );
     expect(
       container.querySelector('[data-chat-model-catalog-state="ready"]')?.textContent,
-    ).toContain("Authentication failed. Review the provider credential or sign-in, then retry.");
+    ).toContain("Models unavailable");
     container.querySelector<HTMLButtonElement>('[data-chat-model-setup="true"]')?.click();
     expect(onModelSetup).toHaveBeenCalledOnce();
   });

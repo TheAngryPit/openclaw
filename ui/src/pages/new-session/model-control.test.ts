@@ -483,9 +483,7 @@ describe("new-session model runtime", () => {
     expect(options).toHaveLength(2);
     expect(options[0]?.textContent).toContain("Sign-in needed");
     expect([...options].every((option) => option.disabled)).toBe(true);
-    expect(container.textContent).toContain(
-      "Authentication failed. Review the provider credential or sign-in, then retry.",
-    );
+    expect(container.textContent).toContain("Models unavailable");
     expect(container.querySelector('[data-chat-model-catalog-retry="true"]')).toBeNull();
     container.querySelector<HTMLButtonElement>('[data-chat-model-setup="true"]')?.click();
     expect(navigate).toHaveBeenCalledWith("model-setup");
@@ -505,7 +503,7 @@ describe("new-session model runtime", () => {
     request.mockReturnValueOnce(refresh.promise);
 
     control.load(context, "main", true);
-    expect(renderControl(control, context).textContent).toContain("Authentication failed");
+    expect(renderControl(control, context).textContent).toContain("Models unavailable");
 
     refresh.reject(new Error("refresh failed"));
     await vi.waitFor(() =>
@@ -516,7 +514,7 @@ describe("new-session model runtime", () => {
     const container = renderControl(control, context);
     expect(container.querySelectorAll("[data-chat-model-option]")).toHaveLength(0);
     expect(container.querySelector('[data-chat-model-select="true"]')?.textContent).toContain(
-      "Authentication failed",
+      "Models unavailable",
     );
     expect(container.textContent).not.toContain("GPT-5.6 Luna");
   });

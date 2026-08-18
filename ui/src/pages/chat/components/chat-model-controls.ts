@@ -152,10 +152,6 @@ function formatPickerModelLabel(label: string): string {
   return match?.[1] ?? label;
 }
 
-function modelAuthenticationNeededText(): string {
-  return `${t("modelSetup.failure.auth")}. ${t("modelSetup.failureGuidance.auth")}`;
-}
-
 export function renderChatModelControls(props: ChatModelControlsProps) {
   const {
     currentOverride,
@@ -341,7 +337,7 @@ export function renderChatModelControls(props: ChatModelControlsProps) {
     : catalogErrorWithoutSnapshot
       ? t("chat.modelControls.modelsUnavailable")
       : catalogSnapshotEmpty
-        ? modelAuthenticationNeededText()
+        ? t("chat.modelControls.modelsUnavailable")
         : undefined;
   const busy =
     props.loading || props.sending || Boolean(props.activeRunId) || props.stream !== null;
