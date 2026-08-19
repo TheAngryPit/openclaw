@@ -22,8 +22,12 @@ export async function retryGatewayStartupRequest<T>(params: {
         throw requestError;
       }
       latestError = requestError;
+      const retryRemainingMs = deadlineAt - Date.now();
+      if (retryRemainingMs <= 0) {
+        throw latestError;
+      }
       await new Promise<void>((resolve) => {
-        globalThis.setTimeout(resolve, Math.min(retryAfterMs, remainingMs));
+        globalThis.setTimeout(resolve, Math.min(retryAfterMs, retryRemainingMs));
       });
     }
   }

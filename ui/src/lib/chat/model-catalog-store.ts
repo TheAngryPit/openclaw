@@ -58,7 +58,8 @@ export async function revalidateModels(
   opts: ModelCatalogScope & { startupRetryWindowMs?: number },
 ): Promise<ModelCatalogEntry[]> {
   const retryWindowMs = opts.startupRetryWindowMs;
-  const request = () => loadModelsCached(client, { ...opts, rejectOnFailure: true }, true);
+  const request = (remainingMs?: number) =>
+    loadModelsCached(client, { ...opts, rejectOnFailure: true }, true, remainingMs);
   if (retryWindowMs === undefined) {
     return await request();
   }
@@ -82,6 +83,7 @@ async function loadModelsCached(
   client: GatewayBrowserClient,
   opts: LoadModelsOptions,
   bypassCache: boolean,
+  requestTimeoutMs?: number,
 ): Promise<ModelCatalogEntry[]> {
   const cache = modelCatalogCacheFor(client);
   const agentId = opts.agentId.trim();
@@ -111,6 +113,7 @@ async function loadModelsCached(
     opts.preparedOnly === true,
     opts.refresh === true,
     rejectOnFailure,
+    requestTimeoutMs,
   )
     .then((result) => {
       const latest = cache.get(cacheKey);
@@ -151,14 +154,21 @@ async function requestModels(
   preparedOnly: boolean,
   refresh: boolean,
   rejectOnFailure: boolean,
+  timeoutMs?: number,
 ): Promise<{ models: ModelCatalogEntry[]; fresh: boolean }> {
   try {
-    const result = await client.request<{ models: ModelCatalogEntry[] }>("models.list", {
+    const requestParams = {
       view: "configured",
       agentId,
       ...(preparedOnly ? { preparedOnly: true } : {}),
       ...(refresh ? { refresh: true } : {}),
-    });
+    };
+    const result =
+      timeoutMs === undefined
+        ? await client.request<{ models: ModelCatalogEntry[] }>("models.list", requestParams)
+        : await client.request<{ models: ModelCatalogEntry[] }>("models.list", requestParams, {
+            timeoutMs,
+          });
     return { models: result?.models ?? [], fresh: true };
   } catch (error) {
     if (rejectOnFailure) {

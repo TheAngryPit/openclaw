@@ -1,7 +1,7 @@
 // Control UI tests cover models behavior.
 import { describe, expect, it, vi } from "vitest";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
-import { loadModels, peekModels } from "./model-catalog-store.ts";
+import { loadModels, peekModels, revalidateModels } from "./model-catalog-store.ts";
 
 describe("loadModels", () => {
   it("requests the configured model list view", async () => {
@@ -67,6 +67,50 @@ describe("loadModels", () => {
 
       vi.setSystemTime(new Date("2026-08-19T00:00:00Z"));
       expect(peekModels(client, scope)).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds a startup retry by the remaining retry window", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date(0));
+      const startupError = Object.assign(new Error("gateway starting"), {
+        code: "UNAVAILABLE",
+        details: { reason: "startup-sidecars" },
+        retryable: true,
+        retryAfterMs: 250,
+      });
+      const request = vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          vi.setSystemTime(new Date(400));
+          throw startupError;
+        })
+        .mockResolvedValueOnce({ models: [] });
+      const client = { request } as unknown as GatewayBrowserClient;
+
+      const models = revalidateModels(client, {
+        agentId: "main",
+        preparedOnly: true,
+        startupRetryWindowMs: 1_000,
+      });
+      await vi.advanceTimersByTimeAsync(250);
+
+      await expect(models).resolves.toEqual([]);
+      expect(request).toHaveBeenNthCalledWith(
+        1,
+        "models.list",
+        { agentId: "main", preparedOnly: true, view: "configured" },
+        { timeoutMs: 1_000 },
+      );
+      expect(request).toHaveBeenNthCalledWith(
+        2,
+        "models.list",
+        { agentId: "main", preparedOnly: true, view: "configured" },
+        { timeoutMs: 350 },
+      );
     } finally {
       vi.useRealTimers();
     }
