@@ -158,6 +158,7 @@ export function createPageState(
     localMediaPreviewRoots: appConfig.localMediaPreviewRoots,
     embedSandboxMode: appConfig.embedSandboxMode,
     allowExternalEmbedUrls: appConfig.allowExternalEmbedUrls,
+    automaticallyFetchFavicons: appConfig.automaticallyFetchFavicons,
     client: null,
     connected: false,
     connectionEpoch: 0,
@@ -265,7 +266,6 @@ export function createPageState(
     renderLifecycle,
     requestUpdate: () => renderLifecycle.invalidate(),
     sessionWorkspaceState: undefined,
-    sessionWorkspaceOpenRequest: undefined,
     backgroundTasksState: undefined,
     querySelector: page.querySelector.bind(page),
   } as unknown as ChatPageHost;

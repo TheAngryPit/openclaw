@@ -174,6 +174,7 @@ describe("canonical session message recovery", () => {
     ]);
     expect(state.chatRunId).toBe(activeRunId);
     expect(state.chatQueue).toEqual([]);
+    state.chatRunId = steerRunId;
 
     const steerEvent = {
       type: "event",
@@ -198,6 +199,7 @@ describe("canonical session message recovery", () => {
       },
     } satisfies Parameters<typeof handlePageGatewayEvent>[1];
     handlePageGatewayEvent(state, steerEvent);
+    expect(state.chatRunId).toBe(activeRunId);
     const segmentsAfterRequestBoundary = state.chatStreamSegments;
     expect(state.chatStreamSegments).toBe(segmentsAfterRequestBoundary);
     expect(
@@ -329,6 +331,43 @@ describe("canonical session message recovery", () => {
     expect(getChatSessionProjection(state, state.chatMessages).messages).toEqual(
       state.chatMessages,
     );
+  });
+
+  it("does not rebind an unrelated run from a persisted steer", () => {
+    const { state } = createSessionEventState({
+      connected: false,
+      chatMessages: [],
+      chatRunId: "run-c",
+      chatStream: "Run C",
+      chatStreamSegments: [],
+      chatToolMessages: [],
+    });
+
+    handlePageGatewayEvent(state, {
+      type: "event",
+      event: "session.message",
+      payload: {
+        sessionKey: state.sessionKey,
+        clientRunId: "run-b",
+        hasActiveRun: true,
+        messageId: "steer-b",
+        messageSeq: 1,
+        message: {
+          role: "user",
+          content: "Steer A",
+          __openclaw: {
+            id: "steer-b",
+            idempotencyKey: "run-b:user",
+            seq: 1,
+            steerTargetRunId: "run-a",
+          },
+        },
+      },
+    });
+
+    expect(state.chatRunId).toBe("run-c");
+    expect(state.chatStream).toBe("Run C");
+    expect(state.chatStreamSegments).toEqual([]);
   });
 
   it("keeps pre-steer output above an earlier ordinary queued user", () => {
@@ -666,6 +705,60 @@ describe("canonical session message recovery", () => {
 
     expect(state.chatMessages).toEqual([selectedUser]);
     expect(retireSessionCompanion).toHaveBeenCalledExactlyOnceWith("agent:other:main", "other");
+  });
+
+  it("retires current checkout presentation for a structural event", () => {
+    const listBranches = vi.fn(() => new Promise<never>(() => {}));
+    const { state } = createSessionEventState({
+      chatBranches: [
+        {
+          leafEntryId: "old-leaf",
+          headline: "Old checkout",
+          messageCount: 1,
+          active: true,
+        },
+      ],
+      chatBranchesConnectionEpoch: 1,
+      chatBranchesSessionKey: "agent:main:main",
+      sessions: {
+        listBranches,
+        reconcileChanged: vi.fn().mockReturnValue({ applied: false }),
+        refresh: vi.fn().mockResolvedValue(undefined),
+      } as never,
+    });
+
+    handlePageGatewayEvent(state, {
+      type: "event",
+      event: "sessions.changed",
+      payload: { sessionKey: state.sessionKey, agentId: "main", reason: "branch-switch" },
+    });
+
+    expect(state.chatBranches).toEqual([]);
+    expect(state.chatBranchesSessionKey).toBeNull();
+    expect(listBranches).toHaveBeenCalled();
+  });
+
+  it.each([
+    { sessionKey: "agent:main:main", agentId: "main", reason: "send" },
+    { sessionKey: "agent:other:main", agentId: "other", reason: "rewind" },
+  ])("preserves checkout presentation for non-matching event $reason/$sessionKey", (payload) => {
+    const oldBranches = [
+      { leafEntryId: "old-leaf", headline: "Old checkout", messageCount: 1, active: true },
+    ];
+    const { state } = createSessionEventState({
+      chatBranches: oldBranches,
+      chatBranchesConnectionEpoch: 1,
+      chatBranchesSessionKey: "agent:main:main",
+    });
+
+    handlePageGatewayEvent(state, {
+      type: "event",
+      event: "sessions.changed",
+      payload,
+    });
+
+    expect(state.chatBranches).toBe(oldBranches);
+    expect(state.chatBranchesSessionKey).toBe("agent:main:main");
   });
 
   it("keeps the routed row when a hidden pane observes its archive first", () => {

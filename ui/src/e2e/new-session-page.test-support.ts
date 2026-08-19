@@ -39,10 +39,6 @@ export const SOURCE_REPO = "/tmp/source-repo";
 export const TARGET_REPO = "/tmp/target-repo";
 export const REFRESHED_RESEARCH_WORKSPACE = "/home/peter/research-next";
 export const MOVED_WORKSPACE = "/home/peter/openclaw-next";
-export const NODE_HOME = "/Users/peter";
-export const NODE_PICKED = "/Users/peter/Projects";
-export const NODE_UNC = "\\\\server\\share\\repo";
-export const EXEC_ONLY_PICKED = "C:\\Users\\peter\\repo";
 const LOCATOR_TEXT_READ_TIMEOUT_MS = 500;
 const LOCATOR_TEXT_POLL_TIMEOUT_MS = 10_000;
 
@@ -70,6 +66,12 @@ const environmentMetadataProofArtifactDir = path.join(
   ".artifacts",
   "control-ui-e2e",
   "environment-metadata",
+);
+const deviceRuntimeProofArtifactDir = path.join(
+  process.cwd(),
+  ".artifacts",
+  "control-ui-e2e",
+  "device-runtime-gating",
 );
 
 export async function prepareProjectUiProof() {
@@ -122,7 +124,7 @@ export function createdSessionListResult(sessionKey: string) {
   };
 }
 
-export async function expectPendingCloudStartupBeforeRuntime(
+export async function expectPendingSessionPlacementStartupBeforeRuntime(
   page: Page,
   gateway: MockGatewayControls,
   sessionKey: string,
@@ -175,6 +177,18 @@ export async function captureEnvironmentMetadataUiProof(page: Page) {
     animations: "disabled",
     fullPage: true,
     path: path.join(environmentMetadataProofArtifactDir, `${proofName}.png`),
+  });
+}
+
+export async function captureDeviceRuntimeUiProof(page: Page, fileName: string) {
+  if (!captureUiProofEnabled) {
+    return;
+  }
+  await mkdir(deviceRuntimeProofArtifactDir, { recursive: true });
+  await page.screenshot({
+    animations: "disabled",
+    fullPage: true,
+    path: path.join(deviceRuntimeProofArtifactDir, fileName),
   });
 }
 

@@ -359,6 +359,7 @@ public struct BoardWidget: Codable, Sendable {
     public let sandboxurl: String?
     public let sandboxport: Int?
     public let sandboxorigin: String?
+    public let kindlabel: String?
 
     public init(
         name: String,
@@ -383,7 +384,8 @@ public struct BoardWidget: Codable, Sendable {
         viewgeneration: String? = nil,
         sandboxurl: String? = nil,
         sandboxport: Int? = nil,
-        sandboxorigin: String? = nil)
+        sandboxorigin: String? = nil,
+        kindlabel: String? = nil)
     {
         self.name = name
         self.tabid = tabid
@@ -408,6 +410,7 @@ public struct BoardWidget: Codable, Sendable {
         self.sandboxurl = sandboxurl
         self.sandboxport = sandboxport
         self.sandboxorigin = sandboxorigin
+        self.kindlabel = kindlabel
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -434,6 +437,7 @@ public struct BoardWidget: Codable, Sendable {
         case sandboxurl = "sandboxUrl"
         case sandboxport = "sandboxPort"
         case sandboxorigin = "sandboxOrigin"
+        case kindlabel = "kindLabel"
     }
 }
 
@@ -750,6 +754,28 @@ public struct BoardWidgetPluginContent: Codable, Sendable {
         case kind
         case pluginkind = "pluginKind"
         case props
+    }
+}
+
+public struct BoardWidgetRegisteredContent: Codable, Sendable {
+    public let kind: String
+    public let contentkind: String
+    public let source: String
+
+    public init(
+        kind: String,
+        contentkind: String,
+        source: String)
+    {
+        self.kind = kind
+        self.contentkind = contentkind
+        self.source = source
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case contentkind = "contentKind"
+        case source
     }
 }
 
@@ -1231,21 +1257,25 @@ public struct ProgressCardPutParams: Codable, Sendable {
     public let sessionkey: String
     public let markdown: String?
     public let plan: [ProgressCardStep]?
+    public let expectedrevision: Int?
 
     public init(
         sessionkey: String,
         markdown: String? = nil,
-        plan: [ProgressCardStep]? = nil)
+        plan: [ProgressCardStep]? = nil,
+        expectedrevision: Int? = nil)
     {
         self.sessionkey = sessionkey
         self.markdown = markdown
         self.plan = plan
+        self.expectedrevision = expectedrevision
     }
 
     private enum CodingKeys: String, CodingKey {
         case sessionkey = "sessionKey"
         case markdown
         case plan
+        case expectedrevision = "expectedRevision"
     }
 }
 
@@ -1752,6 +1782,28 @@ public struct McpAppViewExpiredErrorDetails: Codable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case code
+    }
+}
+
+public struct SkillProposalRevisionChangedErrorDetails: Codable, Sendable {
+    public let code: String
+    public let expectedrevisionhash: String
+    public let currentrevisionhash: String
+
+    public init(
+        code: String,
+        expectedrevisionhash: String,
+        currentrevisionhash: String)
+    {
+        self.code = code
+        self.expectedrevisionhash = expectedrevisionhash
+        self.currentrevisionhash = currentrevisionhash
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case code
+        case expectedrevisionhash = "expectedRevisionHash"
+        case currentrevisionhash = "currentRevisionHash"
     }
 }
 
@@ -6304,6 +6356,7 @@ public struct SessionRow: Codable, Sendable {
     public let kind: AnyCodable
     public let label: String?
     public let icon: String?
+    public let channelavatarurl: String?
     public let boardface: AnyCodable?
     public let displayname: String?
     public let derivedtitle: String?
@@ -6373,6 +6426,7 @@ public struct SessionRow: Codable, Sendable {
         kind: AnyCodable,
         label: String? = nil,
         icon: String? = nil,
+        channelavatarurl: String? = nil,
         boardface: AnyCodable? = nil,
         displayname: String? = nil,
         derivedtitle: String? = nil,
@@ -6441,6 +6495,7 @@ public struct SessionRow: Codable, Sendable {
         self.kind = kind
         self.label = label
         self.icon = icon
+        self.channelavatarurl = channelavatarurl
         self.boardface = boardface
         self.displayname = displayname
         self.derivedtitle = derivedtitle
@@ -6511,6 +6566,7 @@ public struct SessionRow: Codable, Sendable {
         case kind
         case label
         case icon
+        case channelavatarurl = "channelAvatarUrl"
         case boardface = "boardFace"
         case displayname = "displayName"
         case derivedtitle = "derivedTitle"
@@ -15752,7 +15808,7 @@ public struct SkillsProposalRequestRevisionParams: Codable, Sendable {
     public let agentid: String?
     public let targetagentid: String?
     public let proposalid: String
-    public let expectedrevisionhash: String?
+    public let expectedrevisionhash: String
     public let instructions: String
     public let sessionkey: String
     public let sessionid: String?
@@ -15762,7 +15818,7 @@ public struct SkillsProposalRequestRevisionParams: Codable, Sendable {
         agentid: String? = nil,
         targetagentid: String? = nil,
         proposalid: String,
-        expectedrevisionhash: String? = nil,
+        expectedrevisionhash: String,
         instructions: String,
         sessionkey: String,
         sessionid: String? = nil,
@@ -15805,6 +15861,36 @@ public struct SkillsProposalRequestRevisionResult: Codable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case runid = "runId"
         case status
+    }
+}
+
+public struct SkillsProposalDecisionParams: Codable, Sendable {
+    public let agentid: String?
+    public let proposalid: String
+    public let expectedrevisionhash: String
+    public let correlationid: String?
+    public let reason: String?
+
+    public init(
+        agentid: String? = nil,
+        proposalid: String,
+        expectedrevisionhash: String,
+        correlationid: String? = nil,
+        reason: String? = nil)
+    {
+        self.agentid = agentid
+        self.proposalid = proposalid
+        self.expectedrevisionhash = expectedrevisionhash
+        self.correlationid = correlationid
+        self.reason = reason
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case agentid = "agentId"
+        case proposalid = "proposalId"
+        case expectedrevisionhash = "expectedRevisionHash"
+        case correlationid = "correlationId"
+        case reason
     }
 }
 
@@ -16507,6 +16593,7 @@ public struct CronRunLogEntry: Codable, Sendable {
     public let jobid: String
     public let action: String
     public let status: AnyCodable?
+    public let completionstatus: AnyCodable?
     public let error: String?
     public let errorreason: AnyCodable?
     public let summary: String?
@@ -16533,6 +16620,7 @@ public struct CronRunLogEntry: Codable, Sendable {
         jobid: String,
         action: String,
         status: AnyCodable? = nil,
+        completionstatus: AnyCodable? = nil,
         error: String? = nil,
         errorreason: AnyCodable? = nil,
         summary: String? = nil,
@@ -16558,6 +16646,7 @@ public struct CronRunLogEntry: Codable, Sendable {
         self.jobid = jobid
         self.action = action
         self.status = status
+        self.completionstatus = completionstatus
         self.error = error
         self.errorreason = errorreason
         self.summary = summary
@@ -16585,6 +16674,7 @@ public struct CronRunLogEntry: Codable, Sendable {
         case jobid = "jobId"
         case action
         case status
+        case completionstatus = "completionStatus"
         case error
         case errorreason = "errorReason"
         case summary
@@ -19823,7 +19913,6 @@ public struct ChatSendParams: Codable, Sendable {
     public let systemprovenancereceipt: String?
     public let suppresscommandinterpretation: Bool?
     public let expectedleafentryid: AnyCodable?
-    public let expectedrunid: String?
     public let expectedsessionroutingcontract: String?
     public let idempotencykey: String
 
@@ -19849,7 +19938,6 @@ public struct ChatSendParams: Codable, Sendable {
         systemprovenancereceipt: String? = nil,
         suppresscommandinterpretation: Bool? = nil,
         expectedleafentryid: AnyCodable? = nil,
-        expectedrunid: String? = nil,
         expectedsessionroutingcontract: String? = nil,
         idempotencykey: String)
     {
@@ -19874,7 +19962,6 @@ public struct ChatSendParams: Codable, Sendable {
         self.systemprovenancereceipt = systemprovenancereceipt
         self.suppresscommandinterpretation = suppresscommandinterpretation
         self.expectedleafentryid = expectedleafentryid
-        self.expectedrunid = expectedrunid
         self.expectedsessionroutingcontract = expectedsessionroutingcontract
         self.idempotencykey = idempotencykey
     }
@@ -19900,7 +19987,6 @@ public struct ChatSendParams: Codable, Sendable {
         systemprovenancereceipt: String? = nil,
         suppresscommandinterpretation: Bool? = nil,
         expectedleafentryid: AnyCodable? = nil,
-        expectedrunid: String? = nil,
         expectedsessionroutingcontract: String? = nil,
         idempotencykey: String)
     {
@@ -19926,7 +20012,6 @@ public struct ChatSendParams: Codable, Sendable {
             systemprovenancereceipt: systemprovenancereceipt,
             suppresscommandinterpretation: suppresscommandinterpretation,
             expectedleafentryid: expectedleafentryid,
-            expectedrunid: expectedrunid,
             expectedsessionroutingcontract: expectedsessionroutingcontract,
             idempotencykey: idempotencykey)
     }
@@ -19953,7 +20038,6 @@ public struct ChatSendParams: Codable, Sendable {
         case systemprovenancereceipt = "systemProvenanceReceipt"
         case suppresscommandinterpretation = "suppressCommandInterpretation"
         case expectedleafentryid = "expectedLeafEntryId"
-        case expectedrunid = "expectedRunId"
         case expectedsessionroutingcontract = "expectedSessionRoutingContract"
         case idempotencykey = "idempotencyKey"
     }
@@ -20681,6 +20765,7 @@ public enum BoardWidgetContent: Codable, Sendable {
     case html(BoardWidgetHtmlContent)
     case mcpApp(BoardWidgetMcpAppContent)
     case plugin(BoardWidgetPluginContent)
+    case registered(BoardWidgetRegisteredContent)
 
     private enum CodingKeys: String, CodingKey {
         case discriminator = "kind"
@@ -20693,6 +20778,7 @@ public enum BoardWidgetContent: Codable, Sendable {
         case "html": self = try .html(BoardWidgetHtmlContent(from: decoder))
         case "mcp-app": self = try .mcpApp(BoardWidgetMcpAppContent(from: decoder))
         case "plugin": self = try .plugin(BoardWidgetPluginContent(from: decoder))
+        case "registered": self = try .registered(BoardWidgetRegisteredContent(from: decoder))
         default:
             throw DecodingError.dataCorruptedError(
                 forKey: .discriminator,
@@ -20707,6 +20793,7 @@ public enum BoardWidgetContent: Codable, Sendable {
         case .html(let value): try value.encode(to: encoder)
         case .mcpApp(let value): try value.encode(to: encoder)
         case .plugin(let value): try value.encode(to: encoder)
+        case .registered(let value): try value.encode(to: encoder)
         }
     }
 }
@@ -20715,6 +20802,7 @@ public enum BoardWidgetPutContent: Codable, Sendable {
     case html(BoardWidgetHtmlContent)
     case mcpApp(BoardWidgetMcpAppPutContent)
     case plugin(BoardWidgetPluginContent)
+    case registered(BoardWidgetRegisteredContent)
     case canvasDoc(BoardCanvasDocumentSource)
 
     private enum CodingKeys: String, CodingKey {
@@ -20728,6 +20816,7 @@ public enum BoardWidgetPutContent: Codable, Sendable {
         case "html": self = try .html(BoardWidgetHtmlContent(from: decoder))
         case "mcp-app": self = try .mcpApp(BoardWidgetMcpAppPutContent(from: decoder))
         case "plugin": self = try .plugin(BoardWidgetPluginContent(from: decoder))
+        case "registered": self = try .registered(BoardWidgetRegisteredContent(from: decoder))
         case "canvas-doc": self = try .canvasDoc(BoardCanvasDocumentSource(from: decoder))
         default:
             throw DecodingError.dataCorruptedError(
@@ -20743,6 +20832,7 @@ public enum BoardWidgetPutContent: Codable, Sendable {
         case .html(let value): try value.encode(to: encoder)
         case .mcpApp(let value): try value.encode(to: encoder)
         case .plugin(let value): try value.encode(to: encoder)
+        case .registered(let value): try value.encode(to: encoder)
         case .canvasDoc(let value): try value.encode(to: encoder)
         }
     }
@@ -20784,6 +20874,7 @@ public enum GatewayErrorDetails: Codable, Sendable {
     case missingScope(MissingScopeErrorDetails)
     case mcpAppViewExpired(McpAppViewExpiredErrorDetails)
     case userPrefsLimitExceeded(UserPrefsLimitExceededErrorDetails)
+    case skillProposalRevisionChanged(SkillProposalRevisionChangedErrorDetails)
     case projectCloneFailed(ProjectCloneErrorDetails)
     case unknownAgentId(UnknownAgentIdErrorDetails)
     case wizardNotFound(WizardNotFoundErrorDetails)
@@ -20804,6 +20895,7 @@ public enum GatewayErrorDetails: Codable, Sendable {
         case .missingScope(let value): value.code
         case .mcpAppViewExpired(let value): value.code
         case .userPrefsLimitExceeded(let value): value.code
+        case .skillProposalRevisionChanged(let value): value.code
         case .projectCloneFailed(let value): value.code
         case .unknownAgentId(let value): value.code
         case .wizardNotFound(let value): value.code
@@ -20832,6 +20924,7 @@ public enum GatewayErrorDetails: Codable, Sendable {
         case "MISSING_SCOPE": self = try .missingScope(MissingScopeErrorDetails(from: decoder))
         case "MCP_APP_VIEW_EXPIRED": self = try .mcpAppViewExpired(McpAppViewExpiredErrorDetails(from: decoder))
         case "USER_PREFS_LIMIT_EXCEEDED": self = try .userPrefsLimitExceeded(UserPrefsLimitExceededErrorDetails(from: decoder))
+        case "SKILL_PROPOSAL_REVISION_CHANGED": self = try .skillProposalRevisionChanged(SkillProposalRevisionChangedErrorDetails(from: decoder))
         case "PROJECT_CLONE_FAILED": self = try .projectCloneFailed(ProjectCloneErrorDetails(from: decoder))
         case "UNKNOWN_AGENT_ID": self = try .unknownAgentId(UnknownAgentIdErrorDetails(from: decoder))
         case "WIZARD_NOT_FOUND": self = try .wizardNotFound(WizardNotFoundErrorDetails(from: decoder))
@@ -20850,6 +20943,7 @@ public enum GatewayErrorDetails: Codable, Sendable {
         case .missingScope(let value): try value.encode(to: encoder)
         case .mcpAppViewExpired(let value): try value.encode(to: encoder)
         case .userPrefsLimitExceeded(let value): try value.encode(to: encoder)
+        case .skillProposalRevisionChanged(let value): try value.encode(to: encoder)
         case .projectCloneFailed(let value): try value.encode(to: encoder)
         case .unknownAgentId(let value): try value.encode(to: encoder)
         case .wizardNotFound(let value): try value.encode(to: encoder)
