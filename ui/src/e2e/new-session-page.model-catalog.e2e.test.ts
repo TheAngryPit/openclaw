@@ -75,7 +75,6 @@ suite.define(() => {
       const modelRequest = await gateway.waitForRequest("models.list");
       expect(modelRequest.params).toEqual({
         agentId: "main",
-        preparedOnly: true,
         view: "configured",
       });
 
@@ -139,7 +138,6 @@ suite.define(() => {
       for (const request of requests) {
         expect(request.params).toEqual({
           agentId: "main",
-          preparedOnly: true,
           view: "configured",
         });
       }
