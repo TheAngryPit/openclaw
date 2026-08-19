@@ -141,6 +141,33 @@ describe("new-session model runtime", () => {
     await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
   });
 
+  it("loads the configured catalog without prepared-only filtering", async () => {
+    const { context, request } = contextWith([
+      { id: "gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: "google" },
+    ]);
+    const control = new NewSessionModelControl(() => undefined);
+
+    control.load(context, "main", true);
+
+    await vi.waitFor(() =>
+      expect(request).toHaveBeenCalledWith(
+        "models.list",
+        {
+          agentId: "main",
+          view: "configured",
+        },
+        { timeoutMs: 60_000 },
+      ),
+    );
+    await vi.waitFor(() =>
+      expect(
+        renderControl(control, context).querySelector(
+          '[data-chat-model-option="google/gemini-2.5-pro"]',
+        ),
+      ).not.toBeNull(),
+    );
+  });
+
   it("renders initial metadata loading without synthesizing the configured default", async () => {
     const pending = deferred<{ models: ModelCatalogEntry[] }>();
     const { context, request } = contextWith([]);

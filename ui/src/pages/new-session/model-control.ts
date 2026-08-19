@@ -242,7 +242,7 @@ export class NewSessionModelControl {
       client,
       id: requestId,
     };
-    const cached = peekModels(client, { agentId, preparedOnly: true });
+    const cached = peekModels(client, { agentId });
     if (cached) {
       // Keep the complete picker stable while the automatic revalidation runs.
       // A failed refresh remains recorded but cannot displace usable options.
@@ -256,7 +256,6 @@ export class NewSessionModelControl {
 
     void revalidateModels(client, {
       agentId,
-      preparedOnly: true,
       startupRetryWindowMs: 60_000,
     }).then(
       (models) => {
