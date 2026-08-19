@@ -227,7 +227,7 @@ suite.define(() => {
         ),
       ).toBe("GPT-5.6 Luna");
       expect(await page.getByText("Models unavailable", { exact: true }).count()).toBe(0);
-      await expect.poll(async () => (await gateway.getRequests("chat.metadata")).length).toBe(2);
+      expect(await gateway.getRequests("chat.metadata")).toHaveLength(0);
       if (captureCatalogRetryProof) {
         await page.screenshot({
           animations: "disabled",
@@ -265,7 +265,7 @@ suite.define(() => {
           catalogDiscoveryRequests(await gateway.getRequests("sessions.catalog.list")),
         )
         .toHaveLength(3);
-      await expect.poll(async () => (await gateway.getRequests("chat.metadata")).length).toBe(3);
+      expect(await gateway.getRequests("chat.metadata")).toHaveLength(0);
       await expect
         .poll(() => page.locator('[data-chat-model-target="anthropic"]').isVisible())
         .toBe(true);
