@@ -8,7 +8,11 @@ import {
 } from "./client.js";
 import { resetSharedCodexAppServerClientForTests } from "./shared-client.js";
 import { createClientHarness } from "./test-support.js";
-import { CODEX_APP_SERVER_VERSION, MIN_SUPPORTED_CODEX_APP_SERVER_VERSION } from "./version.js";
+import {
+  CODEX_APP_SERVER_VERSION,
+  MAX_SUPPORTED_CODEX_APP_SERVER_VERSION,
+  MIN_SUPPORTED_CODEX_APP_SERVER_VERSION,
+} from "./version.js";
 
 const CODEX_DYNAMIC_TOOL_SERVER_REQUEST_TIMEOUT_MS = 660_000;
 
@@ -361,7 +365,7 @@ describe("CodexAppServerClient", () => {
     });
 
     await expect(initializing).rejects.toThrow(
-      `Codex app-server ${MIN_SUPPORTED_CODEX_APP_SERVER_VERSION} or newer is required, but detected 0.146.9`,
+      `A Codex app-server from ${MIN_SUPPORTED_CODEX_APP_SERVER_VERSION} through ${MAX_SUPPORTED_CODEX_APP_SERVER_VERSION} is required, but detected 0.146.9`,
     );
     expect(harness.writes).toHaveLength(1);
   });
@@ -374,7 +378,7 @@ describe("CodexAppServerClient", () => {
     });
 
     await expect(initializing).rejects.toThrow(
-      `Codex app-server ${MIN_SUPPORTED_CODEX_APP_SERVER_VERSION} or newer is required, but detected 0.146.0`,
+      `A Codex app-server from ${MIN_SUPPORTED_CODEX_APP_SERVER_VERSION} through ${MAX_SUPPORTED_CODEX_APP_SERVER_VERSION} is required, but detected 0.146.0`,
     );
     expect(harness.writes).toHaveLength(1);
   });
@@ -387,7 +391,7 @@ describe("CodexAppServerClient", () => {
     });
 
     await expect(initializing).rejects.toThrow(
-      `Codex app-server ${MIN_SUPPORTED_CODEX_APP_SERVER_VERSION} or newer is required, but detected 0.147.0-alpha.2`,
+      `A Codex app-server from ${MIN_SUPPORTED_CODEX_APP_SERVER_VERSION} through ${MAX_SUPPORTED_CODEX_APP_SERVER_VERSION} is required, but detected 0.147.0-alpha.2`,
     );
     expect(harness.writes).toHaveLength(1);
   });
@@ -414,7 +418,7 @@ describe("CodexAppServerClient", () => {
     });
 
     await expect(initializing).rejects.toThrow(
-      `Codex app-server ${MIN_SUPPORTED_CODEX_APP_SERVER_VERSION} or newer is required`,
+      `A Codex app-server from ${MIN_SUPPORTED_CODEX_APP_SERVER_VERSION} through ${MAX_SUPPORTED_CODEX_APP_SERVER_VERSION} is required`,
     );
     expect(harness.writes).toHaveLength(1);
   });
@@ -427,31 +431,49 @@ describe("CodexAppServerClient", () => {
     });
 
     await expect(initializing).rejects.toThrow(
-      `Codex app-server ${MIN_SUPPORTED_CODEX_APP_SERVER_VERSION} or newer is required`,
+      `A Codex app-server from ${MIN_SUPPORTED_CODEX_APP_SERVER_VERSION} through ${MAX_SUPPORTED_CODEX_APP_SERVER_VERSION} is required`,
     );
     expect(harness.writes).toHaveLength(1);
   });
 
-  it("accepts a newer Codex Desktop prerelease for capability validation", async () => {
-    const newerVersion = "0.148.0-alpha.9";
-    const warn = vi.spyOn(embeddedAgentLog, "warn").mockImplementation(() => undefined);
-    const { harness, initializing, outbound } = startInitialize();
-    harness.send({
-      id: outbound.id,
-      result: { userAgent: `openclaw/${newerVersion} (macOS; test)` },
-    });
+  it.each(["0.148.0-alpha.9", MAX_SUPPORTED_CODEX_APP_SERVER_VERSION])(
+    "accepts tested Codex Desktop prerelease %s for normal startup validation",
+    async (newerVersion) => {
+      const warn = vi.spyOn(embeddedAgentLog, "warn").mockImplementation(() => undefined);
+      const { harness, initializing, outbound } = startInitialize();
+      harness.send({
+        id: outbound.id,
+        result: { userAgent: `openclaw/${newerVersion} (macOS; test)` },
+      });
 
-    await expect(initializing).resolves.toBeUndefined();
-    expect(harness.client.getServerVersion()).toBe(newerVersion);
-    expect(JSON.parse(harness.writes[1] ?? "{}")).toEqual({ method: "initialized" });
-    expect(warn).toHaveBeenCalledWith(
-      "codex app-server is newer than OpenClaw's validated managed runtime; continuing with capability validation",
-      {
-        detectedVersion: newerVersion,
-        validatedVersion: CODEX_APP_SERVER_VERSION,
-      },
-    );
-  });
+      await expect(initializing).resolves.toBeUndefined();
+      expect(harness.client.getServerVersion()).toBe(newerVersion);
+      expect(JSON.parse(harness.writes[1] ?? "{}")).toEqual({ method: "initialized" });
+      expect(warn).toHaveBeenCalledWith(
+        "codex app-server is newer than OpenClaw's managed runtime; continuing with normal startup validation",
+        {
+          detectedVersion: newerVersion,
+          validatedVersion: CODEX_APP_SERVER_VERSION,
+        },
+      );
+    },
+  );
+
+  it.each(["0.148.0-alpha.16", "0.148.0", "1.0.0"])(
+    "blocks unverified future app-server version %s during initialize",
+    async (version) => {
+      const { harness, initializing, outbound } = startInitialize();
+      harness.send({
+        id: outbound.id,
+        result: { userAgent: `openclaw/${version} (macOS; test)` },
+      });
+
+      await expect(initializing).rejects.toThrow(
+        `through ${MAX_SUPPORTED_CODEX_APP_SERVER_VERSION} is required`,
+      );
+      expect(harness.writes).toHaveLength(1);
+    },
+  );
 
   it.each(["0.147.00", "0.148.0-alpha..9", "0.148.0-alpha.09"])(
     "blocks malformed app-server version %s during initialize",
@@ -463,7 +485,7 @@ describe("CodexAppServerClient", () => {
       });
 
       await expect(initializing).rejects.toThrow(
-        `Codex app-server ${MIN_SUPPORTED_CODEX_APP_SERVER_VERSION} or newer is required`,
+        `A Codex app-server from ${MIN_SUPPORTED_CODEX_APP_SERVER_VERSION} through ${MAX_SUPPORTED_CODEX_APP_SERVER_VERSION} is required`,
       );
       expect(harness.writes).toHaveLength(1);
     },
@@ -474,7 +496,7 @@ describe("CodexAppServerClient", () => {
     harness.send({ id: outbound.id, result: {} });
 
     await expect(initializing).rejects.toThrow(
-      `Codex app-server ${MIN_SUPPORTED_CODEX_APP_SERVER_VERSION} or newer is required`,
+      `A Codex app-server from ${MIN_SUPPORTED_CODEX_APP_SERVER_VERSION} through ${MAX_SUPPORTED_CODEX_APP_SERVER_VERSION} is required`,
     );
     expect(harness.writes).toHaveLength(1);
   });
