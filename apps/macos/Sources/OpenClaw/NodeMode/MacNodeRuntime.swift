@@ -305,6 +305,12 @@ actor MacNodeRuntime {
     }
 
     private func handleCodexThreadInvoke(_ req: BridgeInvokeRequest) async throws -> BridgeInvokeResponse {
+        if !self.codexThreadCatalogEnabled(),
+           let nodeHostWorker,
+           await nodeHostWorker.supports(req.command)
+        {
+            return await nodeHostWorker.invoke(req)
+        }
         guard self.codexThreadCatalogEnabled() else {
             return Self.errorResponse(
                 req,

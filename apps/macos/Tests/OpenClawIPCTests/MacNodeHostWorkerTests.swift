@@ -211,12 +211,26 @@ struct MacNodeHostWorkerTests {
     }
 
     @Test(arguments: [
-        (
-            MacNodeCodexThreadCatalogContract.listCommand,
-            "UNAVAILABLE: Codex session catalog is disabled"),
-        (
-            MacNodeCodexThreadCatalogContract.turnsCommand,
-            "UNAVAILABLE: Codex session catalog is disabled"),
+        MacNodeCodexThreadCatalogContract.listCommand,
+        MacNodeCodexThreadCatalogContract.turnsCommand,
+    ])
+    func `worker owns Codex catalog commands when native catalog is disabled`(command: String) async {
+        let worker = StubMacNodeHostWorker(commands: [command])
+        let runtime = MacNodeRuntime(
+            nodeHostWorker: worker,
+            codexThreadCatalogEnabled: { false })
+
+        let response = await runtime.handleInvoke(BridgeInvokeRequest(
+            id: "worker-codex-catalog",
+            command: command,
+            paramsJSON: #"{"limit":1}"#))
+
+        #expect(response.ok)
+        #expect(response.payloadJSON == #"{"owner":"cli"}"#)
+        #expect(await worker.invokedCommands() == [command])
+    }
+
+    @Test(arguments: [
         (
             MacNodeClaudeSessionCatalogContract.listCommand,
             "UNAVAILABLE: Claude session catalog is disabled"),
