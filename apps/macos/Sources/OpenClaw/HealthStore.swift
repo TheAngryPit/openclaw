@@ -27,6 +27,10 @@ struct HealthSnapshot: Codable {
         let authAgeMs: Double?
         let probe: Probe?
         let lastProbeAt: Double?
+        let running: Bool?
+        let connected: Bool?
+        let lifecycle: String?
+        let lastError: String?
     }
 
     struct SessionInfo: Codable {
@@ -141,8 +145,24 @@ final class HealthStore {
 
     private static func isChannelHealthy(_ summary: HealthSnapshot.ChannelSummary) -> Bool {
         guard summary.configured == true else { return false }
-        // If probe is missing, treat it as "configured but unknown health" (not a hard fail).
+        if let error = summary.lastError, !error.isEmpty { return false }
+        if summary.running == false || summary.connected == false { return false }
+        if let lifecycle = summary.lifecycle,
+           lifecycle == "starting" || lifecycle == "recovering" || lifecycle == "blocked" || lifecycle == "stopped"
+        {
+            return false
+        }
+        // If probe is missing, rely on the current runtime lifecycle fields.
         return summary.probe?.ok ?? true
+    }
+
+    private static func currentChannelFailure(_ summary: HealthSnapshot.ChannelSummary) -> String? {
+        if let error = summary.lastError, !error.isEmpty { return error }
+        if let probe = summary.probe, probe.ok == false { return self.describeProbeFailure(probe) }
+        if summary.connected == false { return "Channel disconnected" }
+        if summary.running == false { return "Channel stopped" }
+        if let lifecycle = summary.lifecycle, lifecycle != "ready" { return "Channel \(lifecycle)" }
+        return nil
     }
 
     private static func describeProbeFailure(_ probe: HealthSnapshot.ChannelSummary.Probe) -> String {
@@ -157,7 +177,7 @@ final class HealthStore {
         return "\(reason) (\(code))"
     }
 
-    private func resolveLinkChannel(
+    private func resolveHealthChannel(
         _ snap: HealthSnapshot) -> (id: String, summary: HealthSnapshot.ChannelSummary)?
     {
         let order = snap.channelOrder ?? Array(snap.channels.keys)
@@ -168,6 +188,19 @@ final class HealthStore {
         }
         for id in order {
             if let summary = snap.channels[id], summary.linked != nil {
+                return (id: id, summary: summary)
+            }
+        }
+        for id in order {
+            if let summary = snap.channels[id], summary.configured == true {
+                return (id: id, summary: summary)
+            }
+        }
+        for id in order {
+            guard let summary = snap.channels[id] else { continue }
+            if summary.configured != nil || summary.running != nil || summary.connected != nil ||
+                summary.lifecycle != nil
+            {
                 return (id: id, summary: summary)
             }
         }
@@ -194,7 +227,14 @@ final class HealthStore {
             return .degraded(error)
         }
         guard let snap = self.snapshot else { return .unknown }
-        guard let link = self.resolveLinkChannel(snap) else { return .unknown }
+        guard let link = self.resolveHealthChannel(snap) else { return .unknown }
+        if link.summary.linked == nil {
+            guard link.summary.configured == true else { return .unknown }
+            if let failure = Self.currentChannelFailure(link.summary) {
+                return .degraded(failure)
+            }
+            return .ok
+        }
         if link.summary.linked != true {
             // Linking is optional if any other channel is healthy; don't paint the whole app red.
             let fallback = self.resolveFallbackChannel(snap, excluding: link.id)
@@ -211,7 +251,20 @@ final class HealthStore {
         if self.isRefreshing { return "Health check running…" }
         if let error = self.lastError { return "Health check failed: \(error)" }
         guard let snap = self.snapshot else { return "Health check pending" }
-        guard let link = self.resolveLinkChannel(snap) else { return "Health check pending" }
+        guard let link = self.resolveHealthChannel(snap) else { return "Health check pending" }
+        if link.summary.linked == nil {
+            let label = snap.channelLabels?[link.id] ?? link.id.capitalized
+            guard link.summary.configured == true else { return "\(label) not configured" }
+            if let failure = Self.currentChannelFailure(link.summary) {
+                return "\(label) degraded · \(failure)"
+            }
+            if link.summary.lifecycle == "ready" {
+                return "\(label) ready"
+            }
+            return link.summary.running == true || link.summary.connected == true
+                ? "\(label) running"
+                : "\(label) configured"
+        }
         if link.summary.linked != true {
             if let fallback = self.resolveFallbackChannel(snap, excluding: link.id) {
                 let fallbackLabel = snap.channelLabels?[fallback.id] ?? fallback.id.capitalized
@@ -247,10 +300,15 @@ final class HealthStore {
     }
 
     func describeFailure(from snap: HealthSnapshot, fallback: String?) -> String {
-        if let link = self.resolveLinkChannel(snap), link.summary.linked != true {
+        if let link = self.resolveHealthChannel(snap), link.summary.linked == nil,
+           let failure = Self.currentChannelFailure(link.summary)
+        {
+            return failure
+        }
+        if let link = self.resolveHealthChannel(snap), link.summary.linked == false {
             return "Not linked — run openclaw login"
         }
-        if let link = self.resolveLinkChannel(snap), let probe = link.summary.probe, probe.ok == false {
+        if let link = self.resolveHealthChannel(snap), let probe = link.summary.probe, probe.ok == false {
             return Self.describeProbeFailure(probe)
         }
         if let fallback, !fallback.isEmpty {
