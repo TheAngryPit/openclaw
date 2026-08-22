@@ -150,6 +150,18 @@ actor GatewayEndpointStore {
         launchdSnapshot: LaunchAgentPlistSnapshot?) -> String?
     {
         let serviceEnv = launchdSnapshot?.environment ?? [:]
+        if !isRemote,
+           let gateway = root["gateway"] as? [String: Any],
+           let auth = gateway["auth"] as? [String: Any],
+           let password = auth["password"],
+           !(password is String)
+        {
+            return self.resolveLocalConfigAuthValue(
+                password,
+                root: root,
+                env: env,
+                serviceEnv: serviceEnv)
+        }
         let raw = env["OPENCLAW_GATEWAY_PASSWORD"] ?? ""
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
@@ -231,6 +243,18 @@ actor GatewayEndpointStore {
         launchdSnapshot: LaunchAgentPlistSnapshot?) -> String?
     {
         let serviceEnv = launchdSnapshot?.environment ?? [:]
+        if !isRemote,
+           let gateway = root["gateway"] as? [String: Any],
+           let auth = gateway["auth"] as? [String: Any],
+           let token = auth["token"],
+           !(token is String)
+        {
+            return self.resolveLocalConfigAuthValue(
+                token,
+                root: root,
+                env: env,
+                serviceEnv: serviceEnv)
+        }
         let raw = env["OPENCLAW_GATEWAY_TOKEN"] ?? ""
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
@@ -311,22 +335,6 @@ actor GatewayEndpointStore {
             }
         }
         return nil
-    }
-
-    private static func envSecretRefName(_ value: String) -> String? {
-        let name: Substring
-        if value.hasPrefix("${"), value.hasSuffix("}") {
-            let nameStart = value.index(value.startIndex, offsetBy: 2)
-            let nameEnd = value.index(before: value.endIndex)
-            name = value[nameStart..<nameEnd]
-        } else if value.hasPrefix("$") {
-            let nameStart = value.index(after: value.startIndex)
-            name = value[nameStart..<value.endIndex]
-        } else {
-            return nil
-        }
-        let candidate = String(name)
-        return self.isValidEnvSecretRefID(candidate) ? candidate : nil
     }
 
     private static func isValidEnvSecretRefID(_ value: String) -> Bool {
@@ -873,6 +881,66 @@ actor GatewayEndpointStore {
             password: password,
             routeRevision: self.endpointRevision))
         return endpoint
+    }
+}
+
+extension GatewayEndpointStore {
+    private static func envSecretRefName(_ value: String) -> String? {
+        let name: Substring
+        if value.hasPrefix("${"), value.hasSuffix("}") {
+            let nameStart = value.index(value.startIndex, offsetBy: 2)
+            let nameEnd = value.index(before: value.endIndex)
+            name = value[nameStart..<nameEnd]
+        } else if value.hasPrefix("$") {
+            let nameStart = value.index(after: value.startIndex)
+            name = value[nameStart..<value.endIndex]
+        } else {
+            return nil
+        }
+        let candidate = String(name)
+        return self.isValidEnvSecretRefID(candidate) ? candidate : nil
+    }
+
+    private static func resolveLocalConfigAuthValue(
+        _ raw: Any,
+        root: [String: Any],
+        env: [String: String],
+        serviceEnv: [String: String]) -> String?
+    {
+        guard let ref = raw as? [String: Any],
+              Set(ref.keys) == Set(["source", "provider", "id"]),
+              ref["source"] as? String == "env",
+              let provider = ref["provider"] as? String,
+              provider.range(
+                  of: #"^[a-z][a-z0-9_-]{0,63}$"#,
+                  options: .regularExpression) != nil,
+              let envName = ref["id"] as? String,
+              self.isValidEnvSecretRefID(envName)
+        else { return nil }
+
+        let secrets = root["secrets"] as? [String: Any] ?? [:]
+        let providers = secrets["providers"] as? [String: Any] ?? [:]
+        let defaults = secrets["defaults"] as? [String: Any]
+        let defaultEnvProvider = defaults?["env"] as? String ?? "default"
+        let providerConfig = providers[provider] as? [String: Any]
+        let configuredSource = providerConfig?["source"] as? String
+        let usesBuiltInDefault = provider == defaultEnvProvider && configuredSource != "env"
+        if !usesBuiltInDefault {
+            guard configuredSource == "env" else { return nil }
+            if let configuredAllowlist = providerConfig?["allowlist"] {
+                guard let allowlist = configuredAllowlist as? [String],
+                      allowlist.contains(envName)
+                else { return nil }
+            }
+        }
+
+        for source in [env, serviceEnv] {
+            let value = source[envName]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let value, !value.isEmpty {
+                return value
+            }
+        }
+        return nil
     }
 }
 
