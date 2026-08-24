@@ -24,21 +24,21 @@ describe.runIf(process.platform === "win32")("Windows workspace quiescence", () 
     const workspace = path.join(root, "workspace");
     await fs.mkdir(home);
     await fs.mkdir(workspace);
+    const realWorkspace = await fs.realpath(workspace);
     const environment = { ...process.env, HOME: home, USERPROFILE: home };
 
     const quiesced = await runCommandWithTimeout(
-      [process.execPath, "-e", REMOTE_WORKSPACE_QUIESCE_JS, workspace, "20000", "shared-host"],
+      [process.execPath, "-e", REMOTE_WORKSPACE_QUIESCE_JS, realWorkspace, "20000", "shared-host"],
       { timeoutMs: 10_000, baseEnv: environment },
     );
     expect(quiesced.code).toBe(0);
     const nonce = /^quiesced ([a-f0-9]{32})\n$/u.exec(quiesced.stdout)?.[1];
     expect(nonce).toBeDefined();
-    const realWorkspace = await fs.realpath(workspace);
     const leaseFile = leasePath(home, realWorkspace);
     await expect(fs.readFile(leaseFile, "utf8")).resolves.toContain('"sharedHost":true');
 
     const overlapping = await runCommandWithTimeout(
-      [process.execPath, "-e", REMOTE_WORKSPACE_QUIESCE_JS, workspace, "20000", "shared-host"],
+      [process.execPath, "-e", REMOTE_WORKSPACE_QUIESCE_JS, realWorkspace, "20000", "shared-host"],
       { timeoutMs: 10_000, baseEnv: environment },
     );
     expect(overlapping.code).not.toBe(0);
@@ -49,7 +49,7 @@ describe.runIf(process.platform === "win32")("Windows workspace quiescence", () 
         process.execPath,
         "-e",
         REMOTE_WORKSPACE_RENEW_QUIESCENCE_JS,
-        workspace,
+        realWorkspace,
         nonce!,
         "20000",
         "final",
@@ -61,7 +61,7 @@ describe.runIf(process.platform === "win32")("Windows workspace quiescence", () 
 
     await expect(
       runCommandWithTimeout(
-        [process.execPath, "-e", REMOTE_WORKSPACE_RESUME_JS, workspace, nonce!],
+        [process.execPath, "-e", REMOTE_WORKSPACE_RESUME_JS, realWorkspace, nonce!],
         { timeoutMs: 10_000, baseEnv: environment },
       ),
     ).resolves.toMatchObject({ code: 0 });
@@ -80,11 +80,25 @@ describe.runIf(process.platform === "win32")("Windows workspace quiescence", () 
     );
     const simultaneous = await Promise.all([
       runCommandWithTimeout(
-        [process.execPath, "-e", REMOTE_WORKSPACE_QUIESCE_JS, workspace, "20000", "shared-host"],
+        [
+          process.execPath,
+          "-e",
+          REMOTE_WORKSPACE_QUIESCE_JS,
+          realWorkspace,
+          "20000",
+          "shared-host",
+        ],
         { timeoutMs: 10_000, baseEnv: environment },
       ),
       runCommandWithTimeout(
-        [process.execPath, "-e", REMOTE_WORKSPACE_QUIESCE_JS, workspace, "20000", "shared-host"],
+        [
+          process.execPath,
+          "-e",
+          REMOTE_WORKSPACE_QUIESCE_JS,
+          realWorkspace,
+          "20000",
+          "shared-host",
+        ],
         { timeoutMs: 10_000, baseEnv: environment },
       ),
     ]);
@@ -97,14 +111,14 @@ describe.runIf(process.platform === "win32")("Windows workspace quiescence", () 
     expect(winnerNonce).toBeDefined();
     await expect(
       runCommandWithTimeout(
-        [process.execPath, "-e", REMOTE_WORKSPACE_RESUME_JS, workspace, winnerNonce!],
+        [process.execPath, "-e", REMOTE_WORKSPACE_RESUME_JS, realWorkspace, winnerNonce!],
         { timeoutMs: 10_000, baseEnv: environment },
       ),
     ).resolves.toMatchObject({ code: 0 });
     await expect(fs.access(leaseFile)).rejects.toThrow();
 
     const dedicated = await runCommandWithTimeout(
-      [process.execPath, "-e", REMOTE_WORKSPACE_QUIESCE_JS, workspace, "20000", "dedicated"],
+      [process.execPath, "-e", REMOTE_WORKSPACE_QUIESCE_JS, realWorkspace, "20000", "dedicated"],
       { timeoutMs: 10_000, baseEnv: environment },
     );
     expect(dedicated.code).not.toBe(0);
