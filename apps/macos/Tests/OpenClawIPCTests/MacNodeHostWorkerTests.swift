@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import OpenClawKit
 import OpenClawProtocol
+import os
 import Testing
 @testable import OpenClaw
 
@@ -216,9 +217,15 @@ struct MacNodeHostWorkerTests {
     ])
     func `worker owns Codex catalog commands when native catalog is disabled`(command: String) async {
         let worker = StubMacNodeHostWorker(commands: [command])
+        let nativeCatalogEnabledReads = OSAllocatedUnfairLock(initialState: 0)
         let runtime = MacNodeRuntime(
             nodeHostWorker: worker,
-            codexThreadCatalogEnabled: { false })
+            codexThreadCatalogEnabled: {
+                nativeCatalogEnabledReads.withLock {
+                    $0 += 1
+                    return false
+                }
+            })
 
         let response = await runtime.handleInvoke(BridgeInvokeRequest(
             id: "worker-codex-catalog",
@@ -228,6 +235,7 @@ struct MacNodeHostWorkerTests {
         #expect(response.ok)
         #expect(response.payloadJSON == #"{"owner":"cli"}"#)
         #expect(await worker.invokedCommands() == [command])
+        #expect(nativeCatalogEnabledReads.withLock { $0 } == 1)
     }
 
     @Test(arguments: [
