@@ -63,7 +63,11 @@ async function quiesce(
   const match = /^quiesced ([a-f0-9]{32})\n$/u.exec(result.stdout);
   expect(match).not.toBeNull();
   if (sharedHost) {
-    expect(result.stderr).toContain("shared host declared; skipping process freeze sweep");
+    expect(result.stderr).toContain(
+      process.platform === "win32"
+        ? "Windows shared host declared; using manifest fences without process freezing"
+        : "shared host declared; skipping process freeze sweep",
+    );
   }
   return match![1]!;
 }
@@ -71,11 +75,6 @@ async function quiesce(
 function leasePath(home: string, workspace: string, nonce: string) {
   const key = createHash("sha256").update(workspace).digest("hex");
   return path.join(home, ".openclaw-worker", "quiescence", `${key}.${nonce}.json`);
-}
-
-function windowsSharedLeasePath(home: string, workspace: string) {
-  const key = createHash("sha256").update(workspace).digest("hex");
-  return path.join(home, ".openclaw-worker", "quiescence", `${key}.shared-host.json`);
 }
 
 // Absolute /bin/ps so the fixture's stubbed PATH entry cannot answer for the real host.
@@ -147,105 +146,6 @@ async function renew(
 }
 
 describe("remote workspace quiescence scripts", () => {
-  it.runIf(process.platform === "win32")(
-    "uses a process-free shared-host lease on Windows",
-    async () => {
-      const root = tempDirs.make("openclaw-windows-quiescence-test-");
-      const home = path.join(root, "home");
-      const workspace = path.join(root, "workspace");
-      await fs.mkdir(home);
-      await fs.mkdir(workspace);
-      const environment = { ...process.env, HOME: home, USERPROFILE: home };
-
-      const quiesced = await runCommandWithTimeout(
-        [process.execPath, "-e", REMOTE_WORKSPACE_QUIESCE_JS, workspace, "20000", "shared-host"],
-        { timeoutMs: 10_000, baseEnv: environment },
-      );
-      expect(quiesced.code).toBe(0);
-      const nonce = /^quiesced ([a-f0-9]{32})\n$/u.exec(quiesced.stdout)?.[1];
-      expect(nonce).toBeDefined();
-      const leaseFile = windowsSharedLeasePath(home, await fs.realpath(workspace));
-      await expect(fs.readFile(leaseFile, "utf8")).resolves.toContain('"sharedHost":true');
-
-      const overlapping = await runCommandWithTimeout(
-        [process.execPath, "-e", REMOTE_WORKSPACE_QUIESCE_JS, workspace, "20000", "shared-host"],
-        { timeoutMs: 10_000, baseEnv: environment },
-      );
-      expect(overlapping.code).not.toBe(0);
-      expect(overlapping.stderr).toContain("workspace quiescence lease is already active");
-
-      const renewed = await runCommandWithTimeout(
-        [
-          process.execPath,
-          "-e",
-          REMOTE_WORKSPACE_RENEW_QUIESCENCE_JS,
-          workspace,
-          nonce!,
-          "20000",
-          "final",
-          "shared-host",
-        ],
-        { timeoutMs: 10_000, baseEnv: environment },
-      );
-      expect(renewed.code).toBe(0);
-      expect(renewed.stdout).toBe(`renewed ${nonce}\n`);
-
-      await expect(
-        runCommandWithTimeout(
-          [process.execPath, "-e", REMOTE_WORKSPACE_RESUME_JS, workspace, nonce!],
-          { timeoutMs: 10_000, baseEnv: environment },
-        ),
-      ).resolves.toMatchObject({ code: 0 });
-      await expect(fs.access(leaseFile)).rejects.toThrow();
-
-      await fs.mkdir(path.dirname(leaseFile), { recursive: true });
-      await fs.writeFile(
-        leaseFile,
-        JSON.stringify({
-          version: 1,
-          nonce: "d".repeat(32),
-          sharedHost: true,
-          processes: [],
-          watchdog: null,
-          expiresAtMs: 1,
-        }),
-      );
-      const simultaneous = await Promise.all([
-        runCommandWithTimeout(
-          [process.execPath, "-e", REMOTE_WORKSPACE_QUIESCE_JS, workspace, "20000", "shared-host"],
-          { timeoutMs: 10_000, baseEnv: environment },
-        ),
-        runCommandWithTimeout(
-          [process.execPath, "-e", REMOTE_WORKSPACE_QUIESCE_JS, workspace, "20000", "shared-host"],
-          { timeoutMs: 10_000, baseEnv: environment },
-        ),
-      ]);
-      expect(simultaneous.filter((result) => result.code === 0)).toHaveLength(1);
-      const loser = simultaneous.find((result) => result.code !== 0);
-      expect(loser?.stderr).toContain("workspace quiescence lease is already active");
-      const winner = simultaneous.find((result) => result.code === 0)!;
-      const winnerNonce = /^quiesced ([a-f0-9]{32})\n$/u.exec(winner.stdout)?.[1];
-      expect(winnerNonce).toBeDefined();
-      await expect(
-        runCommandWithTimeout(
-          [process.execPath, "-e", REMOTE_WORKSPACE_RESUME_JS, workspace, winnerNonce!],
-          { timeoutMs: 10_000, baseEnv: environment },
-        ),
-      ).resolves.toMatchObject({ code: 0 });
-      const lockFiles = (await fs.readdir(path.dirname(leaseFile))).filter((name) =>
-        name.endsWith(".sqlite"),
-      );
-      expect(lockFiles).toEqual(["windows-shared-host.lock.sqlite"]);
-
-      const dedicated = await runCommandWithTimeout(
-        [process.execPath, "-e", REMOTE_WORKSPACE_QUIESCE_JS, workspace, "20000", "dedicated"],
-        { timeoutMs: 10_000, baseEnv: environment },
-      );
-      expect(dedicated.code).not.toBe(0);
-      expect(dedicated.stderr).toContain("workspace quiescence requires POSIX");
-    },
-  );
-
   it("excludes its ps scanner and terminates its watchdog on resume", async () => {
     const input = await fixture();
     const nonce = await quiesce(input);

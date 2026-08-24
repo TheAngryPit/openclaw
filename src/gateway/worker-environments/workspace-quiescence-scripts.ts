@@ -98,6 +98,16 @@ function persistLease(targetPath, lease, verifyCurrent) {
   fs.writeFileSync(temporary, JSON.stringify(lease), { mode: 0o600, flag: "wx" });
   fs.renameSync(temporary, targetPath);
 }
+function persistWindowsLease(targetPath, lease, verifyCurrent) {
+  if (verifyCurrent) verifyCurrent(JSON.parse(fs.readFileSync(targetPath, "utf8")));
+  const descriptor = fs.openSync(targetPath, "w", 0o600);
+  try {
+    fs.writeFileSync(descriptor, JSON.stringify(lease), "utf8");
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
 function withWindowsWorkspaceLock(lockPath, run) {
   const { DatabaseSync } = require("node:sqlite");
   const database = new DatabaseSync(lockPath);
@@ -157,7 +167,6 @@ if (process.platform === "win32" && sharedHost) {
       if (candidate.expiresAtMs > Date.now()) {
         throw new Error("workspace quiescence lease is already active");
       }
-      fs.unlinkSync(leasePath);
     } catch (error) {
       if (!error || error.code !== "ENOENT") throw error;
     }
@@ -169,7 +178,7 @@ if (process.platform === "win32" && sharedHost) {
       watchdog: null,
       expiresAtMs: Date.now() + watchdogTimeoutMs,
     };
-    persistLease(leasePath, lease);
+    persistWindowsLease(leasePath, lease);
   });
   process.stderr.write("workspace quiescence: Windows shared host declared; using manifest fences without process freezing\n");
   process.stdout.write("quiesced " + nonce + "\n");
@@ -425,7 +434,7 @@ if (process.platform === "win32" && sharedHost) {
       throw new Error("invalid Windows shared-host workspace quiescence lease");
     }
     const renewed = { ...input, expiresAtMs: Date.now() + timeoutMs };
-    persistLease(leasePath, renewed, (current) => {
+    persistWindowsLease(leasePath, renewed, (current) => {
       if (current.nonce !== nonce || current.expiresAtMs !== input.expiresAtMs) {
         throw new Error("workspace quiescence lease changed during renewal");
       }
