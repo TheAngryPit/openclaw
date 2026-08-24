@@ -98,24 +98,29 @@ function persistLease(targetPath, lease, verifyCurrent) {
   fs.writeFileSync(temporary, JSON.stringify(lease), { mode: 0o600, flag: "wx" });
   fs.renameSync(temporary, targetPath);
 }
-function persistWindowsLease(targetPath, lease, verifyCurrent) {
-  if (verifyCurrent) verifyCurrent(JSON.parse(fs.readFileSync(targetPath, "utf8")));
-  const descriptor = fs.openSync(targetPath, "w", 0o600);
-  try {
-    fs.writeFileSync(descriptor, JSON.stringify(lease), "utf8");
-    fs.fsyncSync(descriptor);
-  } finally {
-    fs.closeSync(descriptor);
-  }
-}
-function withWindowsWorkspaceLock(lockPath, run) {
+function withWindowsWorkspaceLease(databasePath, workspaceKey, run) {
   const { DatabaseSync } = require("node:sqlite");
-  const database = new DatabaseSync(lockPath);
-  database.exec("PRAGMA busy_timeout=5000; BEGIN IMMEDIATE");
+  const database = new DatabaseSync(databasePath);
+  database.exec("PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS workspace_leases (workspace_key TEXT PRIMARY KEY, lease_json TEXT NOT NULL); BEGIN IMMEDIATE");
   try {
-    return run();
+    const row = database
+      .prepare("SELECT lease_json FROM workspace_leases WHERE workspace_key = ?")
+      .get(workspaceKey);
+    const next = run(row ? row.lease_json : null);
+    if (next === null) {
+      database.prepare("DELETE FROM workspace_leases WHERE workspace_key = ?").run(workspaceKey);
+    } else if (next !== undefined) {
+      database
+        .prepare("INSERT INTO workspace_leases (workspace_key, lease_json) VALUES (?, ?) ON CONFLICT(workspace_key) DO UPDATE SET lease_json = excluded.lease_json")
+        .run(workspaceKey, next);
+    }
+    database.exec("COMMIT");
+    return next;
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
   } finally {
-    try { database.exec("ROLLBACK"); } finally { database.close(); }
+    database.close();
   }
 }`;
 
@@ -140,7 +145,7 @@ if (!Number.isSafeInteger(watchdogTimeoutMs) || watchdogTimeoutMs < 1) throw new
 const isolationMode = process.argv[3] || "dedicated";
 if (isolationMode !== "dedicated" && isolationMode !== "shared-host") throw new Error("invalid workspace quiescence isolation mode");
 const sharedHost = isolationMode === "shared-host";
-const lockPath = path.join(leaseDirectory, "windows-shared-host.lock.sqlite");
+const windowsLeaseDatabasePath = path.join(leaseDirectory, "windows-shared-host.sqlite");
 const leasePath = path.join(
   leaseDirectory,
   process.platform === "win32" && sharedHost
@@ -149,9 +154,8 @@ const leasePath = path.join(
 );
 ${REMOTE_QUIESCENCE_LEASE_JS}
 if (process.platform === "win32" && sharedHost) {
-  withWindowsWorkspaceLock(lockPath, () => {
-    try {
-      const raw = fs.readFileSync(leasePath, "utf8");
+  withWindowsWorkspaceLease(windowsLeaseDatabasePath, workspaceKey, (raw) => {
+    if (raw !== null) {
       const parsed = JSON.parse(raw);
       if (!/^[a-f0-9]{32}$/.test(parsed?.nonce || "")) {
         throw new Error("invalid Windows shared-host workspace quiescence lease");
@@ -167,8 +171,6 @@ if (process.platform === "win32" && sharedHost) {
       if (candidate.expiresAtMs > Date.now()) {
         throw new Error("workspace quiescence lease is already active");
       }
-    } catch (error) {
-      if (!error || error.code !== "ENOENT") throw error;
     }
     const lease = {
       version: 1,
@@ -178,7 +180,7 @@ if (process.platform === "win32" && sharedHost) {
       watchdog: null,
       expiresAtMs: Date.now() + watchdogTimeoutMs,
     };
-    persistWindowsLease(leasePath, lease);
+    return JSON.stringify(lease);
   });
   process.stderr.write("workspace quiescence: Windows shared host declared; using manifest fences without process freezing\n");
   process.stdout.write("quiesced " + nonce + "\n");
@@ -416,7 +418,7 @@ if (isolationMode !== "dedicated" && isolationMode !== "shared-host") throw new 
 const sharedHost = isolationMode === "shared-host";
 const workspaceKey = crypto.createHash("sha256").update(root).digest("hex");
 const leaseDirectory = path.join(os.homedir(), ".openclaw-worker", "quiescence");
-const lockPath = path.join(leaseDirectory, "windows-shared-host.lock.sqlite");
+const windowsLeaseDatabasePath = path.join(leaseDirectory, "windows-shared-host.sqlite");
 const leasePath = path.join(
   leaseDirectory,
   process.platform === "win32" && sharedHost
@@ -425,8 +427,9 @@ const leasePath = path.join(
 );
 ${REMOTE_QUIESCENCE_LEASE_JS}
 if (process.platform === "win32" && sharedHost) {
-  withWindowsWorkspaceLock(lockPath, () => {
-    const input = parseLease(fs.readFileSync(leasePath, "utf8"), nonce, {
+  withWindowsWorkspaceLease(windowsLeaseDatabasePath, workspaceKey, (raw) => {
+    if (raw === null) throw new Error("workspace quiescence lease is no longer active");
+    const input = parseLease(raw, nonce, {
       minimumRemainingMs: 5000,
       errorMessage: "workspace quiescence lease is no longer active",
     });
@@ -434,15 +437,7 @@ if (process.platform === "win32" && sharedHost) {
       throw new Error("invalid Windows shared-host workspace quiescence lease");
     }
     const renewed = { ...input, expiresAtMs: Date.now() + timeoutMs };
-    persistWindowsLease(leasePath, renewed, (current) => {
-      if (current.nonce !== nonce || current.expiresAtMs !== input.expiresAtMs) {
-        throw new Error("workspace quiescence lease changed during renewal");
-      }
-    });
-    const confirmed = parseLease(fs.readFileSync(leasePath, "utf8"), nonce);
-    if (confirmed.expiresAtMs !== renewed.expiresAtMs) {
-      throw new Error("workspace quiescence renewal was not durable");
-    }
+    return JSON.stringify(renewed);
   });
   process.stdout.write("renewed " + nonce + "\n");
   process.exit(0);
@@ -554,7 +549,7 @@ const nonce = process.argv[2];
 if (!/^[a-f0-9]{32}$/.test(nonce || "")) throw new Error("invalid workspace quiescence nonce");
 const workspaceKey = crypto.createHash("sha256").update(root).digest("hex");
 const leaseDirectory = path.join(os.homedir(), ".openclaw-worker", "quiescence");
-const lockPath = path.join(leaseDirectory, "windows-shared-host.lock.sqlite");
+const windowsLeaseDatabasePath = path.join(leaseDirectory, "windows-shared-host.sqlite");
 const leasePath = path.join(
   leaseDirectory,
   process.platform === "win32"
@@ -563,17 +558,13 @@ const leasePath = path.join(
 );
 ${REMOTE_QUIESCENCE_LEASE_JS}
 if (process.platform === "win32") {
-  withWindowsWorkspaceLock(lockPath, () => {
-    let raw;
-    try { raw = fs.readFileSync(leasePath, "utf8"); } catch (error) {
-      if (error && error.code === "ENOENT") return;
-      throw error;
-    }
+  withWindowsWorkspaceLease(windowsLeaseDatabasePath, workspaceKey, (raw) => {
+    if (raw === null) return;
     const input = parseLease(raw, nonce);
     if (input.sharedHost !== true || input.processes.length !== 0 || input.watchdog !== null) {
       throw new Error("invalid Windows shared-host workspace quiescence lease");
     }
-    try { fs.unlinkSync(leasePath); } catch (error) { if (!error || error.code !== "ENOENT") throw error; }
+    return null;
   });
   process.exit(0);
 }
