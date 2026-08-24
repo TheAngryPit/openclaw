@@ -471,6 +471,14 @@ describe("detectChangedScope", () => {
       runControlUiI18n: false,
       runUiTests: false,
     });
+    for (const quiescencePath of [
+      "src/gateway/worker-environments/workspace-quiescence.ts",
+      "src/gateway/worker-environments/workspace-quiescence-scripts.ts",
+      "src/gateway/worker-environments/workspace-quiescence.test.ts",
+      "src/gateway/worker-environments/workspace-quiescence.windows.test.ts",
+    ]) {
+      expect(detectChangedScope([quiescencePath]).runWindows, quiescencePath).toBe(true);
+    }
     for (const daemonPath of [
       "src/daemon/schtasks.ts",
       "src/daemon/schtasks-exec.ts",
