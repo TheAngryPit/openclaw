@@ -103,6 +103,9 @@ function withWindowsWorkspaceLease(databasePath, workspaceKey, run) {
   const database = new DatabaseSync(databasePath);
   database.exec("PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS workspace_leases (workspace_key TEXT PRIMARY KEY, lease_json TEXT NOT NULL); BEGIN IMMEDIATE");
   try {
+    database
+      .prepare("DELETE FROM workspace_leases WHERE json_extract(lease_json, '$.expiresAtMs') <= ?")
+      .run(Date.now());
     const row = database
       .prepare("SELECT lease_json FROM workspace_leases WHERE workspace_key = ?")
       .get(workspaceKey);
@@ -146,12 +149,7 @@ const isolationMode = process.argv[3] || "dedicated";
 if (isolationMode !== "dedicated" && isolationMode !== "shared-host") throw new Error("invalid workspace quiescence isolation mode");
 const sharedHost = isolationMode === "shared-host";
 const windowsLeaseDatabasePath = path.join(leaseDirectory, "windows-shared-host.sqlite");
-const leasePath = path.join(
-  leaseDirectory,
-  process.platform === "win32" && sharedHost
-    ? workspaceKey + ".shared-host.json"
-    : workspaceKey + "." + nonce + ".json",
-);
+const leasePath = path.join(leaseDirectory, workspaceKey + "." + nonce + ".json");
 ${REMOTE_QUIESCENCE_LEASE_JS}
 if (process.platform === "win32" && sharedHost) {
   withWindowsWorkspaceLease(windowsLeaseDatabasePath, workspaceKey, (raw) => {
@@ -419,12 +417,7 @@ const sharedHost = isolationMode === "shared-host";
 const workspaceKey = crypto.createHash("sha256").update(root).digest("hex");
 const leaseDirectory = path.join(os.homedir(), ".openclaw-worker", "quiescence");
 const windowsLeaseDatabasePath = path.join(leaseDirectory, "windows-shared-host.sqlite");
-const leasePath = path.join(
-  leaseDirectory,
-  process.platform === "win32" && sharedHost
-    ? workspaceKey + ".shared-host.json"
-    : workspaceKey + "." + nonce + ".json",
-);
+const leasePath = path.join(leaseDirectory, workspaceKey + "." + nonce + ".json");
 ${REMOTE_QUIESCENCE_LEASE_JS}
 if (process.platform === "win32" && sharedHost) {
   withWindowsWorkspaceLease(windowsLeaseDatabasePath, workspaceKey, (raw) => {
@@ -550,12 +543,7 @@ if (!/^[a-f0-9]{32}$/.test(nonce || "")) throw new Error("invalid workspace quie
 const workspaceKey = crypto.createHash("sha256").update(root).digest("hex");
 const leaseDirectory = path.join(os.homedir(), ".openclaw-worker", "quiescence");
 const windowsLeaseDatabasePath = path.join(leaseDirectory, "windows-shared-host.sqlite");
-const leasePath = path.join(
-  leaseDirectory,
-  process.platform === "win32"
-    ? workspaceKey + ".shared-host.json"
-    : workspaceKey + "." + nonce + ".json",
-);
+const leasePath = path.join(leaseDirectory, workspaceKey + "." + nonce + ".json");
 ${REMOTE_QUIESCENCE_LEASE_JS}
 if (process.platform === "win32") {
   withWindowsWorkspaceLease(windowsLeaseDatabasePath, workspaceKey, (raw) => {

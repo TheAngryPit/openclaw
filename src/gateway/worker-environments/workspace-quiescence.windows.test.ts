@@ -82,17 +82,25 @@ describe.runIf(process.platform === "win32")("Windows workspace quiescence", () 
     expect(readLease(home, realWorkspace)).toBeUndefined();
 
     const database = new DatabaseSync(leaseDatabase(home));
-    database.prepare("INSERT INTO workspace_leases (workspace_key, lease_json) VALUES (?, ?)").run(
-      createHash("sha256").update(realWorkspace).digest("hex"),
-      JSON.stringify({
-        version: 1,
-        nonce: "d".repeat(32),
-        sharedHost: true,
-        processes: [],
-        watchdog: null,
-        expiresAtMs: 1,
-      }),
-    );
+    for (const [leaseWorkspace, expiresAtMs] of [
+      [realWorkspace, 1],
+      ["abandoned-workspace", 1],
+      ["active-workspace", Date.now() + 60_000],
+    ] as const) {
+      database
+        .prepare("INSERT INTO workspace_leases (workspace_key, lease_json) VALUES (?, ?)")
+        .run(
+          createHash("sha256").update(leaseWorkspace).digest("hex"),
+          JSON.stringify({
+            version: 1,
+            nonce: "d".repeat(32),
+            sharedHost: true,
+            processes: [],
+            watchdog: null,
+            expiresAtMs,
+          }),
+        );
+    }
     database.close();
     const simultaneous = await Promise.all([
       runCommandWithTimeout(
@@ -122,6 +130,8 @@ describe.runIf(process.platform === "win32")("Windows workspace quiescence", () 
     expect(simultaneous.find((result) => result.code !== 0)?.stderr).toContain(
       "workspace quiescence lease is already active",
     );
+    expect(readLease(home, "abandoned-workspace")).toBeUndefined();
+    expect(readLease(home, "active-workspace")).toBeDefined();
     const winner = simultaneous.find((result) => result.code === 0)!;
     const winnerNonce = /^quiesced ([a-f0-9]{32})\n$/u.exec(winner.stdout)?.[1];
     expect(winnerNonce).toBeDefined();
