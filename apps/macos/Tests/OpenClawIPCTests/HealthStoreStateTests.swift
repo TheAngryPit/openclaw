@@ -4,191 +4,231 @@ import Testing
 
 struct HealthStoreStateTests {
     @Test @MainActor func `current channel lifecycle reports healthy`() throws {
-        let data = Data(
-            """
-            {
-              "ok": true,
-              "ts": 1,
-              "durationMs": 2,
-              "channels": {
-                "telegram": {
-                  "accountId": "default",
-                  "configured": true,
-                  "running": true,
-                  "connected": true,
-                  "lifecycle": "ready"
-                }
-              },
-              "channelOrder": ["telegram"],
-              "channelLabels": {"telegram": "Telegram"},
-              "heartbeatSeconds": 60,
-              "sessions": {"path": "/tmp/sessions.json", "count": 0, "recent": []}
+        try Self.withSnapshot([
+            "telegram": ["running": true, "connected": true, "lifecycle": "ready"],
+        ]) { store in
+            #expect(store.state == .ok)
+            #expect(store.summaryLine == "Telegram ready")
+        }
+    }
+
+    @Test @MainActor func `linked channel probe failure degrades state`() throws {
+        try Self.withSnapshot([
+            "whatsapp": [
+                "linked": true,
+                "authAgeMs": 1,
+                "probe": ["ok": false, "status": 503, "error": "gateway connect failed", "elapsedMs": 12],
+                "lastProbeAt": 1772798400000,
+            ],
+        ], order: ["whatsapp"]) { store in
+            switch store.state {
+            case let .degraded(message):
+                #expect(!message.isEmpty)
+            default:
+                Issue.record("Expected degraded state when probe fails for linked channel")
             }
-            """.utf8)
+
+            #expect(store.summaryLine.contains("probe degraded"))
+        }
+    }
+
+    @Test @MainActor func `current channel selection skips an unconfigured entry`() throws {
+        try Self.withSnapshot([
+            "disabled": ["configured": false, "running": false, "connected": false, "lifecycle": "stopped"],
+            "telegram": ["running": true, "connected": true, "lifecycle": "ready"],
+        ], order: ["disabled", "telegram"]) { store in
+            #expect(store.state == .ok)
+            #expect(store.summaryLine == "Telegram ready")
+        }
+    }
+
+    @Test @MainActor func `current channel probe failure degrades state`() throws {
+        try Self.withSnapshot([
+            "telegram": [
+                "probe": ["ok": false, "status": 503, "error": "gateway connect failed", "elapsedMs": 12],
+                "lastProbeAt": 1772798400000,
+                "running": true,
+                "connected": true,
+                "lifecycle": "ready",
+            ],
+        ]) { store in
+            switch store.state {
+            case let .degraded(message):
+                #expect(message.contains("gateway connect failed"))
+            default:
+                Issue.record("Expected degraded state when a current channel probe fails")
+            }
+            #expect(store.summaryLine.contains("gateway connect failed"))
+        }
+    }
+
+    @Test @MainActor func `fallback channel with last error is not healthy`() throws {
+        try Self.withChannel([
+            "running": true,
+            "connected": true,
+            "lifecycle": "ready",
+            "lastError": "polling failed",
+        ], unlinkedFirst: true) { store in
+            #expect(store.state == .linkingNeeded)
+            #expect(store.summaryLine == "Not linked — run openclaw login")
+        }
+    }
+
+    @Test(arguments: [
+        ("starting", true),
+        ("recovering", false),
+    ])
+    @MainActor func `fresh lifecycle without health state respects gateway grace`(
+        lifecycle: String, running: Bool) throws
+    {
+        // The collector omits healthState when grace is healthy and the producer supplied no state.
+        for unlinkedFirst in [false, true] {
+            try Self.withChannel([
+                "running": running,
+                "connected": false,
+                "lifecycle": lifecycle,
+                "lastStartAt": 1772798370000,
+            ], unlinkedFirst: unlinkedFirst) { store in
+                #expect(store.state == (unlinkedFirst ? .degraded("Not linked") : .ok))
+                #expect(store.summaryLine.contains("Telegram"))
+            }
+        }
+    }
+
+    @Test(arguments: [
+        ("starting", "starting"),
+        ("recovering", "reconnecting"),
+        ("recovering", "error"),
+        ("recovering", "sync-paused"),
+    ])
+    @MainActor func `matrix informational health states remain healthy during grace`(
+        lifecycle: String, healthState: String) throws
+    {
+        // Matrix preserves producer strings, including error without lastError and future SDK states.
+        var fields: [String: Any] = [
+            "running": true,
+            "connected": false,
+            "lifecycle": lifecycle,
+            "healthState": healthState,
+            "lastStartAt": 1772798370000,
+        ]
+        if lifecycle == "recovering" {
+            fields["lastStartAt"] = 1772794800000
+            fields["lastDisconnect"] = ["at": 1772798395000]
+        }
+        for unlinkedFirst in [false, true] {
+            try Self.withChannel(fields, channelId: "matrix", unlinkedFirst: unlinkedFirst) { store in
+                #expect(store.state == (unlinkedFirst ? .degraded("Not linked") : .ok))
+                #expect(store.summaryLine.contains("Matrix"))
+            }
+        }
+    }
+
+    @Test(arguments: [
+        ("starting", true, "disconnected"),
+        ("recovering", true, "disconnected"),
+        ("recovering", false, "not-running"),
+    ])
+    @MainActor func `expired lifecycle reports the gateway failure reason`(
+        lifecycle: String, running: Bool, reason: String) throws
+    {
+        var fields: [String: Any] = [
+            "running": running,
+            "connected": false,
+            "lifecycle": lifecycle,
+            "lastStartAt": 1772798100000,
+            "healthState": reason,
+        ]
+        if lifecycle == "recovering" {
+            fields["lastDisconnect"] = ["at": 1772798220000]
+        }
+        for unlinkedFirst in [false, true] {
+            try Self.withChannel(fields, unlinkedFirst: unlinkedFirst) { store in
+                #expect(store.state == (unlinkedFirst ? .linkingNeeded : .degraded(reason)))
+                if !unlinkedFirst {
+                    #expect(store.summaryLine.contains(reason))
+                }
+            }
+        }
+    }
+
+    @Test(arguments: ["stale-socket", "ingress-unavailable"])
+    @MainActor func `gateway failure overrides ready transport flags`(reason: String) throws {
+        var fields: [String: Any] = [
+            "running": true,
+            "connected": true,
+            "lifecycle": "ready",
+            "lastStartAt": 1772794800000,
+            "healthState": reason,
+        ]
+        if reason == "stale-socket" {
+            fields["lastTransportActivityAt"] = 1772796540000
+        } else {
+            fields["lastTransportActivityAt"] = 1772798395000
+            fields["ingressUnavailable"] = true
+        }
+        for unlinkedFirst in [false, true] {
+            try Self.withChannel(fields, unlinkedFirst: unlinkedFirst) { store in
+                #expect(store.state == (unlinkedFirst ? .linkingNeeded : .degraded(reason)))
+                if !unlinkedFirst {
+                    #expect(store.summaryLine.contains(reason))
+                }
+            }
+        }
+        fields["linked"] = true
+        fields["authAgeMs"] = 1
+        try Self.withChannel(fields, channelId: "whatsapp", unlinkedFirst: false) { store in
+            #expect(store.state == .degraded(reason))
+            #expect(store.summaryLine.contains(reason))
+        }
+    }
+
+    @MainActor private static func withChannel(
+        _ fields: [String: Any],
+        channelId: String = "telegram",
+        unlinkedFirst: Bool,
+        body: @MainActor (HealthStore) -> Void) throws
+    {
+        var channels = [channelId: fields]
+        var order = [channelId]
+        if unlinkedFirst {
+            channels["whatsapp"] = ["linked": false]
+            order.insert("whatsapp", at: 0)
+        }
+        try self.withSnapshot(channels, order: order, body: body)
+    }
+
+    @MainActor private static func withSnapshot(
+        _ channels: [String: [String: Any]],
+        order: [String] = ["telegram"],
+        body: @MainActor (HealthStore) -> Void) throws
+    {
+        let accounts = channels.mapValues { fields in
+            var account: [String: Any] = ["accountId": "default", "configured": true]
+            account.merge(fields) { _, value in value }
+            return account
+        }
+        // Fixed Gateway response time: fresh starts are 30s old; expired starts are 5m old.
+        let fixture: [String: Any] = [
+            "ok": true,
+            "ts": 1772798400000,
+            "durationMs": 2,
+            "channels": accounts,
+            "channelOrder": order,
+            "channelLabels": [
+                "telegram": "Telegram", "matrix": "Matrix", "whatsapp": "WhatsApp", "disabled": "Disabled",
+            ],
+            "heartbeatSeconds": 60,
+            "sessions": ["path": "/tmp/sessions.json", "count": 0, "recent": []],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: fixture)
         let snap = try #require(decodeHealthSnapshot(from: data))
         let store = HealthStore.shared
+        let previousSnapshot = store.snapshot
+        let previousError = store.lastError
+        defer { store.__setSnapshotForTest(previousSnapshot, lastError: previousError) }
+
         store.__setSnapshotForTest(snap, lastError: nil)
-
-        #expect(store.state == .ok)
-        #expect(store.summaryLine == "Telegram ready")
-    }
-
-    @Test @MainActor func `linked channel probe failure degrades state`() {
-        let snap = HealthSnapshot(
-            ok: true,
-            ts: 0,
-            durationMs: 1,
-            channels: [
-                "whatsapp": .init(
-                    configured: true,
-                    linked: true,
-                    authAgeMs: 1,
-                    probe: .init(
-                        ok: false,
-                        status: 503,
-                        error: "gateway connect failed",
-                        elapsedMs: 12,
-                        bot: nil,
-                        webhook: nil),
-                    lastProbeAt: 0,
-                    running: nil,
-                    connected: nil,
-                    lifecycle: nil,
-                    lastError: nil),
-            ],
-            channelOrder: ["whatsapp"],
-            channelLabels: ["whatsapp": "WhatsApp"],
-            heartbeatSeconds: 60,
-            sessions: .init(path: "/tmp/sessions.json", count: 0, recent: []))
-
-        let store = HealthStore.shared
-        store.__setSnapshotForTest(snap, lastError: nil)
-
-        switch store.state {
-        case let .degraded(message):
-            #expect(!message.isEmpty)
-        default:
-            Issue.record("Expected degraded state when probe fails for linked channel")
-        }
-
-        #expect(store.summaryLine.contains("probe degraded"))
-    }
-
-    @Test @MainActor func `current channel selection skips an unconfigured entry`() {
-        let snap = HealthSnapshot(
-            ok: true,
-            ts: 0,
-            durationMs: 1,
-            channels: [
-                "disabled": .init(
-                    configured: false,
-                    linked: nil,
-                    authAgeMs: nil,
-                    probe: nil,
-                    lastProbeAt: nil,
-                    running: false,
-                    connected: false,
-                    lifecycle: "stopped",
-                    lastError: nil),
-                "telegram": .init(
-                    configured: true,
-                    linked: nil,
-                    authAgeMs: nil,
-                    probe: nil,
-                    lastProbeAt: nil,
-                    running: true,
-                    connected: true,
-                    lifecycle: "ready",
-                    lastError: nil),
-            ],
-            channelOrder: ["disabled", "telegram"],
-            channelLabels: ["disabled": "Disabled", "telegram": "Telegram"],
-            heartbeatSeconds: 60,
-            sessions: .init(path: "/tmp/sessions.json", count: 0, recent: []))
-
-        let store = HealthStore.shared
-        store.__setSnapshotForTest(snap, lastError: nil)
-
-        #expect(store.state == .ok)
-        #expect(store.summaryLine == "Telegram ready")
-    }
-
-    @Test @MainActor func `current channel probe failure degrades state`() {
-        let snap = HealthSnapshot(
-            ok: true,
-            ts: 0,
-            durationMs: 1,
-            channels: [
-                "telegram": .init(
-                    configured: true,
-                    linked: nil,
-                    authAgeMs: nil,
-                    probe: .init(
-                        ok: false,
-                        status: 503,
-                        error: "gateway connect failed",
-                        elapsedMs: 12,
-                        bot: nil,
-                        webhook: nil),
-                    lastProbeAt: 0,
-                    running: true,
-                    connected: true,
-                    lifecycle: "ready",
-                    lastError: nil),
-            ],
-            channelOrder: ["telegram"],
-            channelLabels: ["telegram": "Telegram"],
-            heartbeatSeconds: 60,
-            sessions: .init(path: "/tmp/sessions.json", count: 0, recent: []))
-
-        let store = HealthStore.shared
-        store.__setSnapshotForTest(snap, lastError: nil)
-
-        switch store.state {
-        case let .degraded(message):
-            #expect(message.contains("gateway connect failed"))
-        default:
-            Issue.record("Expected degraded state when a current channel probe fails")
-        }
-        #expect(store.summaryLine.contains("gateway connect failed"))
-    }
-
-    @Test @MainActor func `fallback channel with last error is not healthy`() {
-        let snap = HealthSnapshot(
-            ok: true,
-            ts: 0,
-            durationMs: 1,
-            channels: [
-                "whatsapp": .init(
-                    configured: true,
-                    linked: false,
-                    authAgeMs: nil,
-                    probe: nil,
-                    lastProbeAt: nil,
-                    running: nil,
-                    connected: nil,
-                    lifecycle: nil,
-                    lastError: nil),
-                "telegram": .init(
-                    configured: true,
-                    linked: nil,
-                    authAgeMs: nil,
-                    probe: nil,
-                    lastProbeAt: nil,
-                    running: true,
-                    connected: true,
-                    lifecycle: "ready",
-                    lastError: "polling failed"),
-            ],
-            channelOrder: ["whatsapp", "telegram"],
-            channelLabels: ["whatsapp": "WhatsApp", "telegram": "Telegram"],
-            heartbeatSeconds: 60,
-            sessions: .init(path: "/tmp/sessions.json", count: 0, recent: []))
-
-        let store = HealthStore.shared
-        store.__setSnapshotForTest(snap, lastError: nil)
-
-        #expect(store.state == .linkingNeeded)
-        #expect(store.summaryLine == "Not linked — run openclaw login")
+        body(store)
     }
 }
