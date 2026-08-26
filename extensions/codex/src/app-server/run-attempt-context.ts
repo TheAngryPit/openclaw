@@ -1,5 +1,6 @@
 import {
   bootstrapHarnessContextEngine,
+  buildAgentHookContextChannelFields,
   buildHarnessContextEngineRuntimeContext,
   CODEX_APP_SERVER_CONTEXT_ENGINE_HOST,
   embeddedAgentLog,
@@ -103,6 +104,13 @@ export async function prepareCodexAttemptContext(
     sessionKey: sandboxSessionKey,
     sessionId: params.sessionId,
     workspaceDir: params.workspaceDir,
+    channel: buildAgentHookContextChannelFields({
+      sessionKey: sandboxSessionKey,
+      messageChannel: params.messageChannel,
+      messageProvider: params.messageProvider,
+      currentChannelId: params.currentChannelId,
+      messageTo: params.messageTo,
+    }).channel,
     messageProvider: params.messageProvider ?? undefined,
     trigger: params.trigger,
     channelId: hookChannelId,

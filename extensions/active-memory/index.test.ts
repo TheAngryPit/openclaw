@@ -1176,6 +1176,44 @@ describe("active-memory plugin", () => {
     });
   });
 
+  it("runs product recall for an opted-in Dashboard session from the canonical channel", async () => {
+    syncRuntimePluginConfig({ agents: [], logging: true });
+    configFile = {
+      ...configFile,
+      agents: {
+        list: [
+          {
+            id: "personal",
+            workspace: "/tmp/live-personal-workspace",
+            agentDir: "/tmp/live-personal-agent",
+            model: { primary: "openai/gpt-5.5" },
+            memory: { search: { rememberAcrossConversations: true } },
+          },
+        ],
+      },
+    };
+    const sessionKey = "agent:personal:dashboard:12345";
+    hoisted.sessionStore[sessionKey] = { sessionId: "s-dashboard", updatedAt: 0 };
+
+    await runPromptBuild(
+      { prompt: "what do I usually order?" },
+      {
+        agentId: "personal",
+        sessionKey,
+        messageProvider: undefined,
+        channel: "webchat",
+        channelId: "webchat",
+      },
+    );
+
+    expect(lastEmbeddedRunParams().conversationRecall).toEqual({
+      anchorSessionKey: sessionKey,
+      scope: "same-agent-private",
+      corpus: "sessions",
+    });
+    expect(lastEmbeddedRunParams().toolsAllow).toEqual(["memory_search"]);
+  });
+
   it("keeps product recall available when Lossless Claw owns the context-engine slot", async () => {
     syncRuntimePluginConfig({ agents: [], logging: true });
     configFile = {

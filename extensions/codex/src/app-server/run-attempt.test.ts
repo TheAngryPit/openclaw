@@ -2908,7 +2908,10 @@ describe("runCodexAppServerAttempt", () => {
     const sessionManager = openRunSession(sessionFile);
     sessionManager.appendMessage(assistantMessage("previous turn", Date.now()));
     const harness = createStartedThreadHarness();
-    const run = runCodexAppServerAttempt(createParams(sessionFile, workspaceDir));
+    const params = createParams(sessionFile, workspaceDir);
+    params.messageChannel = "webchat";
+    params.messageProvider = undefined;
+    const run = runCodexAppServerAttempt(params);
     await harness.waitForMethod("turn/start");
     await new Promise<void>((resolve) => {
       setImmediate(resolve);
@@ -2921,7 +2924,7 @@ describe("runCodexAppServerAttempt", () => {
         messages?: Array<{ content?: Array<{ text?: string; type?: string }>; role?: string }>;
         prompt?: string;
       },
-      { runId?: string; sessionId?: string },
+      { channel?: string; messageProvider?: string; runId?: string; sessionId?: string },
     ];
     expect(hookInput.prompt).toBe("hello");
     expect(hookInput.messages).toEqual([
@@ -2932,6 +2935,8 @@ describe("runCodexAppServerAttempt", () => {
     ]);
     expect(hookContext.runId).toBe("run-1");
     expect(hookContext.sessionId).toBe("session-1");
+    expect(hookContext.channel).toBe("webchat");
+    expect(hookContext.messageProvider).toBeUndefined();
     const threadStart = harness.requests.find((request) => request.method === "thread/start");
     const threadStartParams = threadStart?.params as { developerInstructions?: string } | undefined;
     const wrappedPluginSystemContext = (text: string) =>

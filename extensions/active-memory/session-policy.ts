@@ -220,6 +220,7 @@ function isEligibleInteractiveSession(ctx: {
   trigger?: string;
   sessionKey?: string;
   sessionId?: string;
+  channel?: string;
   messageProvider?: string;
   channelId?: string;
 }): boolean {
@@ -242,7 +243,7 @@ function isEligibleInteractiveSession(ctx: {
   if (!ctx.sessionKey && !ctx.sessionId) {
     return false;
   }
-  const provider = (ctx.messageProvider ?? "").trim().toLowerCase();
+  const provider = (ctx.channel ?? ctx.messageProvider ?? "").trim().toLowerCase();
   if (provider === "webchat") {
     return true;
   }
@@ -251,6 +252,7 @@ function isEligibleInteractiveSession(ctx: {
 
 function resolveChatType(ctx: {
   sessionKey?: string;
+  channel?: string;
   messageProvider?: string;
   channelId?: string;
   mainKey?: string;
@@ -278,14 +280,14 @@ function resolveChatType(ctx: {
       agentSessionParts[0] === "agent" &&
       (agentSessionParts[2] === mainKey || agentSessionParts[2] === "main")
     ) {
-      const provider = (ctx.messageProvider ?? "").trim().toLowerCase();
+      const provider = (ctx.channel ?? ctx.messageProvider ?? "").trim().toLowerCase();
       const channelId = (ctx.channelId ?? "").trim();
       if (provider && provider !== "webchat" && channelId) {
         return "direct";
       }
     }
   }
-  const provider = (ctx.messageProvider ?? "").trim().toLowerCase();
+  const provider = (ctx.channel ?? ctx.messageProvider ?? "").trim().toLowerCase();
   if (provider === "webchat") {
     return "direct";
   }
@@ -296,6 +298,7 @@ function isAllowedChatType(
   config: ResolvedActiveRecallPluginConfig,
   ctx: {
     sessionKey?: string;
+    channel?: string;
     messageProvider?: string;
     channelId?: string;
     mainKey?: string;
@@ -310,6 +313,7 @@ function isAllowedChatType(
 
 function isPrivateRecallDestination(ctx: {
   sessionKey?: string;
+  channel?: string;
   messageProvider?: string;
   channelId?: string;
   mainKey?: string;
