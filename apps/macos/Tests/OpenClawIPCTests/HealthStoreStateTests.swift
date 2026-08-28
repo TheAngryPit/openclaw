@@ -1,8 +1,93 @@
+import AppKit
+import Darwin
 import Foundation
+import SwiftUI
 import Testing
 @testable import OpenClaw
 
 struct HealthStoreStateTests {
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["OPENCLAW_TEST_HEALTH_RENDER_DIR"] != nil))
+    @MainActor func healthSettingsRender() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        let output = URL(fileURLWithPath: try #require(environment["OPENCLAW_TEST_HEALTH_RENDER_DIR"]))
+        let home = URL(fileURLWithPath: try #require(environment["CFFIXED_USER_HOME"]))
+        try #require(FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath() == home)
+        try #require(URL(fileURLWithPath: NSHomeDirectory()).resolvingSymlinksInPath() == home)
+        let suite = try #require(AppProfile.current.defaultsSuiteName)
+        try #require(AppDefaults.standard.persistentDomain(forName: suite)?.isEmpty ?? true)
+        try #require(OpenClawPaths.stateDirURL == home.appendingPathComponent("state", isDirectory: true))
+        try #require(OpenClawConfigFile.loadDict().isEmpty)
+        let canary = try #require(environment["OPENCLAW_TEST_HEALTH_DENIED_FILE"])
+        try #require((try? Data(contentsOf: URL(fileURLWithPath: canary))) == nil)
+        try Self.requireNetworkDenied()
+
+        // The isolated helper runs only this test. Keep detached view tasks on fixtures until process exit.
+        await ConfigStore._testSetOverrides(.init(isRemoteMode: { false }, loadLocal: { [:] }))
+        let tailscale = TailscaleService(
+            isInstalled: false,
+            isRunning: false,
+            appInstallationProbe: { false },
+            cliInstallationProbe: { false },
+            statusDataLoader: { _ in throw URLError(.notConnectedToInternet) })
+        let state = AppState(preview: true)
+        state.connectionMode = .local
+        state.isPaused = true
+        for (name, fields, expected) in [
+            ("ready", ["running": true, "connected": true, "lifecycle": "ready"] as [String: Any],
+             "Telegram ready"),
+            ("startup-grace", [
+                "running": true, "connected": false, "lifecycle": "starting", "lastStartAt": 1772798370000,
+            ],
+             "Telegram running"),
+            ("stale-socket", [
+                "running": true, "connected": true, "lifecycle": "ready", "healthState": "stale-socket",
+                "lastStartAt": 1772794800000, "lastTransportActivityAt": 1772796540000,
+            ],
+             "Telegram degraded · stale-socket"),
+        ] {
+            try Self.withSnapshot(["telegram": fields]) { store in
+                let hosting = NSHostingView(rootView: GeneralSettings(state: state, page: .connection, isActive: false)
+                    .environment(tailscale)
+                    .environment(\.locale, Locale(identifier: "en_US"))
+                    .environment(\.colorScheme, .light))
+                hosting.frame = NSRect(x: 0, y: 0, width: 900, height: 1000)
+                let window = NSWindow(contentRect: hosting.frame, styleMask: [], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                window.contentView = hosting
+                defer {
+                    window.contentView = nil
+                    window.close()
+                }
+                hosting.layoutSubtreeIfNeeded()
+                let bitmap = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
+                hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+                let png = try #require(bitmap.representation(using: .png, properties: [:]))
+                try png.write(to: output.appendingPathComponent("\(name).png"))
+                #expect(store.summaryLine == expected)
+            }
+        }
+    }
+
+    private static func requireNetworkDenied() throws {
+        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        if descriptor < 0 {
+            try #require(errno == EPERM || errno == EACCES)
+            return
+        }
+        defer { close(descriptor) }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = UInt16(9).bigEndian
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let result = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        try #require(result == -1 && (errno == EPERM || errno == EACCES))
+    }
+
     @Test @MainActor func `current channel lifecycle reports healthy`() throws {
         try Self.withSnapshot([
             "telegram": ["running": true, "connected": true, "lifecycle": "ready"],
@@ -187,7 +272,7 @@ struct HealthStoreStateTests {
         _ fields: [String: Any],
         channelId: String = "telegram",
         unlinkedFirst: Bool,
-        body: @MainActor (HealthStore) -> Void) throws
+        body: @MainActor (HealthStore) throws -> Void) throws
     {
         var channels = [channelId: fields]
         var order = [channelId]
@@ -201,7 +286,7 @@ struct HealthStoreStateTests {
     @MainActor private static func withSnapshot(
         _ channels: [String: [String: Any]],
         order: [String] = ["telegram"],
-        body: @MainActor (HealthStore) -> Void) throws
+        body: @MainActor (HealthStore) throws -> Void) throws
     {
         let accounts = channels.mapValues { fields in
             var account: [String: Any] = ["accountId": "default", "configured": true]
@@ -229,6 +314,6 @@ struct HealthStoreStateTests {
         defer { store.__setSnapshotForTest(previousSnapshot, lastError: previousError) }
 
         store.__setSnapshotForTest(snap, lastError: nil)
-        body(store)
+        try body(store)
     }
 }
