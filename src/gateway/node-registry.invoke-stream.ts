@@ -4,6 +4,9 @@ import {
 } from "../process/gateway-work-admission.js";
 import { NODE_INVOKE_PAIRING_CHANGED_ABORT } from "./node-registry-private-token.js";
 
+/** A node may emit this only before invoking a handler or sending any progress. */
+export const NODE_INVOKE_NOT_READY = "NODE_NOT_READY";
+
 export type PendingSystemRunEvent = {
   runId: string;
   sessionKey?: string;
@@ -133,11 +136,18 @@ export class NodeInvokeStreamController {
     if (!params.ok) {
       this.options.onFailedResult(pending);
     }
+    // Even an out-of-order frame proves execution. A contradictory readiness
+    // rejection must not authorize another attempt of a non-idempotent command.
+    const error =
+      params.error?.code === NODE_INVOKE_NOT_READY &&
+      (pending.nextProgressSeq > 0 || pending.progressChunks.size > 0)
+        ? { code: "UNAVAILABLE", message: "node reported not-ready after invocation progress" }
+        : (params.error ?? null);
     pending.resolve({
       ok: params.ok,
       payload: params.payload,
       payloadJSON: params.payloadJSON ?? null,
-      error: params.error ?? null,
+      error,
     });
     return true;
   }
