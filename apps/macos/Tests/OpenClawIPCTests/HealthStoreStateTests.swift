@@ -44,6 +44,7 @@ struct HealthStoreStateTests {
                 "lastStartAt": 1772794800000, "lastTransportActivityAt": 1772796540000,
             ],
              "Telegram degraded · stale-socket"),
+            ("disabled", ["enabled": false, "running": false], "Telegram disabled"),
         ] {
             try Self.withSnapshot(["telegram": fields]) { store in
                 let hosting = NSHostingView(rootView: GeneralSettings(state: state, page: .connection, isActive: false)

@@ -202,7 +202,7 @@ final class HealthStore {
         for channelId in order {
             if channelId == id { continue }
             guard let summary = snap.channels[channelId] else { continue }
-            if summary.configured == true, Self.currentChannelFailure(summary) == nil {
+            if summary.configured == true, summary.linked != false, Self.currentChannelFailure(summary) == nil {
                 return (id: channelId, summary: summary)
             }
         }
