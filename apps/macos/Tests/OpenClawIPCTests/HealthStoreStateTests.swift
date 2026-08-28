@@ -47,9 +47,12 @@ struct HealthStoreStateTests {
         ] {
             try Self.withSnapshot(["telegram": fields]) { store in
                 let hosting = NSHostingView(rootView: GeneralSettings(state: state, page: .connection, isActive: false)
+                    // Capture the view's light canvas, not transparent text over the window's excluded background.
+                    .background(.white)
                     .environment(tailscale)
                     .environment(\.locale, Locale(identifier: "en_US"))
                     .environment(\.colorScheme, .light))
+                hosting.appearance = NSAppearance(named: .aqua)
                 hosting.frame = NSRect(x: 0, y: 0, width: 900, height: 1000)
                 let window = NSWindow(contentRect: hosting.frame, styleMask: [], backing: .buffered, defer: false)
                 window.isReleasedWhenClosed = false
