@@ -95,14 +95,6 @@ let package = Package(
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency"),
             ]),
-        // Temporary candidate-source diagnostic target; remove after capturing the fallback regression.
-        .testTarget(
-            name: "HealthStoreCandidateTests",
-            dependencies: ["OpenClaw"],
-            swiftSettings: [
-                .enableUpcomingFeature("StrictConcurrency"),
-                .enableExperimentalFeature("SwiftTesting"),
-            ]),
         .testTarget(
             name: "OpenClawIPCTests",
             dependencies: [

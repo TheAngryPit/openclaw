@@ -272,6 +272,79 @@ struct HealthStoreStateTests {
         }
     }
 
+    @Test(arguments: [false, true])
+    @MainActor func `unlinked channels cannot provide a healthy fallback`(whatsappFirst: Bool) throws {
+        try Self.withSnapshot([
+            "whatsapp": Self.unlinkedWhatsApp,
+            "zalouser": ["configured": true, "linked": false, "running": false],
+        ], order: whatsappFirst ? ["whatsapp", "zalouser"] : ["zalouser", "whatsapp"]) { store in
+            #expect(store.state == .linkingNeeded)
+            #expect(store.summaryLine == "Not linked — run openclaw login")
+        }
+    }
+
+    @Test(arguments: [nil, false, true] as [Bool?])
+    @MainActor func `selected disabled channels remain inactive`(linked: Bool?) throws {
+        let channel = linked == nil ? "telegram" : "whatsapp"
+        let label = linked == nil ? "Telegram" : "WhatsApp"
+        var fields: [String: Any] = ["enabled": false, "configured": true, "running": false]
+        if let linked {
+            fields["linked"] = linked
+            fields["connected"] = false
+            fields["lifecycle"] = "stopped"
+            fields["healthState"] = "stopped"
+        }
+        var channels = [channel: fields]
+        var order = [channel]
+        if linked == nil {
+            channels["matrix"] = [
+                "configured": true, "running": true, "connected": true, "lifecycle": "ready",
+                "healthState": "healthy",
+            ]
+            order.append("matrix")
+        }
+        try Self.withSnapshot(channels, order: order) { store in
+            #expect(store.state == .unknown)
+            #expect(store.summaryLine == "\(label) disabled")
+        }
+    }
+
+    @Test @MainActor func `disabled channels cannot provide a healthy fallback`() throws {
+        try Self.withSnapshot([
+            "whatsapp": Self.unlinkedWhatsApp,
+            "telegram": ["enabled": false, "configured": true, "running": false],
+        ], order: ["whatsapp", "telegram"]) { store in
+            #expect(store.state == .linkingNeeded)
+            #expect(store.summaryLine == "Not linked — run openclaw login")
+        }
+    }
+
+    @Test(arguments: [nil, true] as [Bool?])
+    @MainActor func `enabled and unspecified channels remain eligible`(enabled: Bool?) throws {
+        var fields: [String: Any] = [
+            "configured": true, "running": true, "connected": true, "lifecycle": "ready",
+        ]
+        if let enabled { fields["enabled"] = enabled }
+        try Self.withSnapshot(["telegram": fields], order: ["telegram"]) { store in
+            #expect(store.state == .ok)
+            #expect(store.summaryLine == "Telegram ready")
+        }
+        try Self.withSnapshot([
+            "whatsapp": Self.unlinkedWhatsApp,
+            "telegram": fields,
+        ], order: ["whatsapp", "telegram"]) { store in
+            #expect(store.state == .degraded("Not linked"))
+            #expect(store.summaryLine == "Telegram ok · Not linked — run openclaw login")
+        }
+    }
+
+    private static var unlinkedWhatsApp: [String: Any] {
+        [
+            "configured": true, "linked": false, "running": false, "connected": false,
+            "healthState": "stopped", "lifecycle": "stopped",
+        ]
+    }
+
     @MainActor private static func withChannel(
         _ fields: [String: Any],
         channelId: String = "telegram",
@@ -281,7 +354,7 @@ struct HealthStoreStateTests {
         var channels = [channelId: fields]
         var order = [channelId]
         if unlinkedFirst {
-            channels["whatsapp"] = ["linked": false]
+            channels["whatsapp"] = Self.unlinkedWhatsApp
             order.insert("whatsapp", at: 0)
         }
         try self.withSnapshot(channels, order: order, body: body)
@@ -305,7 +378,8 @@ struct HealthStoreStateTests {
             "channels": accounts,
             "channelOrder": order,
             "channelLabels": [
-                "telegram": "Telegram", "matrix": "Matrix", "whatsapp": "WhatsApp", "disabled": "Disabled",
+                "telegram": "Telegram", "matrix": "Matrix", "whatsapp": "WhatsApp", "zalouser": "Zalo Personal",
+                "disabled": "Disabled",
             ],
             "heartbeatSeconds": 60,
             "sessions": ["path": "/tmp/sessions.json", "count": 0, "recent": []],
