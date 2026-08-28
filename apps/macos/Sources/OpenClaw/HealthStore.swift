@@ -244,7 +244,9 @@ final class HealthStore {
         return (state, "linked · auth \(auth)" + (failure.map { " · \($0)" } ?? ""))
     }
 
-    var state: HealthState { self.presentation.state }
+    var state: HealthState {
+        self.presentation.state
+    }
 
     var summaryLine: String {
         if self.isRefreshing { return "Health check running…" }
