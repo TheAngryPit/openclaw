@@ -1,4 +1,7 @@
-@testable import OpenClaw
+@testable import class OpenClaw.ControlChannel
+@testable import class OpenClaw.GatewayConnectivityCoordinator
+@testable import enum OpenClaw.GatewayEnvironment
+@testable import typealias OpenClaw.Logger
 
 import Foundation
 import Network
