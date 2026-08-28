@@ -30,6 +30,7 @@ export type PendingInvoke = {
   idleTimer?: ReturnType<typeof setTimeout>;
   idleTimeoutMs?: number;
   onProgress?: (chunk: string) => void;
+  receivedProgress?: boolean;
   nextProgressSeq: number;
   progressChunks: Map<number, string>;
   nextInputSeq: number;
@@ -139,8 +140,7 @@ export class NodeInvokeStreamController {
     // Even an out-of-order frame proves execution. A contradictory readiness
     // rejection must not authorize another attempt of a non-idempotent command.
     const error =
-      params.error?.code === NODE_INVOKE_NOT_READY &&
-      (pending.nextProgressSeq > 0 || pending.progressChunks.size > 0)
+      params.error?.code === NODE_INVOKE_NOT_READY && pending.receivedProgress
         ? { code: "UNAVAILABLE", message: "node reported not-ready after invocation progress" }
         : (params.error ?? null);
     pending.resolve({
@@ -209,12 +209,17 @@ export class NodeInvokeStreamController {
       pending.nodeId !== params.nodeId ||
       pending.connId !== params.connId ||
       !this.options.isConnectionActive(pending) ||
-      !pending.onProgress ||
       params.seq < pending.nextProgressSeq
     ) {
       return false;
     }
     if (this.settleIfExpired(params.invokeId, pending)) {
+      return false;
+    }
+    // Receipt proves execution even without a stream consumer. Keep ignored
+    // acknowledgments and cancellation capability independent of this fact.
+    pending.receivedProgress = true;
+    if (!pending.onProgress) {
       return false;
     }
     if (params.seq > pending.nextProgressSeq) {

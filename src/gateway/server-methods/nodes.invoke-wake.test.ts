@@ -1008,41 +1008,79 @@ describe("node.invoke APNs wake path", () => {
       },
     );
 
-    it.each([0, 1])("does not retry node-not-ready after progress sequence %i", async (seq) => {
-      const onProgress = vi.fn();
-      const invocation = start(
-        {},
-        {
-          ...createOperatorClient({ pluginRuntimeOwnerId: "readiness-fixture" }),
-          internal: {
-            syntheticClient: true,
-            pluginRuntimeOwnerId: "readiness-fixture",
-            nodeInvokeStream: {
-              onProgress,
-              onDispatchReady: vi.fn(),
-              isRuntimeCurrent: () => true,
-            },
-          },
-        },
-      );
-      await vi.advanceTimersByTimeAsync(0);
-      const request = expectDefined(requests[0], "expected streamed node request");
-      expect(
-        registry.handleInvokeProgress({
-          invokeId: request.id,
-          nodeId,
-          connId,
-          seq,
-          chunk: "execution started",
-        }),
-      ).toBe(true);
-      rejectNotReady();
-      await vi.advanceTimersByTimeAsync(2_000);
+    it.each([
+      { seq: 0, streaming: true },
+      { seq: 1, streaming: true },
+      { seq: 0, streaming: false },
+      { seq: 1, streaming: false },
+    ])(
+      "does not retry node-not-ready after progress $seq (streaming=$streaming)",
+      async ({ seq, streaming }) => {
+        const onProgress = vi.fn();
+        const invocation = start(
+          {},
+          streaming
+            ? {
+                ...createOperatorClient({ pluginRuntimeOwnerId: "readiness-fixture" }),
+                internal: {
+                  syntheticClient: true,
+                  pluginRuntimeOwnerId: "readiness-fixture",
+                  nodeInvokeStream: {
+                    onProgress,
+                    onDispatchReady: vi.fn(),
+                    isRuntimeCurrent: () => true,
+                  },
+                },
+              }
+            : undefined,
+        );
+        await vi.advanceTimersByTimeAsync(0);
+        const request = expectDefined(requests[0], "expected streamed node request");
+        expect(
+          registry.handleInvokeProgress({
+            invokeId: request.id,
+            nodeId,
+            connId,
+            seq,
+            chunk: seq === 0 ? "" : "execution started",
+          }),
+        ).toBe(streaming);
+        rejectNotReady();
+        await vi.advanceTimersByTimeAsync(2_000);
 
-      expect(requests).toHaveLength(1);
-      expect(firstRespondCall(await invocation)[0]).toBe(false);
-      expect(onProgress).toHaveBeenCalledTimes(seq === 0 ? 1 : 0);
-    });
+        expect(requests).toHaveLength(1);
+        expect(firstRespondCall(await invocation)).toMatchObject([
+          false,
+          undefined,
+          { details: { nodeError: { code: "UNAVAILABLE" } } },
+        ]);
+        expect(onProgress).toHaveBeenCalledTimes(streaming && seq === 0 ? 1 : 0);
+      },
+    );
+
+    it.each(["nodeId", "connId"] as const)(
+      "ignores foreign progress with mismatched %s during recovery",
+      async (field) => {
+        const invocation = start();
+        await vi.advanceTimersByTimeAsync(0);
+        const request = expectDefined(requests[0], "expected node request");
+        expect(
+          registry.handleInvokeProgress({
+            invokeId: request.id,
+            nodeId,
+            connId,
+            seq: 0,
+            chunk: "foreign progress",
+            [field]: "different-owner",
+          }),
+        ).toBe(false);
+        rejectNotReady();
+        await vi.advanceTimersByTimeAsync(100);
+        expect(requests).toHaveLength(2);
+        reply(1, { ok: true, payloadJSON: "{}" });
+        expect(firstRespondCall(await invocation)[0]).toBe(true);
+      },
+    );
   });
 
   it.each(["browser.proxy", "browser.proxy.upload.v1"])(

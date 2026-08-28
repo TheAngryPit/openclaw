@@ -97,7 +97,6 @@ describe("applyPluginNodeInvokePolicy", () => {
       idempotencyKey: undefined,
       isDispatchAuthorized: expect.any(Function),
       onDispatchReady: expect.any(Function),
-      onProgress: expect.any(Function),
     });
     expect(invoke.mock.calls[0]?.[0]?.isDispatchAuthorized?.()).toBe(true);
     context.getRuntimeConfig = () => nodeCommandsConfig({ deny: [DEMO_COMMAND] });
