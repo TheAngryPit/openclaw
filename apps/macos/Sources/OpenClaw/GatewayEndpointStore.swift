@@ -150,6 +150,7 @@ actor GatewayEndpointStore {
         launchdSnapshot: LaunchAgentPlistSnapshot?) -> String?
     {
         let serviceEnv = launchdSnapshot?.environment ?? [:]
+        if !isRemote, ["none", "token"].contains(self.localAuthMode(root: root) ?? "") { return nil }
         if !isRemote,
            let gateway = root["gateway"] as? [String: Any],
            let auth = gateway["auth"] as? [String: Any],
@@ -243,6 +244,11 @@ actor GatewayEndpointStore {
         launchdSnapshot: LaunchAgentPlistSnapshot?) -> String?
     {
         let serviceEnv = launchdSnapshot?.environment ?? [:]
+        if !isRemote,
+           ["none", "password", "trusted-proxy"].contains(self.localAuthMode(root: root) ?? "")
+        {
+            return nil
+        }
         if !isRemote,
            let gateway = root["gateway"] as? [String: Any],
            let auth = gateway["auth"] as? [String: Any],
@@ -980,6 +986,12 @@ extension GatewayEndpointStore {
 }
 
 extension GatewayEndpointStore {
+    private static func localAuthMode(root: [String: Any]) -> String? {
+        let gateway = root["gateway"] as? [String: Any]
+        let auth = gateway?["auth"] as? [String: Any]
+        return auth?["mode"] as? String
+    }
+
     private struct LiveAppSnapshot: Sendable {
         let mode: AppState.ConnectionMode
         let configIsCurrent: Bool

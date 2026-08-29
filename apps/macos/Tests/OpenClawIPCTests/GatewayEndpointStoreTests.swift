@@ -566,47 +566,61 @@ struct GatewayEndpointStoreTests {
         #expect(token == "service-token")
     }
 
-    @Test func `typed env secret ref controls final gateway handshake auth`() async throws {
+    @Test func `typed env secret refs control final gateway handshake auth`() async throws {
         let snapshot = self.makeLaunchAgentSnapshot(
             env: [
                 "GW_TOKEN": "custom-token",
+                "GW_PASSWORD": "custom-password", // pragma: allowlist secret
                 "OPENCLAW_GATEWAY_TOKEN": "fallback-token",
             ],
             token: "fallback-token")
         let allowedRoot: [String: Any] = [
-            "gateway": ["auth": ["token": [
-                "source": "env",
-                "provider": "restricted",
-                "id": "GW_TOKEN",
-            ]]],
+            "gateway": ["auth": [
+                "mode": "token",
+                "token": ["source": "env", "provider": "restricted", "id": "GW_TOKEN"],
+                "password": ["source": "env", "provider": "restricted", "id": "GW_PASSWORD"],
+            ]],
             "secrets": ["providers": ["restricted": [
                 "source": "env",
-                "allowlist": ["GW_TOKEN"],
+                "allowlist": ["GW_TOKEN", "GW_PASSWORD"],
             ]]],
         ]
         let deniedRoot: [String: Any] = [
-            "gateway": ["auth": ["token": [
-                "source": "env",
-                "provider": "restricted",
-                "id": "GW_TOKEN",
-            ]]],
+            "gateway": ["auth": [
+                "mode": "token",
+                "token": ["source": "env", "provider": "restricted", "id": "GW_TOKEN"],
+            ]],
             "secrets": ["providers": ["restricted": [
                 "source": "env",
                 "allowlist": ["OTHER_TOKEN"],
             ]]],
         ]
-
-        let cases: [([String: Any], String?)] = [
-            (allowedRoot, "custom-token"),
-            (deniedRoot, nil),
+        let passwordRoot: [String: Any] = [
+            "gateway": ["auth": [
+                "mode": "password",
+                "token": ["source": "env", "provider": "restricted", "id": "GW_TOKEN"],
+                "password": ["source": "env", "provider": "restricted", "id": "GW_PASSWORD"],
+            ]],
+            "secrets": ["providers": ["restricted": [
+                "source": "env",
+                "allowlist": ["GW_TOKEN", "GW_PASSWORD"],
+            ]]],
         ]
-        for (root, expectedToken) in cases {
+
+        let cases: [(root: [String: Any], token: String?, password: String?, authPresent: Bool)] = [
+            (allowedRoot, "custom-token", nil, true),
+            (deniedRoot, nil, nil, false),
+            (passwordRoot, nil, "custom-password", true), // pragma: allowlist secret
+        ]
+        for testCase in cases {
             let config = GatewayEndpointStore._testLocalConfig(
-                root: root,
+                root: testCase.root,
                 env: [:],
                 launchdSnapshot: snapshot)
-            let recordedAuth = OSAllocatedUnfairLock<(present: Bool, token: String?)>(
-                initialState: (false, nil))
+            #expect(config.token == testCase.token)
+            #expect(config.password == testCase.password)
+            let recordedAuth = OSAllocatedUnfairLock<(present: Bool, token: String?, password: String?)>(
+                initialState: (false, nil, nil))
             let session = GatewayTestWebSocketSession(taskFactory: {
                 GatewayTestWebSocketTask(sendHook: { _, message, sendIndex in
                     guard sendIndex == 0,
@@ -615,7 +629,8 @@ struct GatewayEndpointStoreTests {
                     let auth = params["auth"] as? [String: Any]
                     let authPresent = auth != nil
                     let token = auth?["token"] as? String
-                    recordedAuth.withLock { $0 = (authPresent, token) }
+                    let password = auth?["password"] as? String
+                    recordedAuth.withLock { $0 = (authPresent, token, password) }
                 })
             })
             let channel = GatewayChannelActor(
@@ -627,10 +642,9 @@ struct GatewayEndpointStoreTests {
             try await channel.connect()
 
             let auth = recordedAuth.withLock { $0 }
-            #expect(auth.token == expectedToken)
-            if expectedToken == nil {
-                #expect(!auth.present)
-            }
+            #expect(auth.present == testCase.authPresent)
+            #expect(auth.token == testCase.token)
+            #expect(auth.password == testCase.password)
             await channel.shutdown()
         }
     }
