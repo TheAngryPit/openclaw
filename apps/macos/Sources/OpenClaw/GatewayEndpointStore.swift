@@ -1004,20 +1004,30 @@ extension GatewayEndpointStore {
         let gateway = root["gateway"] as? [String: Any]
         let auth = gateway?["auth"] as? [String: Any]
         let serviceEnv = launchdSnapshot?.environment ?? [:]
-        /// Core selects one inferred surface and treats competing candidates as ambiguous.
-        func hasCandidate(_ key: String, _ envKey: String, _ launchdValue: String?) -> Bool {
-            if let value = auth?[key] {
-                guard let string = value as? String else { return true }
-                if !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
-            }
-            return [env[envKey], serviceEnv[envKey], launchdValue]
+        func configuredInput(_ key: String) -> (configured: Bool, isSecretRef: Bool) {
+            guard let value = auth?[key] else { return (false, false) }
+            guard let string = value as? String else { return (true, true) }
+            return (!string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, false)
+        }
+        func hasAmbientCandidate(_ envKey: String, _ launchdValue: String?) -> Bool {
+            [env[envKey], serviceEnv[envKey], launchdValue]
                 .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .contains { !$0.isEmpty }
         }
-        let hasToken = hasCandidate("token", "OPENCLAW_GATEWAY_TOKEN", launchdSnapshot?.token)
-        let hasPassword = hasCandidate("password", "OPENCLAW_GATEWAY_PASSWORD", launchdSnapshot?.password)
-        guard hasToken != hasPassword else { return nil }
-        return hasToken ? "token" : "password"
+        let configuredToken = configuredInput("token")
+        let configuredPassword = configuredInput("password")
+        // Core rejects two configured inputs without an explicit mode.
+        guard !(configuredToken.configured && configuredPassword.configured) else { return nil }
+
+        let ambientToken = hasAmbientCandidate("OPENCLAW_GATEWAY_TOKEN", launchdSnapshot?.token)
+        let ambientPassword = hasAmbientCandidate("OPENCLAW_GATEWAY_PASSWORD", launchdSnapshot?.password)
+        // During startup, a concrete opposite-side fallback suppresses typed-ref materialization.
+        let hasToken = ambientToken || (configuredToken.configured && !(configuredToken.isSecretRef && ambientPassword))
+        let hasPassword = ambientPassword ||
+            (configuredPassword.configured && !(configuredPassword.isSecretRef && ambientToken))
+        // resolveGatewayAuth infers password before token once active refs are materialized.
+        if hasPassword { return "password" }
+        return hasToken ? "token" : nil
     }
 
     private struct LiveAppSnapshot: Sendable {

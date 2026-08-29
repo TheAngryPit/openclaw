@@ -720,8 +720,8 @@ struct GatewayEndpointStoreTests {
         let cases: [([String: Any], LaunchAgentPlistSnapshot, String?, String?)] = [
             (tokenRoot, tokenSnapshot, "custom-token", nil),
             (passwordRoot, passwordSnapshot, nil, "custom-password"),
-            (tokenRoot, tokenWithAmbientPassword, nil, nil),
-            (passwordRoot, passwordWithAmbientToken, nil, nil),
+            (tokenRoot, tokenWithAmbientPassword, nil, "ambient-password"),
+            (passwordRoot, passwordWithAmbientToken, "ambient-token", nil),
         ]
         for (root, snapshot, expectedToken, expectedPassword) in cases {
             let config = GatewayEndpointStore._testLocalConfig(
