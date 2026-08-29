@@ -566,6 +566,28 @@ struct GatewayEndpointStoreTests {
         #expect(token == "service-token")
     }
 
+    @Test func `typed env secret ref prefers gateway service environment`() {
+        let snapshot = self.makeLaunchAgentSnapshot(env: ["GW_TOKEN": "service-token"])
+        let root: [String: Any] = [
+            "gateway": ["auth": ["token": [
+                "source": "env",
+                "provider": "restricted",
+                "id": "GW_TOKEN",
+            ]]],
+            "secrets": ["providers": ["restricted": [
+                "source": "env",
+                "allowlist": ["GW_TOKEN"],
+            ]]],
+        ]
+
+        let token = GatewayEndpointStore._testResolveGatewayToken(
+            isRemote: false,
+            root: root,
+            env: ["GW_TOKEN": "stale-app-token"],
+            launchdSnapshot: snapshot)
+        #expect(token == "service-token")
+    }
+
     @Test func `typed env secret refs control final gateway handshake auth`() async throws {
         let snapshot = self.makeLaunchAgentSnapshot(
             env: [

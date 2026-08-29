@@ -938,7 +938,9 @@ extension GatewayEndpointStore {
             }
         }
 
-        for source in [env, serviceEnv] {
+        // The managed Gateway runs with the LaunchAgent environment. Prefer that
+        // effective value, then fall back to the Finder-launched app environment.
+        for source in [serviceEnv, env] {
             let value = source[envName]?.trimmingCharacters(in: .whitespacesAndNewlines)
             if let value, !value.isEmpty {
                 return value
