@@ -150,7 +150,8 @@ actor GatewayEndpointStore {
         launchdSnapshot: LaunchAgentPlistSnapshot?) -> String?
     {
         let serviceEnv = launchdSnapshot?.environment ?? [:]
-        if !isRemote, ["none", "token"].contains(self.localAuthMode(root: root) ?? "") { return nil }
+        if !isRemote,
+           self.localAuthSurface(root: root, env: env, launchdSnapshot: launchdSnapshot) != "password" { return nil }
         if !isRemote,
            let gateway = root["gateway"] as? [String: Any],
            let auth = gateway["auth"] as? [String: Any],
@@ -245,10 +246,7 @@ actor GatewayEndpointStore {
     {
         let serviceEnv = launchdSnapshot?.environment ?? [:]
         if !isRemote,
-           ["none", "password", "trusted-proxy"].contains(self.localAuthMode(root: root) ?? "")
-        {
-            return nil
-        }
+           self.localAuthSurface(root: root, env: env, launchdSnapshot: launchdSnapshot) != "token" { return nil }
         if !isRemote,
            let gateway = root["gateway"] as? [String: Any],
            let auth = gateway["auth"] as? [String: Any],
@@ -990,6 +988,34 @@ extension GatewayEndpointStore {
         let gateway = root["gateway"] as? [String: Any]
         let auth = gateway?["auth"] as? [String: Any]
         return auth?["mode"] as? String
+    }
+
+    private static func localAuthSurface(
+        root: [String: Any],
+        env: [String: String],
+        launchdSnapshot: LaunchAgentPlistSnapshot?) -> String?
+    {
+        let mode = self.localAuthMode(root: root)
+        if mode == "token" { return "token" }
+        if mode == "password" || mode == "trusted-proxy" { return "password" }
+        guard mode == nil else { return nil }
+        let gateway = root["gateway"] as? [String: Any]
+        let auth = gateway?["auth"] as? [String: Any]
+        let serviceEnv = launchdSnapshot?.environment ?? [:]
+        /// Core selects one inferred surface and treats competing candidates as ambiguous.
+        func hasCandidate(_ key: String, _ envKey: String, _ launchdValue: String?) -> Bool {
+            if let value = auth?[key] {
+                guard let string = value as? String else { return true }
+                if !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return true }
+            }
+            return [env[envKey], serviceEnv[envKey], launchdValue]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .contains { !$0.isEmpty }
+        }
+        let hasToken = hasCandidate("token", "OPENCLAW_GATEWAY_TOKEN", launchdSnapshot?.token)
+        let hasPassword = hasCandidate("password", "OPENCLAW_GATEWAY_PASSWORD", launchdSnapshot?.password)
+        guard hasToken != hasPassword else { return nil }
+        return hasToken ? "token" : "password"
     }
 
     private struct LiveAppSnapshot: Sendable {

@@ -606,11 +606,23 @@ struct GatewayEndpointStoreTests {
                 "allowlist": ["GW_TOKEN", "GW_PASSWORD"],
             ]]],
         ]
+        let trustedProxyRoot: [String: Any] = [
+            "gateway": ["auth": [
+                "mode": "trusted-proxy",
+                "token": ["source": "env", "provider": "restricted", "id": "GW_TOKEN"],
+                "password": ["source": "env", "provider": "restricted", "id": "GW_PASSWORD"],
+            ]],
+            "secrets": ["providers": ["restricted": [
+                "source": "env",
+                "allowlist": ["GW_TOKEN", "GW_PASSWORD"],
+            ]]],
+        ]
 
         let cases: [(root: [String: Any], token: String?, password: String?, authPresent: Bool)] = [
             (allowedRoot, "custom-token", nil, true),
             (deniedRoot, nil, nil, false),
             (passwordRoot, nil, "custom-password", true), // pragma: allowlist secret
+            (trustedProxyRoot, nil, "custom-password", true), // pragma: allowlist secret
         ]
         for testCase in cases {
             let config = GatewayEndpointStore._testLocalConfig(
@@ -646,6 +658,56 @@ struct GatewayEndpointStoreTests {
             #expect(auth.token == testCase.token)
             #expect(auth.password == testCase.password)
             await channel.shutdown()
+        }
+    }
+
+    @Test func `inferred gateway auth selects one typed credential surface`() {
+        let tokenRoot: [String: Any] = [
+            "gateway": ["auth": [
+                "token": ["source": "env", "provider": "restricted", "id": "GW_TOKEN"],
+            ]],
+            "secrets": ["providers": ["restricted": [
+                "source": "env",
+                "allowlist": ["GW_TOKEN"],
+            ]]],
+        ]
+        let passwordRoot: [String: Any] = [
+            "gateway": ["auth": [
+                "password": ["source": "env", "provider": "restricted", "id": "GW_PASSWORD"],
+            ]],
+            "secrets": ["providers": ["restricted": [
+                "source": "env",
+                "allowlist": ["GW_PASSWORD"],
+            ]]],
+        ]
+        let tokenSnapshot = self.makeLaunchAgentSnapshot(env: ["GW_TOKEN": "custom-token"])
+        let passwordSnapshot = self.makeLaunchAgentSnapshot(env: ["GW_PASSWORD": "custom-password"])
+        let tokenWithAmbientPassword = self.makeLaunchAgentSnapshot(
+            env: [
+                "GW_TOKEN": "custom-token",
+                "OPENCLAW_GATEWAY_PASSWORD": "ambient-password",
+            ],
+            password: "ambient-password")
+        let passwordWithAmbientToken = self.makeLaunchAgentSnapshot(
+            env: [
+                "GW_PASSWORD": "custom-password",
+                "OPENCLAW_GATEWAY_TOKEN": "ambient-token",
+            ],
+            token: "ambient-token")
+
+        let cases: [([String: Any], LaunchAgentPlistSnapshot, String?, String?)] = [
+            (tokenRoot, tokenSnapshot, "custom-token", nil),
+            (passwordRoot, passwordSnapshot, nil, "custom-password"),
+            (tokenRoot, tokenWithAmbientPassword, nil, nil),
+            (passwordRoot, passwordWithAmbientToken, nil, nil),
+        ]
+        for (root, snapshot, expectedToken, expectedPassword) in cases {
+            let config = GatewayEndpointStore._testLocalConfig(
+                root: root,
+                env: [:],
+                launchdSnapshot: snapshot)
+            #expect(config.token == expectedToken)
+            #expect(config.password == expectedPassword)
         }
     }
 
@@ -1294,6 +1356,7 @@ extension GatewayEndpointStoreTests {
             "gateway": [
                 "bind": "tailnet",
                 "tls": ["enabled": true],
+                "auth": ["mode": "token"],
                 "remote": [
                     "url": "wss://remote.example:443",
                     "token": "remote-token",
@@ -1309,7 +1372,7 @@ extension GatewayEndpointStoreTests {
 
         #expect(config.url.absoluteString == "wss://100.64.1.8:\(GatewayEnvironment.gatewayPort())")
         #expect(config.token == "launchd-token")
-        #expect(config.password == "launchd-pass")
+        #expect(config.password == nil)
     }
 
     @Test func `dashboard URL uses local base path in local mode`() throws {
