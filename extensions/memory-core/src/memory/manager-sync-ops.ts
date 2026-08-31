@@ -691,12 +691,10 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
       if (this.purpose !== "maintenance" || !isMemoryIndexRevisionConflictError(err)) {
         throw err;
       }
-      // A concurrent incremental writer won the first publish race. Retry once
-      // while holding the existing re-entrant cross-process workspace lock so
-      // the shadow generation cannot become stale again before publication.
-      await withMemoryWorkspaceLock(this.workspaceDir, async () => {
-        await this.runInPlaceReindex(params);
-      });
+      // A concurrent incremental writer won the first publish race. Rebuild once
+      // from the newer revision without blocking normal writers for the duration
+      // of the shadow build. A second conflict still fails closed.
+      await this.runInPlaceReindex(params);
     }
   }
 }

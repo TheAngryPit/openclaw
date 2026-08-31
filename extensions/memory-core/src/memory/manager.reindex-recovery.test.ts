@@ -8,6 +8,7 @@ import { resetPluginStateStoreForTests } from "openclaw/plugin-sdk/plugin-state-
 import { resolveOpenClawAgentSqlitePath } from "openclaw/plugin-sdk/sqlite-runtime";
 import { closeOpenClawAgentDatabasesForTest } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { withMemoryWorkspaceLock } from "../memory-workspace-lock.js";
 import { resetEmbeddingMocks } from "./embedding.test-mocks.js";
 import type { MemoryIndexManagerPurpose } from "./manager-registry.js";
 import { tryAcquireMemoryReindexLock, waitForMemoryReindexLock } from "./manager-reindex-lock.js";
@@ -135,6 +136,53 @@ describe("memory manager reindex recovery", () => {
       force: true,
       progress: undefined,
     });
+  });
+
+  it("lets a concurrent writer complete during the maintenance retry", async () => {
+    const memoryManager = await openManager(
+      createCfg({ provider: "none", sources: ["memory"] }),
+      "maintenance",
+    );
+    const harness = memoryManager as unknown as ReindexHarness;
+    const originalDb = harness.db;
+    const emptySyncPlan = { indexItems: [], finalize: () => undefined };
+    let syncCalls = 0;
+    let releaseRetry!: () => void;
+    let markRetryStarted!: () => void;
+    const retryRelease = new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
+    const retryStarted = new Promise<void>((resolve) => {
+      markRetryStarted = resolve;
+    });
+
+    harness.syncMemoryFiles = async () => {
+      syncCalls += 1;
+      if (syncCalls === 1) {
+        await withMemoryWorkspaceLock(workspaceDir, async () => {
+          originalDb
+            .prepare("UPDATE memory_index_state SET revision = revision + 1 WHERE id = 1")
+            .run();
+        });
+      } else {
+        markRetryStarted();
+        await retryRelease;
+      }
+      return emptySyncPlan;
+    };
+
+    const sync = harness.sync({ reason: "test", force: true });
+    await retryStarted;
+
+    await withMemoryWorkspaceLock(workspaceDir, async () => {
+      originalDb
+        .prepare("UPDATE memory_index_state SET revision = revision + 1 WHERE id = 1")
+        .run();
+    });
+    releaseRetry();
+
+    await expect(sync).rejects.toMatchObject({ code: "MEMORY_INDEX_REVISION_CONFLICT" });
+    expect(syncCalls).toBe(2);
   });
 
   it("restores retry state after a shadow full reindex fails late", async () => {
