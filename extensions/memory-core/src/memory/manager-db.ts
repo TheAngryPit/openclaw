@@ -98,11 +98,7 @@ export function readMemoryDatabaseRevision(db: DatabaseSync): number {
 const MEMORY_INDEX_REVISION_CONFLICT = "MEMORY_INDEX_REVISION_CONFLICT";
 
 export function isMemoryIndexRevisionConflictError(err: unknown): boolean {
-  return (
-    err instanceof Error &&
-    "code" in err &&
-    (err as Error & { code?: unknown }).code === MEMORY_INDEX_REVISION_CONFLICT
-  );
+  return err instanceof Error && "code" in err && err.code === MEMORY_INDEX_REVISION_CONFLICT;
 }
 
 function createMemoryIndexRevisionConflictError(params: {

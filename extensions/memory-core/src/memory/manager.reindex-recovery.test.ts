@@ -9,6 +9,7 @@ import { resolveOpenClawAgentSqlitePath } from "openclaw/plugin-sdk/sqlite-runti
 import { closeOpenClawAgentDatabasesForTest } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetEmbeddingMocks } from "./embedding.test-mocks.js";
+import type { MemoryIndexManagerPurpose } from "./manager-registry.js";
 import { tryAcquireMemoryReindexLock, waitForMemoryReindexLock } from "./manager-reindex-lock.js";
 import type { MemoryIndexMeta } from "./manager-reindex-state.js";
 import type { MemoryIndexManager } from "./manager.js";
@@ -87,17 +88,14 @@ describe("memory manager reindex recovery", () => {
 
   async function openManager(
     cfg: OpenClawConfig,
-    purpose?: "default" | "status" | "cli" | "maintenance",
+    purpose?: MemoryIndexManagerPurpose,
   ): Promise<MemoryIndexManager> {
-    const { getMemorySearchManager } = await import("./index.js");
-    const result = await getMemorySearchManager({ cfg, agentId: "main", purpose });
-    if (!result.manager) {
-      throw new Error(result.error ?? "manager missing");
+    const { MemoryIndexManager: RuntimeMemoryIndexManager } = await import("./manager.js");
+    const result = await RuntimeMemoryIndexManager.get({ cfg, agentId: "main", purpose });
+    if (!result) {
+      throw new Error("manager missing");
     }
-    if (!("sync" in result.manager) || typeof result.manager.sync !== "function") {
-      throw new Error("manager does not support sync");
-    }
-    manager = result.manager as unknown as MemoryIndexManager;
+    manager = result;
     return manager;
   }
 
