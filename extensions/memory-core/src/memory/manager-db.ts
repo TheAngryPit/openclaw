@@ -95,6 +95,29 @@ export function readMemoryDatabaseRevision(db: DatabaseSync): number {
   return row.revision;
 }
 
+const MEMORY_INDEX_REVISION_CONFLICT = "MEMORY_INDEX_REVISION_CONFLICT";
+
+export function isMemoryIndexRevisionConflictError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    "code" in err &&
+    (err as Error & { code?: unknown }).code === MEMORY_INDEX_REVISION_CONFLICT
+  );
+}
+
+function createMemoryIndexRevisionConflictError(params: {
+  expectedRevision: number;
+  liveRevision: number;
+}): Error & { code: string } {
+  return Object.assign(
+    new Error(
+      `Memory index changed while full reindex was building ` +
+        `(expected revision ${params.expectedRevision}, found ${params.liveRevision}); retry the full reindex.`,
+    ),
+    { code: MEMORY_INDEX_REVISION_CONFLICT },
+  );
+}
+
 function replaceVirtualTable(params: {
   db: DatabaseSync;
   tableName: "memory_index_chunks_fts" | "memory_index_chunks_vec";
@@ -168,10 +191,10 @@ export async function publishMemoryDatabaseTables(params: {
     runSqliteImmediateTransactionSync(params.targetDb, () => {
       const liveRevision = readMemoryDatabaseRevision(params.targetDb);
       if (liveRevision !== params.expectedRevision) {
-        throw new Error(
-          `Memory index changed while full reindex was building ` +
-            `(expected revision ${params.expectedRevision}, found ${liveRevision}); retry the full reindex.`,
-        );
+        throw createMemoryIndexRevisionConflictError({
+          expectedRevision: params.expectedRevision,
+          liveRevision,
+        });
       }
       const publishesPathFts = tableExists(
         params.targetDb,

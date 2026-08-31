@@ -85,9 +85,12 @@ describe("memory manager reindex recovery", () => {
     };
   }
 
-  async function openManager(cfg: OpenClawConfig): Promise<MemoryIndexManager> {
+  async function openManager(
+    cfg: OpenClawConfig,
+    purpose?: "default" | "status" | "cli" | "maintenance",
+  ): Promise<MemoryIndexManager> {
     const { getMemorySearchManager } = await import("./index.js");
-    const result = await getMemorySearchManager({ cfg, agentId: "main" });
+    const result = await getMemorySearchManager({ cfg, agentId: "main", purpose });
     if (!result.manager) {
       throw new Error(result.error ?? "manager missing");
     }
@@ -105,6 +108,36 @@ describe("memory manager reindex recovery", () => {
     }
     return lock;
   }
+
+  it("retries one revision conflict before surfacing full reindex failure", async () => {
+    const memoryManager = await openManager(
+      createCfg({ provider: "none", sources: ["memory"] }),
+      "maintenance",
+    );
+    const harness = memoryManager as unknown as ReindexHarness;
+    const revisionConflict = Object.assign(
+      new Error("Memory index changed while full reindex was building"),
+      { code: "MEMORY_INDEX_REVISION_CONFLICT" },
+    );
+    const reindex = vi
+      .spyOn(harness, "runInPlaceReindex")
+      .mockRejectedValueOnce(revisionConflict)
+      .mockResolvedValueOnce(undefined);
+
+    await expect(harness.sync({ reason: "test", force: true })).resolves.toBeUndefined();
+
+    expect(reindex).toHaveBeenCalledTimes(2);
+    expect(reindex).toHaveBeenNthCalledWith(1, {
+      reason: "test",
+      force: true,
+      progress: undefined,
+    });
+    expect(reindex).toHaveBeenNthCalledWith(2, {
+      reason: "test",
+      force: true,
+      progress: undefined,
+    });
+  });
 
   it("restores retry state after a shadow full reindex fails late", async () => {
     const memoryManager = await openManager(

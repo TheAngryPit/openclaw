@@ -23,6 +23,7 @@ import { MemoryIndexDatabase } from "./manager-database-context.js";
 import {
   cleanupAgedMemoryReindexTempFiles,
   closeMemoryDatabase,
+  isMemoryIndexRevisionConflictError,
   openMemoryDatabaseAtPath,
   publishMemoryDatabaseTables,
   readMemoryDatabaseRevision,
@@ -76,6 +77,8 @@ export type MemorySemanticProviderGeneration = Extract<
 const log = createSubsystemLogger("memory");
 
 export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
+  protected abstract readonly purpose: "default" | "status" | "cli" | "maintenance";
+
   private fallbackProviderInitPromise: Promise<boolean> | null = null;
   protected syncProviderGeneration: MemorySyncProviderGeneration | null = null;
 
@@ -313,7 +316,7 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
     }
     try {
       if (needsFullReindex) {
-        await this.runInPlaceReindex({
+        await this.runInPlaceReindexWithConflictRetry({
           reason: params?.reason,
           force: params?.force,
           progress: progress ?? undefined,
@@ -371,7 +374,7 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
       if (activated) {
         if (needsFullReindex && !hasTargetArchiveFiles) {
           this.beginSyncProviderGeneration();
-          await this.runInPlaceReindex({
+          await this.runInPlaceReindexWithConflictRetry({
             reason: params?.reason ?? "fallback",
             force: true,
             progress: progress ?? undefined,
@@ -674,6 +677,26 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
       } catch (err) {
         log.warn(`failed to release memory reindex lock for ${dbPath}: ${formatErrorMessage(err)}`);
       }
+    }
+  }
+
+  private async runInPlaceReindexWithConflictRetry(params: {
+    reason?: string;
+    force?: boolean;
+    progress?: MemorySyncProgressState;
+  }): Promise<void> {
+    try {
+      await this.runInPlaceReindex(params);
+    } catch (err) {
+      if (this.purpose !== "maintenance" || !isMemoryIndexRevisionConflictError(err)) {
+        throw err;
+      }
+      // A concurrent incremental writer won the first publish race. Retry once
+      // while holding the existing re-entrant cross-process workspace lock so
+      // the shadow generation cannot become stale again before publication.
+      await withMemoryWorkspaceLock(this.workspaceDir, async () => {
+        await this.runInPlaceReindex(params);
+      });
     }
   }
 }
