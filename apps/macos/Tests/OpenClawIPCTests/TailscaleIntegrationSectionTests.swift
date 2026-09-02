@@ -5,6 +5,17 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct TailscaleIntegrationSectionTests {
+    @Test func `dashboard link uses the configured Control UI path`() {
+        let host = "gateway-host.tailnet-example.ts.net"
+
+        #expect(TailscaleIntegrationSection.dashboardURL(host: host)?.absoluteString ==
+            "https://gateway-host.tailnet-example.ts.net/")
+        #expect(TailscaleIntegrationSection.dashboardURL(
+            host: host,
+            localBasePath: " control ")?.absoluteString ==
+            "https://gateway-host.tailnet-example.ts.net/control/")
+    }
+
     @Test func `cli installation requires an executable candidate`() throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
