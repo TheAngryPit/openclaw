@@ -1,8 +1,10 @@
 // Shared harness and fixtures for manager sync-ops startup catch-up tests.
+import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type {
-  OpenClawConfig,
-  ResolvedMemorySearchConfig,
+import {
+  resolveStateDir,
+  type OpenClawConfig,
+  type ResolvedMemorySearchConfig,
 } from "openclaw/plugin-sdk/memory-core-host-engine-foundation";
 import {
   MEMORY_CHUNKING_VERSION,
@@ -117,7 +119,6 @@ export function emitSessionTranscriptUpdate(update: MemorySessionTranscriptUpdat
 }
 
 export class SessionStartupCatchupHarness extends MemoryManagerSyncOps {
-  protected readonly purpose = "default" as const;
   protected readonly cfg = {} as OpenClawConfig;
   protected readonly agentId = "main";
   protected readonly workspaceDir = "/tmp/openclaw-test-workspace";
@@ -134,6 +135,7 @@ export class SessionStartupCatchupHarness extends MemoryManagerSyncOps {
     },
     provider: "none",
     store: {
+      databasePath: path.join(resolveStateDir(), "memory-index.sqlite"),
       fts: {
         tokenizer: "unicode61",
       },

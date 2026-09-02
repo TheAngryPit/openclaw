@@ -368,8 +368,9 @@ suite.define(() => {
       });
       await gateway.resolveDeferred("chat.startup");
       await page
-        .getByText("Accepted by the Gateway. Waiting for its turn.", { exact: true })
+        .locator('[data-chat-row-key="group:user:pending-input:accepted-project-input"]')
         .waitFor();
+      expect(await page.locator(".chat-notice").count()).toBe(0);
       const working = page.locator('.chat-working-indicator[role="status"]');
       await pollLocatorText(working).toContain("Preparing workspace…");
       if (artifactDir) {
