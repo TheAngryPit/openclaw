@@ -4,6 +4,7 @@ import { parseDateStringTimestampMs } from "@openclaw/normalization-core/number-
 import { asNullableRecord as asConfigRecord } from "@openclaw/normalization-core/record-coerce";
 import { html, nothing, type TemplateResult } from "lit";
 import type { UpdateAvailable, UpdateScheduleState } from "../../api/types.ts";
+import type { NativeDeviceSettingsCapability } from "../../app/native-device-settings.ts";
 import type {
   ApplicationStatusBanner,
   RecordedUpdateAttempt,
@@ -11,7 +12,7 @@ import type {
 import {
   formatUpdateCampaignLabel,
   formatUpdateTargetLabel,
-} from "../../app/update-overlay-helpers.ts";
+} from "../../app/update-schedule-projection.ts";
 import { icons } from "../../components/icons.ts";
 import {
   renderSettingsPage,
@@ -23,11 +24,15 @@ import {
   renderSettingsValue,
 } from "../../components/settings-ui.ts";
 import { t } from "../../i18n/index.ts";
+import { registerSettingsEnglish } from "../../i18n/locales/en-settings.ts";
 import { formatDateTimeMs, formatTimeAgo } from "../../lib/format.ts";
+
+registerSettingsEnglish();
 
 type UpdatesChannel = "stable" | "beta" | "dev" | "extended-stable";
 
 type UpdatesViewProps = {
+  nativeDeviceSettings?: NativeDeviceSettingsCapability | null;
   configObject: Record<string, unknown>;
   gatewayVersion: string | null;
   controlUiCommit: string | null;
@@ -46,11 +51,54 @@ type UpdatesViewProps = {
   updateBusy: boolean;
   nowMs?: number;
   onChannelChange: (channel: UpdatesChannel) => void;
+  onUpdateChecksChange: (enabled: boolean) => void;
   onAutomaticUpdatesChange: (enabled: boolean) => void;
   onUpdateNow: () => void;
   onHoldUpdate: () => Promise<boolean>;
   onCheckStatus: () => Promise<void>;
 };
+
+function renderDeviceUpdates(capability: NativeDeviceSettingsCapability | null | undefined) {
+  if (!capability) {
+    return nothing;
+  }
+  const snapshot = capability.snapshot;
+  return renderSettingsSection(
+    { title: t("updates.device.title") },
+    snapshot
+      ? [
+          renderSettingsRow({
+            title: t("updates.device.version"),
+            control: renderSettingsValue(
+              t("updates.device.versionBuild", {
+                version: snapshot.device.appVersion,
+                build: snapshot.device.appBuild,
+              }),
+            ),
+          }),
+          snapshot.updates.available
+            ? html`${renderSettingsToggleRow({
+                title: t("updates.device.automatic"),
+                checked: snapshot.updates.automatic,
+                onChange: (value) => capability.set("updates.automatic", value),
+              })}${renderSettingsRow({
+                title: t("updates.device.check"),
+                control: html`<button
+                  class="btn btn--sm"
+                  type="button"
+                  @click=${() => capability.checkForUpdates()}
+                >
+                  ${t("updates.device.check")}
+                </button>`,
+              })}`
+            : renderSettingsRow({
+                title: t("updates.device.unavailable"),
+                description: snapshot.updates.unavailableReason,
+              }),
+        ]
+      : renderSettingsRow({ title: t("common.loading") }),
+  );
+}
 
 function formatAttemptIdentity(version: string | null, sha: string | null): string {
   return version ? `v${version}` : sha ? sha.slice(0, 12) : t("common.unknown");
@@ -62,13 +110,6 @@ function renderRecordedAttempt(props: UpdatesViewProps) {
     return nothing;
   }
   const canRetry = props.canUpdate && !props.updateBusy;
-  const recordedTarget = attempt
-    ? formatAttemptIdentity(attempt.targetVersion, attempt.targetSha)
-    : null;
-  const target =
-    recordedTarget && recordedTarget !== t("common.unknown")
-      ? recordedTarget
-      : (formatUpdateTargetLabel(props.schedule, props.updateAvailable) ?? t("common.unknown"));
   return renderSettingsSection({ title: t("updates.page.latestAttempt") }, [
     attempt
       ? renderSettingsRow({
@@ -76,15 +117,20 @@ function renderRecordedAttempt(props: UpdatesViewProps) {
           control: renderTimestamp(attempt.timestampMs, props.nowMs),
         })
       : nothing,
-    renderSettingsRow({
-      title: t("updates.page.attemptTarget"),
-      control: renderSettingsValue(target, { mono: true }),
-    }),
     attempt
       ? renderSettingsRow({
-          title: t("updates.page.installedIdentity"),
+          title: t("updates.page.beforeUpdate"),
           control: renderSettingsValue(
-            formatAttemptIdentity(attempt.installedVersion, attempt.installedSha),
+            formatAttemptIdentity(attempt.beforeVersion, attempt.beforeSha),
+            { mono: true },
+          ),
+        })
+      : nothing,
+    attempt
+      ? renderSettingsRow({
+          title: t("updates.page.afterAttempt"),
+          control: renderSettingsValue(
+            formatAttemptIdentity(attempt.afterVersion, attempt.afterSha),
             { mono: true },
           ),
         })
@@ -137,11 +183,11 @@ function renderRecordedAttempt(props: UpdatesViewProps) {
     }),
     renderSettingsRow({
       title: t("updates.page.cliFallback"),
+      description: t("updates.triage.hostHint"),
       stacked: true,
       control: html`<details class="updates-attempt-details">
         <summary>${t("updates.page.showCliFallback")}</summary>
-        <pre><code>openclaw update status --json
-openclaw update</code></pre>
+        <pre><code>openclaw triage</code></pre>
       </details>`,
     }),
   ]);
@@ -365,6 +411,7 @@ export function renderUpdates(props: UpdatesViewProps): TemplateResult {
     });
   }
   const automaticUpdatesSupported = settings.channel !== "extended-stable";
+  const checksDisabled = asConfigRecord(props.configObject.update)?.checkOnStart === false;
   const devPackageInstall =
     settings.channel === "dev" && props.schedule?.install?.kind === "package";
   const campaign = props.schedule?.campaign;
@@ -392,14 +439,24 @@ export function renderUpdates(props: UpdatesViewProps): TemplateResult {
       }),
     }),
     renderSettingsToggleRow({
+      title: t("updates.page.checkForUpdates"),
+      description: t("updates.page.checkForUpdatesDescription"),
+      checked: !checksDisabled,
+      disabled: props.configBusy,
+      onChange: props.onUpdateChecksChange,
+    }),
+    renderSettingsToggleRow({
       title: t("updates.page.automaticUpdates"),
       description: !automaticUpdatesSupported
         ? t("updates.page.extendedStableAutomaticHint")
         : devPackageInstall
           ? t("updates.page.devPackageAutomaticHint")
-          : t("updates.page.automaticUpdatesDescription"),
+          : checksDisabled
+            ? t("updates.page.checksDisabledAutomaticHint")
+            : t("updates.page.automaticUpdatesDescription"),
       checked: automaticUpdatesSupported && settings.autoEnabled,
-      disabled: props.configBusy || !automaticUpdatesSupported || devPackageInstall,
+      disabled:
+        props.configBusy || checksDisabled || !automaticUpdatesSupported || devPackageInstall,
       onChange: props.onAutomaticUpdatesChange,
     }),
   ];
@@ -407,6 +464,7 @@ export function renderUpdates(props: UpdatesViewProps): TemplateResult {
   return html`
     <div id="config-section-update">
       ${renderSettingsPage([
+        renderDeviceUpdates(props.nativeDeviceSettings),
         !props.canAdmin
           ? html`<div class="callout warning" role="note">${t("updates.adminRequired")}</div>`
           : nothing,
@@ -419,18 +477,20 @@ export function renderUpdates(props: UpdatesViewProps): TemplateResult {
             control: html`
               <div class="updates-status-control">
                 ${renderScheduleStatus(props)}
-                ${showHold
-                  ? html`
-                      <button
-                        type="button"
-                        class="btn btn--sm"
-                        ?disabled=${props.updateBusy}
-                        @click=${() => void props.onHoldUpdate()}
-                      >
-                        ${t("updates.holdOneHour")}
-                      </button>
-                    `
-                  : nothing}
+                ${
+                  showHold
+                    ? html`
+                        <button
+                          type="button"
+                          class="btn btn--sm"
+                          ?disabled=${props.updateBusy}
+                          @click=${() => void props.onHoldUpdate()}
+                        >
+                          ${t("updates.holdOneHour")}
+                        </button>
+                      `
+                    : nothing
+                }
               </div>
             `,
           }),

@@ -15,6 +15,7 @@ import type {
   PluginManifestChannelCommandDefaults,
   PluginManifestChannelConfig,
   PluginManifestContracts,
+  PluginManifestControlUi,
   PluginManifestDashboard,
   PluginManifestMediaUnderstandingProviderMetadata,
   PluginManifestMcpServer,
@@ -60,11 +61,13 @@ export type PluginManifestContractListKey =
 
 export type PluginManifestRecord = {
   id: string;
+  /** Process-local source selection, never persisted in the installed index. */
+  sourcePreferred?: true;
   backupResources?: PluginManifestBackupResource[];
   name?: string;
   description?: string;
   catalog?: PluginManifestCatalog;
-  icon?: string;
+  iconPath?: string;
   version?: string;
   packageName?: string;
   packageVersion?: string;
@@ -98,6 +101,7 @@ export type PluginManifestRecord = {
   activation?: PluginManifestActivation;
   setup?: PluginManifestSetup;
   doctorContract?: PluginManifestDoctorContract;
+  doctorHealthChecks?: boolean;
   sessionRouteStateOwners?: DoctorSessionRouteStateOwner[];
   packageManifest?: OpenClawPackageManifest;
   packageDependencies?: PluginDependencySpecMap;
@@ -107,6 +111,7 @@ export type PluginManifestRecord = {
   trustedOfficialInstall?: boolean;
   qaRunners?: PluginManifestQaRunner[];
   dashboard?: PluginManifestDashboard;
+  controlUi?: PluginManifestControlUi;
   mcpServers?: Record<string, PluginManifestMcpServer>;
   skills: string[];
   settingsFiles?: string[];
