@@ -6,6 +6,7 @@ import { importFreshModule } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import type { ModelProviderConfig } from "../config/types.models.js";
+import { createPluginCache, withPluginCache } from "./plugin-cache.js";
 import { clearPluginMetadataLifecycleCaches } from "./plugin-metadata-lifecycle.js";
 import { resolveDirectBundledProviderPolicySurface } from "./provider-policy-surface.js";
 import {
@@ -183,18 +184,78 @@ describe("provider public artifacts", () => {
     });
   });
 
-  it("loads OpenCode Go DeepSeek V4 thinking policy before runtime registration", () => {
+  it.each(["opencode", "opencode-go"])(
+    "preserves %s effort metadata before runtime registration",
+    (provider) => {
+      const surface = resolveBundledProviderPolicySurface(provider);
+      const cases = [
+        [undefined, undefined, undefined],
+        [null, undefined, undefined],
+        [[], undefined, undefined],
+        [["none", "off"], ["off"], "off"],
+        [["max", "high", "low", "high", "none"], ["off", "max", "high", "low"], "high"],
+        [
+          ["high", "medium", "low", "minimal", "xhigh"],
+          ["off", "high", "medium", "low", "minimal", "xhigh"],
+          "medium",
+        ],
+        [["low"], ["off", "low"], "low"],
+        [["minimal", "xhigh", "max"], ["off", "minimal", "xhigh", "max"], "off"],
+        [["adaptive", "ultra", "HIGH", " low ", "provider-native", ""], ["off"], "off"],
+      ] as const;
+      for (const [efforts, levelIds, defaultLevel] of cases) {
+        expect(
+          surface?.resolveThinkingProfile?.({
+            provider,
+            modelId: "effort-fixture",
+            compat: { supportedReasoningEfforts: efforts },
+          }),
+          JSON.stringify(efforts),
+        ).toEqual(levelIds ? { levels: levelIds.map((id) => ({ id })), defaultLevel } : undefined);
+      }
+      expect(
+        surface?.resolveThinkingProfile?.({
+          provider,
+          modelId: "effort-fixture",
+          api: "openai-responses",
+          reasoning: true,
+          compat: { supportedReasoningEfforts: [] },
+        }),
+      ).toEqual(
+        provider === "opencode"
+          ? { levels: [{ id: "off", label: "always on" }], defaultLevel: "off" }
+          : undefined,
+      );
+    },
+  );
+
+  it("loads OpenCode Go model overrides before runtime registration", () => {
     const surface = resolveBundledProviderPolicySurface("opencode-go");
 
-    expect(
-      surface?.resolveThinkingProfile?.({
-        provider: "opencode-go",
-        modelId: "deepseek-v4-pro",
-      }),
-    ).toEqual({
-      levels: [{ id: "off" }, { id: "high" }, { id: "max" }],
-      defaultLevel: "high",
-    });
+    for (const [modelId, levelIds, defaultLevel] of [
+      ["deepseek-v4-pro", ["off", "high", "max"], "high"],
+      ["kimi-k3", ["off", "max"], "off"],
+      ["kimi-k2.6", ["off"], "off"],
+    ] as const) {
+      expect(
+        surface?.resolveThinkingProfile?.({
+          provider: "opencode-go",
+          modelId,
+          compat: { supportedReasoningEfforts: ["low"] },
+        }),
+      ).toEqual({ levels: levelIds.map((id) => ({ id })), defaultLevel });
+    }
+    for (const modelId of ["minimax-m2.7", "minimax-m3"]) {
+      expect(
+        surface?.resolveThinkingProfile?.({
+          provider: "opencode-go",
+          modelId,
+          api: "anthropic-messages",
+          reasoning: true,
+          compat: { supportedReasoningEfforts: ["low"] },
+        }),
+      ).toEqual({ levels: [{ id: "off" }, { id: "low" }], defaultLevel: "low" });
+    }
     expect(
       surface?.resolveThinkingProfile?.({ provider: "opencode-go", modelId: "glm-5" }),
     ).toBeUndefined();
@@ -602,7 +663,7 @@ describe("provider public artifacts", () => {
     expect(loadPluginManifestRegistry).not.toHaveBeenCalled();
   });
 
-  it("refreshes manifest-owned provider policy aliases in a new lifecycle generation", async () => {
+  it("keeps manifest-owned provider policy aliases stable until a new operation", async () => {
     const bundledPluginsDir = fs.mkdtempSync(
       path.join(os.tmpdir(), "openclaw-provider-policy-refresh-"),
     );
@@ -647,21 +708,19 @@ describe("provider public artifacts", () => {
         typeof import("./provider-public-artifacts.js")
       >(import.meta.url, "./provider-public-artifacts.js?scope=provider-alias-refresh");
 
-      expect(
+      const owner = createPluginCache();
+      const levels = () =>
         resolvePolicySurface("fixture-provider")
           ?.resolveThinkingProfile?.({ provider: "fixture-provider", modelId: "demo" })
-          ?.levels.map((level) => level.id),
-      ).toEqual(["first"]);
+          ?.levels.map((level) => level.id);
+      expect(withPluginCache(owner, levels)).toEqual(["first"]);
 
       writePlugin("first", [], 2);
       writePlugin("second", ["fixture-provider"], 2);
       clearPluginMetadataLifecycleCaches();
 
-      expect(
-        resolvePolicySurface("fixture-provider")
-          ?.resolveThinkingProfile?.({ provider: "fixture-provider", modelId: "demo" })
-          ?.levels.map((level) => level.id),
-      ).toEqual(["second"]);
+      expect(withPluginCache(owner, levels)).toEqual(["first"]);
+      expect(withPluginCache(createPluginCache(), levels)).toEqual(["second"]);
     } finally {
       fs.rmSync(bundledPluginsDir, { force: true, recursive: true });
     }

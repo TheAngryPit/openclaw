@@ -1,5 +1,9 @@
 /** Covers plugin runtime registration API behavior and registry mutation guards. */
-import { beforeEach, describe, expect, it } from "vitest";
+import { DatabaseSync } from "node:sqlite";
+import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { trackAsyncWork } from "../shared/async-work-scope.js";
+import { createDeferredCore } from "../shared/deferred.js";
+import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { getPluginRunContext, setPluginRunContext } from "./host-hook-runtime.js";
 import { createEmptyPluginRegistry } from "./registry.js";
 import type { PluginHttpRouteRegistration } from "./registry.js";
@@ -115,20 +119,10 @@ describe("setActivePluginRegistry", () => {
       },
     },
   ] as const)("continues cleanup when the $name", async ({ refresh }) => {
-    let releaseFirstCleanup: (() => void) | undefined;
-    let markFirstCleanupStarted: (() => void) | undefined;
-    let markSecondCleanupCalled: (() => void) | undefined;
-    const firstCleanupStarted = new Promise<void>((resolve) => {
-      markFirstCleanupStarted = resolve;
-    });
-    const secondCleanupCalled = new Promise<void>((resolve) => {
-      markSecondCleanupCalled = resolve;
-    });
-    if (!markFirstCleanupStarted || !markSecondCleanupCalled) {
-      throw new Error("Expected cleanup signal callbacks to be initialized");
-    }
-    const notifyFirstCleanupStarted = markFirstCleanupStarted;
-    const notifySecondCleanupCalled = markSecondCleanupCalled;
+    const firstCleanupStarted = createDeferredCore();
+    const firstCleanupReleased = createDeferredCore();
+    const secondCleanupCalled = createDeferredCore();
+    onTestFinished(() => firstCleanupReleased.resolve());
     const previous = createEmptyPluginRegistry();
     previous.plugins.push(
       createPluginRecord({
@@ -144,10 +138,8 @@ describe("setActivePluginRegistry", () => {
         lifecycle: {
           id: "first-cleanup",
           async cleanup() {
-            notifyFirstCleanupStarted();
-            await new Promise<void>((resolve) => {
-              releaseFirstCleanup = resolve;
-            });
+            firstCleanupStarted.resolve();
+            await firstCleanupReleased.promise;
           },
         },
         source: "/virtual/cleanup-refresh-race/index.ts",
@@ -159,7 +151,7 @@ describe("setActivePluginRegistry", () => {
         lifecycle: {
           id: "second-cleanup",
           cleanup() {
-            notifySecondCleanupCalled();
+            secondCleanupCalled.resolve();
           },
         },
         source: "/virtual/cleanup-refresh-race/index.ts",
@@ -170,15 +162,13 @@ describe("setActivePluginRegistry", () => {
 
     setActivePluginRegistry(previous);
     setActivePluginRegistry(next);
-    await waitForCleanupSignal(firstCleanupStarted, "first cleanup start");
+    // The race starts inside cleanup; cold lazy imports are not a cleanup deadline.
+    await firstCleanupStarted.promise;
 
     refresh(next);
-    if (!releaseFirstCleanup) {
-      throw new Error("Expected first cleanup release callback to be initialized");
-    }
-    releaseFirstCleanup();
+    firstCleanupReleased.resolve();
 
-    await waitForCleanupSignal(secondCleanupCalled, "second cleanup");
+    await waitForCleanupSignal(secondCleanupCalled.promise, "second cleanup");
   });
 
   it("includes plugin ids imported before registration failed", () => {
@@ -214,6 +204,87 @@ describe("setActivePluginRegistry", () => {
     expect(getActivePluginRegistry()).toBeNull();
     expect(cleanupCount).toBe(1);
   });
+
+  it.each(["callback", "descendant"] as const)(
+    "joins actual lifecycle %s before plugin-registry resets",
+    async (owner) => {
+      const { createPluginRegistry } = await import("./registry.js");
+      const { createPluginRuntime } = await import("./runtime/index.js");
+      const builder = createPluginRegistry({
+        logger: { info() {}, warn() {}, error() {}, debug() {} },
+        runtime: createPluginRuntime(),
+        activateGlobalSideEffects: false,
+      });
+      const record = createPluginRecord({ id: "cleanup-sqlite", status: "loaded" });
+      builder.registry.plugins.push(record);
+      const api = builder.createApi(record, { config: {} });
+      const db = new DatabaseSync(":memory:");
+      const entered = createDeferredCore();
+      const release = createDeferredCore();
+      const finished = createDeferredCore();
+      const reads: unknown[] = [];
+      const failures: unknown[] = [];
+      const nativeState = resolveGlobalSingleton(
+        Symbol.for("openclaw.test.actualPluginCleanupDatabase"),
+        (): { database?: DatabaseSync; resets: number } => ({ resets: 0 }),
+        (state) => {
+          if (state.database?.isOpen) {
+            state.resets++;
+            state.database.close();
+          }
+        },
+        "plugin-registry",
+      );
+      nativeState.database = db;
+      nativeState.resets = 0;
+      const readAfterRelease = async () => {
+        entered.resolve();
+        try {
+          await release.promise;
+          reads.push(db.prepare("SELECT 1 AS value").get());
+        } catch (error) {
+          failures.push(error);
+        } finally {
+          finished.resolve();
+        }
+      };
+      const cleanup = vi.fn(() => {
+        if (owner === "callback") {
+          return readAfterRelease();
+        }
+        void trackAsyncWork(readAfterRelease);
+        return undefined;
+      });
+      api.lifecycle.registerRuntimeLifecycle({ id: "held-cleanup", cleanup });
+      setActivePluginRegistry(builder.registry);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      let closed = false;
+      const closing = clearActivePluginRegistry().then(() => {
+        closed = true;
+      });
+      try {
+        await entered.promise;
+        await vi.advanceTimersByTimeAsync(5000);
+        expect(getActivePluginRegistry()).toBeNull();
+        expect(db.isOpen).toBe(true);
+        expect(nativeState.resets).toBe(0);
+        expect(closed).toBe(false);
+      } finally {
+        release.resolve();
+        await finished.promise;
+        await closing;
+        vi.useRealTimers();
+        if (db.isOpen) {
+          db.close();
+        }
+        nativeState.database = undefined;
+      }
+      expect(cleanup).toHaveBeenCalledOnce();
+      expect(failures).toEqual([]);
+      expect(reads).toEqual([{ value: 1 }]);
+      expect(nativeState.resets).toBe(1);
+    },
+  );
 
   it("clears plugin host run contexts with the active registry", async () => {
     setPluginRunContext({

@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, test } from "vitest";
+import { contextBudgetStatusFixture } from "../../../../src/config/sessions/context-budget.test-support.js";
 import type { SessionsListResult } from "../../api/types.ts";
 import { resolveChatThinkingSelectState } from "../chat/thinking.ts";
 import {
@@ -101,6 +102,7 @@ test("reconciling the same sessions.changed twice keeps result identity on the s
   const payload = {
     sessionKey: "agent:main:main",
     reason: "patch",
+    ts: 2,
     updatedAt: 2,
     label: "Renamed",
   };
@@ -109,6 +111,7 @@ test("reconciling the same sessions.changed twice keeps result identity on the s
   expect(first.applied).toBe(true);
   expect(first.result).not.toBe(result);
   expect(first.result?.sessions[0]?.label).toBe("Renamed");
+  expect(first.result?.ts).toBe(2);
 
   // The capability handler and the chat page both drive the same event; the
   // second reconcile must return the identical result object so downstream
@@ -131,6 +134,7 @@ test("sessions.changed deletes every nested null tombstone, not a hand-kept list
         kind: "direct",
         updatedAt: 1,
         toolOverrides: { profile: "coding" },
+        contextBudgetStatus: contextBudgetStatusFixture(),
         agentStatus: { state: "needs_attention", message: "Reply requested" },
         observerDigest: {
           agentId: "main",
@@ -156,6 +160,7 @@ test("sessions.changed deletes every nested null tombstone, not a hand-kept list
       kind: "direct",
       updatedAt: 2,
       toolOverrides: null,
+      contextBudgetStatus: null,
       agentStatus: null,
       observerDigest: null,
       controlOwnerSessionKey: null,
@@ -169,6 +174,7 @@ test("sessions.changed deletes every nested null tombstone, not a hand-kept list
   const row = reconciled.result?.sessions[0] as Record<string, unknown> | undefined;
   for (const field of [
     "toolOverrides",
+    "contextBudgetStatus",
     "agentStatus",
     "observerDigest",
     "controlOwnerSessionKey",
@@ -708,6 +714,7 @@ describe("reconcileSessionChanged", () => {
         archived: true,
         archivedAt: 1,
         archivedBy: { type: "human", id: "profile-ada", label: "Ada" },
+        archiveReason: "manual",
       },
     ]);
 
@@ -722,12 +729,15 @@ describe("reconcileSessionChanged", () => {
         archived: false,
         archivedAt: null,
         archivedBy: null,
+        archiveReason: null,
       },
       { archivedFilter: "all" },
     );
 
     expect(next.row?.archivedBy).toBeUndefined();
+    expect(next.row?.archiveReason).toBeUndefined();
     expect(next.result?.sessions[0]?.archivedBy).toBeUndefined();
+    expect(next.result?.sessions[0]?.archiveReason).toBeUndefined();
   });
 });
 
@@ -793,3 +803,30 @@ describe("reconcileSessionHistory", () => {
     expect(reconciled?.sessions[0]?.derivedTitle).toBeUndefined();
   });
 });
+
+test.each([undefined, "generation-a", "generation-b"])(
+  "delete reconciliation removes only the event generation (%s)",
+  (sessionId) => {
+    const row = {
+      key: "agent:main:recreated",
+      sessionId: "generation-b",
+      kind: "direct" as const,
+      updatedAt: 2,
+    };
+    const result = {
+      ts: 2,
+      path: "",
+      count: 1,
+      defaults: { modelProvider: null, model: null, contextTokens: null },
+      sessions: [row],
+    };
+    const reconciled = reconcileSessionChanged(result, {
+      sessionKey: row.key,
+      agentId: "main",
+      reason: "delete",
+      sessionId,
+    });
+    expect(reconciled.result?.sessions).toEqual(sessionId === row.sessionId ? [] : [row]);
+    expect(reconciled.deletedKey).toBe(sessionId === row.sessionId ? row.key : undefined);
+  },
+);

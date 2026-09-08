@@ -9,6 +9,7 @@ import { setCurrentPluginMetadataSnapshot } from "../plugins/current-plugin-meta
 import { resolveInstalledPluginIndexPolicyHash } from "../plugins/installed-plugin-index-policy.js";
 import { clearPluginMetadataLifecycleCaches } from "../plugins/plugin-metadata-lifecycle.js";
 import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.types.js";
+import { buildDeclaredProviderOwnerIndex } from "../plugins/provider-owner-index.js";
 import * as facadeActivationRuntime from "./facade-activation-check.runtime.js";
 import {
   evaluateBundledPluginPublicSurfaceAccess,
@@ -752,7 +753,6 @@ describe("plugin-sdk facade runtime", () => {
         artifactBasename: "runtime-api.js",
         location: null,
         sourceExtensionsRoot: "",
-        resolutionKey: "runtime-core:image-generation-core",
       }),
     ).toEqual({
       allowed: true,
@@ -769,7 +769,6 @@ describe("plugin-sdk facade runtime", () => {
         artifactBasename: "runtime-api.js",
         location: null,
         sourceExtensionsRoot: "",
-        resolutionKey: "runtime-core:speech-core",
       }),
     ).toEqual({
       allowed: false,
@@ -817,7 +816,6 @@ describe("plugin-sdk facade runtime", () => {
           boundaryRoot: dir,
         },
         sourceExtensionsRoot: dir,
-        resolutionKey: "source-snapshot-demo",
       }),
     ).toEqual({
       allowed: true,
@@ -864,6 +862,7 @@ describe("plugin-sdk facade runtime", () => {
         diagnostics: [],
         byPluginId: new Map(),
         normalizePluginId: (pluginId) => pluginId,
+        declaredProviderOwners: buildDeclaredProviderOwnerIndex(params.plugins ?? []),
         owners: {
           channels: new Map(),
           channelConfigs: new Map(),
@@ -873,6 +872,7 @@ describe("plugin-sdk facade runtime", () => {
           setupProviders: new Map(),
           commandAliases: new Map(),
           contracts: new Map(),
+          modelIdNormalizationPolicies: new Map(),
         },
         metrics: {
           registrySnapshotMs: 0,
@@ -941,7 +941,6 @@ describe("plugin-sdk facade runtime", () => {
         artifactBasename: "runtime-api.js",
         location: null,
         sourceExtensionsRoot: dir,
-        resolutionKey: "snapshot-validate-demo",
       }),
     ).toEqual({
       allowed: false,
@@ -956,7 +955,6 @@ describe("plugin-sdk facade runtime", () => {
         artifactBasename: "runtime-api.js",
         location: null,
         sourceExtensionsRoot: dir,
-        resolutionKey: "snapshot-validate-demo",
       }),
     ).toEqual({
       allowed: true,

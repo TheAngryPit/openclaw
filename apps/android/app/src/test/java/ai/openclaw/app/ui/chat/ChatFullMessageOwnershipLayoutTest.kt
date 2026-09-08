@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
@@ -42,6 +43,7 @@ import androidx.compose.ui.test.isDialog
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performSemanticsAction
@@ -165,7 +167,6 @@ class ChatFullMessageOwnershipLayoutTest {
             showSidebarButton = true,
             onOpenSidebar = {},
             onToggleTalk = {},
-            onOpenSessions = {},
             onOpenDashboard = {},
             onOpenGatewaySettings = {},
           )
@@ -689,6 +690,32 @@ class ChatFullMessageOwnershipLayoutTest {
 
   @Test
   fun readingInsideExpandedCodePausesFollowingUntilJumpToLatest() {
+    assertInnerCodeInputPausesFollowing { viewport ->
+      viewport.performTouchInput { swipeUp(durationMillis = 500) }
+    }
+  }
+
+  @Test
+  fun mouseWheelInsideExpandedCodePausesFollowingUntilJumpToLatest() {
+    assertInnerCodeInputPausesFollowing { viewport ->
+      viewport.performMouseInput {
+        moveTo(center)
+        scroll(1f)
+      }
+    }
+  }
+
+  @Test
+  fun accessibilityScrollInsideExpandedCodePausesFollowingUntilJumpToLatest() {
+    assertInnerCodeInputPausesFollowing { viewport ->
+      val distance = viewport.fetchSemanticsNode().boundsInRoot.height / 2f
+      viewport.performSemanticsAction(SemanticsActions.ScrollBy) { scroll ->
+        assertTrue(scroll(0f, distance))
+      }
+    }
+  }
+
+  private fun assertInnerCodeInputPausesFollowing(scrollInsideCode: (SemanticsNodeInteraction) -> Unit) {
     val code = (0 until 700).joinToString("\n") { "Code line $it: keep this reading position." }
     val full = "```\n$code\n```"
     val response = gateway.fullResponse(FULL_MESSAGE_FIRST_CHAT)
@@ -710,7 +737,7 @@ class ChatFullMessageOwnershipLayoutTest {
     composeRule.onNodeWithText("Copy").performClick()
     val clipboard = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     assertEquals(
-      "The gesture must read the full answer, not its capped history",
+      "The input must read the full answer, not its capped history",
       full,
       clipboard.primaryClip
         ?.getItemAt(0)
@@ -737,6 +764,14 @@ class ChatFullMessageOwnershipLayoutTest {
       assertNull(model.chatError.value)
     }
 
+    // View all pauses following. Return to latest through the outer list before testing the inner input.
+    val latestViewport = transcript.fetchSemanticsNode().boundsInRoot
+    transcript.performSemanticsAction(SemanticsActions.ScrollBy) { scroll ->
+      assertTrue(scroll(0f, -latestViewport.height))
+    }
+    composeRule.waitForIdle()
+    assertEquals("Explicit outer scrolling must settle at latest", 0f, transcript.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value(), 0f)
+
     // Prove live-follow through consecutive updates, not an assumed Jump affordance after layout settles.
     appendAssistant(1)
     composeRule.onNodeWithText(gateway.backgroundText(0)).assertIsDisplayed()
@@ -746,16 +781,16 @@ class ChatFullMessageOwnershipLayoutTest {
     assertEquals("Following must bring the next update to latest without interaction", 0f, transcript.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value(), 0f)
     codeViewport.assertIsDisplayed()
     val initialCode = codeViewport.fetchSemanticsNode()
-    assertEquals("The touch must stay inside the fully visible code viewport", initialCode.size.height.toFloat(), initialCode.boundsInRoot.height, 0.01f)
+    assertEquals("The input target must stay inside the fully visible code viewport", initialCode.size.height.toFloat(), initialCode.boundsInRoot.height, 0.01f)
     val outerBefore = transcript.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value()
     assertEquals("Start in live-follow at the latest message", 0f, outerBefore, 0f)
     jump.assertDoesNotExist()
     val innerBefore = initialCode.config[SemanticsProperties.VerticalScrollAxisRange].value()
-    codeViewport.performTouchInput { swipeUp(durationMillis = 500) }
+    scrollInsideCode(codeViewport)
     composeRule.waitForIdle()
     val reading = codeViewport.fetchSemanticsNode()
     val readingOffset = reading.config[SemanticsProperties.VerticalScrollAxisRange].value()
-    assertTrue("The real touch must move within the code, not its outer transcript", readingOffset > innerBefore)
+    assertTrue("The selected input must move within the code, not its outer transcript", readingOffset > innerBefore)
     assertEquals("The child must consume this gesture without moving the transcript", outerBefore, transcript.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value(), 0f)
 
     appendAssistant(3)
@@ -826,6 +861,66 @@ class ChatFullMessageOwnershipLayoutTest {
   }
 
   @Test
+  fun replacementOperatorLeaseSurvivesTheRestOfGatewayRefresh() =
+    runBlocking {
+      val nodeSession =
+        NodeRuntime::class.java
+          .getDeclaredField("nodeSession")
+          .apply { isAccessible = true }
+          .get(runtime) as GatewaySession
+      val nodeLifecycleLock =
+        checkNotNull(
+          GatewaySession::class.java
+            .getDeclaredField("lifecycleLock")
+            .apply { isAccessible = true }
+            .get(nodeSession),
+        )
+      val acquired = CountDownLatch(1)
+      val release = CountDownLatch(1)
+      val previousConnection = gateway.operatorConnection.get()
+      val heldNode =
+        async(Dispatchers.IO) {
+          synchronized(nodeLifecycleLock) {
+            acquired.countDown()
+            check(release.await(FULL_MESSAGE_READY_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+          }
+        }
+      val refresh =
+        async(Dispatchers.IO) {
+          check(acquired.await(FULL_MESSAGE_READY_TIMEOUT_MS, TimeUnit.MILLISECONDS))
+          runtime.refreshGatewayConnection()
+        }
+      try {
+        // Hold the second role's connect while the replacement operator finishes its
+        // real hello. Finishing one refresh must not close that new connection again.
+        val replacement =
+          withTimeout(FULL_MESSAGE_READY_TIMEOUT_MS) {
+            combine(gateway.historyReads, runtime.serverName) { reads, _ ->
+              val lease = operatorSession().captureRequestLease(gateway.endpoint.stableId)
+              val connection = gateway.operatorConnection.get()
+              lease?.takeIf {
+                connection > previousConnection &&
+                  runtime.serverName.value == "full-message-$connection" &&
+                  reads.any { it.first == connection && it.second == FULL_MESSAGE_FIRST_CHAT } &&
+                  it.isCurrent()
+              }
+            }.first { it != null }
+          }
+        val current = prepareCurrentRead()
+        release.countDown()
+        heldNode.await()
+        refresh.await()
+        assertTrue("The refreshed operator must survive the later node-role connect", checkNotNull(replacement).isCurrent())
+        current.execute()
+        assertEquals(gateway.fullText(FULL_MESSAGE_FIRST_CHAT), loadedText(current.state.value))
+      } finally {
+        release.countDown()
+        refresh.cancelAndJoin()
+        heldNode.cancelAndJoin()
+      }
+    }
+
+  @Test
   fun preparedReadSurvivesAnUnchangedRefreshButNotAChangedPreview() {
     val unchanged = prepareCurrentRead()
     refreshSelectedChat()
@@ -886,16 +981,11 @@ class ChatFullMessageOwnershipLayoutTest {
       .assertIsEnabled()
       .performClick()
     selectChat(FULL_MESSAGE_SECOND_CHAT)
-    val operatorSession =
-      NodeRuntime::class.java
-        .getDeclaredField("operatorSession")
-        .apply { isAccessible = true }
-        .get(runtime) as GatewaySession
     val writeLock =
       GatewaySession::class.java
         .getDeclaredField("writeLock")
         .apply { isAccessible = true }
-        .get(operatorSession) as Mutex
+        .get(operatorSession()) as Mutex
     val lockOwner = Any()
     val autoAdvance = composeRule.mainClock.autoAdvance
     try {
@@ -1292,6 +1382,12 @@ class ChatFullMessageOwnershipLayoutTest {
 
   private fun currentOwner() = ChatComposerOwner(gateway.endpoint.stableId, "main", runtime.chatSessionKey.value)
 
+  private fun operatorSession(): GatewaySession =
+    NodeRuntime::class.java
+      .getDeclaredField("operatorSession")
+      .apply { isAccessible = true }
+      .get(runtime) as GatewaySession
+
   private fun prepareCurrentRead() =
     checkNotNull(
       runtime.prepareFullMessageRead(currentOwner(), runtime.chatSelectionGeneration.value, runtime.gatewayCatalogRevision.value, runtime.chatMessages.value.single()),
@@ -1354,15 +1450,25 @@ class ChatFullMessageOwnershipLayoutTest {
   private fun replaceConnectionBeforeRecomposition() {
     val oldConnection = gateway.operatorConnection.get()
     val key = runtime.chatSessionKey.value
+    val session = operatorSession()
     runtime.refreshGatewayConnection()
     runBlocking {
       withTimeout(FULL_MESSAGE_READY_TIMEOUT_MS) {
-        gateway.historyReads.first { reads -> reads.any { it.first > oldConnection && it.second == key } }
+        // A server-side read is not proof that the replacement is still current.
+        // Capturing its lease waits for hello publication without advancing Compose.
+        combine(gateway.historyReads, runtime.serverName) { reads, _ ->
+          val lease = session.captureRequestLease(gateway.endpoint.stableId)
+          val connection = gateway.operatorConnection.get()
+          connection > oldConnection &&
+            runtime.serverName.value == "full-message-$connection" &&
+            reads.any { it.first == connection && it.second == key } &&
+            lease?.isCurrent() == true
+        }.first { it }
       }
     }
     assertTrue(gateway.operatorConnection.get() > oldConnection)
-    assertEquals("full-message-${gateway.operatorConnection.get()}", runtime.serverName.value)
     awaitRuntimeReady(key)
+    assertEquals("full-message-${gateway.operatorConnection.get()}", runtime.serverName.value)
   }
 
   private fun assertRetiredDisclosureCannotLoad(
@@ -1843,6 +1949,7 @@ internal class FullMessageGateway : AutoCloseable {
                 """{"type":"hello-ok","protocol":3,"server":{"host":"full-message-$connection","version":"proof"},"features":{$methods"events":[]},"auth":{"role":"$role","scopes":${if (role == "operator") "[\"operator.read\",\"operator.write\"]" else "[]"}},"snapshot":{"sessionDefaults":{"mainSessionKey":"agent:main:main"}}}""",
               )
             }
+
             "chat.history" -> {
               historyReads.update { it + (connection to session) }
               buildJsonObject {
@@ -1866,6 +1973,7 @@ internal class FullMessageGateway : AutoCloseable {
                 )
               }
             }
+
             "chat.message.get" -> {
               fullReads += FullMessageRead(connection, session, params["agentId"]?.jsonPrimitive?.content.orEmpty(), params["messageId"]?.jsonPrimitive?.content.orEmpty(), params["maxChars"]?.jsonPrimitive?.content?.toIntOrNull())
               if (fullReadRpcError) {
@@ -1874,14 +1982,25 @@ internal class FullMessageGateway : AutoCloseable {
               }
               fullResponseOverride ?: fullResponse(session)
             }
+
             "tts.speak" -> {
               // Observe the production Listen request without starting unrelated platform audio.
               speechReads.update { it + params.getValue("text").jsonPrimitive.content }
               return
             }
-            "chat.metadata" -> json.parseToJsonElement("""{"commands":[],"models":[]}""")
-            "sessions.list" -> json.parseToJsonElement("""{"sessions":[]}""")
-            "health", "sessions.subscribe", "sessions.messages.subscribe" -> JsonObject(emptyMap())
+
+            "chat.metadata" -> {
+              json.parseToJsonElement("""{"commands":[],"models":[]}""")
+            }
+
+            "sessions.list" -> {
+              json.parseToJsonElement("""{"sessions":[]}""")
+            }
+
+            "health", "sessions.subscribe", "sessions.messages.subscribe" -> {
+              JsonObject(emptyMap())
+            }
+
             else -> {
               reject("INVALID_REQUEST", "Proof Gateway does not implement $method")
               return

@@ -31,10 +31,10 @@ export type BundledPackageCacheIdentity = {
   mtimeMs: number;
 };
 
-type PluginLoaderModuleConfig = {
-  tryNative: boolean;
-  aliasMap: PluginSdkAliasMap;
+type PreparedPluginAliases = {
   cacheKey: string;
+  getAliasMap: () => PluginSdkAliasMap;
+  resolveAlias: (specifier: string) => string | undefined;
 };
 
 type PluginSdkHostFacts = {
@@ -45,7 +45,6 @@ type PluginSdkHostFacts = {
   privateSubpaths?: string[];
   workspaceExports: Map<string, WorkspacePackageAliasEntry[]>;
   subpathsByOwner: Map<string, string[]>;
-  aliasesByOwner: Map<string, PluginSdkAliasMap>;
   bundledAliasesByMode: Map<string, PluginSdkAliasMap>;
   workspaceAliasesByMode: Map<string, PluginSdkAliasMap>;
 };
@@ -54,7 +53,6 @@ function createPluginSdkHostFacts(): PluginSdkHostFacts {
   return {
     workspaceExports: new Map(),
     subpathsByOwner: new Map(),
-    aliasesByOwner: new Map(),
     bundledAliasesByMode: new Map(),
     workspaceAliasesByMode: new Map(),
   };
@@ -64,13 +62,7 @@ function createPluginSdkHostFacts(): PluginSdkHostFacts {
 export function createPluginCacheSdk() {
   return {
     hosts: new Map<string, PluginSdkHostFacts>(),
-    contexts: new Map<
-      string,
-      {
-        aliasMap?: PluginSdkAliasMap;
-        moduleConfig?: PluginLoaderModuleConfig;
-      }
-    >(),
+    contexts: new Map<string, PreparedPluginAliases>(),
     packageNames: new Map<string, string | null>(),
     packageSearches: new Map<string, { first?: string | null; all?: string[] }>(),
     argvDirectories: new Map<string, string[]>(),
@@ -92,8 +84,12 @@ export function createPluginCacheSdk() {
       WeakMap<PluginSdkAliasMap, WeakMap<PluginSdkAliasMap, PluginSdkAliasMap>>
     >(),
     native: {
+      sdkProviders: new Map<
+        string,
+        { resolveAlias: (specifier: string) => string | undefined; order?: number }
+      >(),
+      nextSdkProviderOrder: 0,
       aliases: new Map<string, Array<{ parentRoot: string; target: string }>>(),
-      aliasesByMap: new WeakMap<PluginSdkAliasMap, Array<readonly [string, string]>>(),
       registeredHosts: new Set<string>(),
       hostRoots: new Map<string, string>(),
       nearestPackageRoots: new Map<string, string>(),

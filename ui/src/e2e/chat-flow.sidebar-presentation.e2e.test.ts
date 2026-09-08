@@ -1,49 +1,42 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, it } from "vitest";
-import { defaultControlUiFeatureMethods } from "../test-helpers/control-ui-e2e.ts";
+import {
+  takeControlUiElementScreenshot,
+  takeControlUiViewportScreenshot,
+} from "../test-helpers/control-ui-e2e-screenshot.ts";
 import {
   captureUiProofEnabled,
   chatSessionListResponse,
   createChatFlowE2eSuite,
   expectDefined,
   expectRequestCountStable,
+  controlUiSessionUrl,
   installMockGateway,
   pauseVirtualClock,
   requireRecord,
 } from "./chat-flow.test-support.ts";
+import { createControlUiE2eContextOptions } from "./control-ui-e2e-suite.test-support.ts";
 
 const suite = createChatFlowE2eSuite();
-const terminalMetadataProofDir = path.join(
-  process.cwd(),
-  ".artifacts",
-  "control-ui-e2e",
-  "remote-session-sidebar-metadata",
-);
-const sessionSecondRowProofDir = path.join(
-  process.cwd(),
-  ".artifacts",
-  "control-ui-e2e",
-  "session-status-second-row-implementation",
-);
-const subtitleStabilityProofDir = path.join(
-  process.cwd(),
-  ".artifacts",
-  "control-ui-e2e",
-  "sidebar-subtitle-stability",
-);
+const rosterMatch = { includeGlobal: true };
 
 suite.define(() => {
   it("keeps a running subtitle and row height stable when its session is opened", async () => {
     if (captureUiProofEnabled) {
-      await mkdir(subtitleStabilityProofDir, { recursive: true });
+      await mkdir(path.join(suite.artifactDir, "sidebar-subtitle-stability"), { recursive: true });
     }
     const context = await suite.newBrowserContext({
       locale: "en-US",
       serviceWorkers: "block",
       viewport: { height: 900, width: 1280 },
       ...(captureUiProofEnabled
-        ? { recordVideo: { dir: subtitleStabilityProofDir, size: { height: 900, width: 1280 } } }
+        ? {
+            recordVideo: {
+              dir: path.join(suite.artifactDir, "sidebar-subtitle-stability"),
+              size: { height: 900, width: 1280 },
+            },
+          }
         : {}),
     });
     const page = await context.newPage();
@@ -80,7 +73,7 @@ suite.define(() => {
     });
 
     try {
-      await page.goto(`${suite.server.baseUrl}chat`);
+      await page.goto(controlUiSessionUrl(suite.server.baseUrl, firstKey));
       const secondRow = page.locator(`.sidebar-recent-session[data-session-key="${secondKey}"]`);
       await expect
         .poll(async () =>
@@ -99,9 +92,15 @@ suite.define(() => {
       const heightBefore = await secondRow.evaluate((row) => row.getBoundingClientRect().height);
       if (captureUiProofEnabled) {
         await page.waitForTimeout(800);
-        await secondRow.screenshot({
-          path: path.join(subtitleStabilityProofDir, "01-running-before-open.png"),
-        });
+        await writeFile(
+          path.join(
+            path.join(suite.artifactDir, "sidebar-subtitle-stability"),
+            "01-running-before-open.png",
+          ),
+          await takeControlUiElementScreenshot(page, secondRow, [
+            secondRow.getByText("Using bash"),
+          ]),
+        );
       }
 
       await secondRow.locator("a.sidebar-recent-session__link").click();
@@ -115,15 +114,24 @@ suite.define(() => {
       expect(heightAfter).toBeCloseTo(heightBefore, 1);
       if (captureUiProofEnabled) {
         await page.waitForTimeout(800);
-        await secondRow.screenshot({
-          path: path.join(subtitleStabilityProofDir, "02-running-after-open.png"),
-        });
+        await writeFile(
+          path.join(
+            path.join(suite.artifactDir, "sidebar-subtitle-stability"),
+            "02-running-after-open.png",
+          ),
+          await takeControlUiElementScreenshot(page, secondRow, [
+            secondRow.getByText("Using bash"),
+          ]),
+        );
       }
     } finally {
       await suite.closeBrowserContext(context);
       if (proofVideo) {
         await proofVideo.saveAs(
-          path.join(subtitleStabilityProofDir, "sidebar-subtitle-stability.webm"),
+          path.join(
+            path.join(suite.artifactDir, "sidebar-subtitle-stability"),
+            "sidebar-subtitle-stability.webm",
+          ),
         );
       }
     }
@@ -131,14 +139,21 @@ suite.define(() => {
 
   it("replaces an intermediate running subtitle with the unread final digest", async () => {
     if (captureUiProofEnabled) {
-      await mkdir(terminalMetadataProofDir, { recursive: true });
+      await mkdir(path.join(suite.artifactDir, "remote-session-sidebar-metadata"), {
+        recursive: true,
+      });
     }
     const context = await suite.newBrowserContext({
       locale: "en-US",
       serviceWorkers: "block",
       viewport: { height: 900, width: 1280 },
       ...(captureUiProofEnabled
-        ? { recordVideo: { dir: terminalMetadataProofDir, size: { height: 900, width: 1280 } } }
+        ? {
+            recordVideo: {
+              dir: path.join(suite.artifactDir, "remote-session-sidebar-metadata"),
+              size: { height: 900, width: 1280 },
+            },
+          }
         : {}),
     });
     const page = await context.newPage();
@@ -192,17 +207,20 @@ suite.define(() => {
     });
 
     try {
-      await page.goto(`${suite.server.baseUrl}chat`);
+      await page.goto(controlUiSessionUrl(suite.server.baseUrl, key));
       const row = page.locator(`.sidebar-recent-session[data-session-key="${key}"]`);
       await row.getByText("Implementing the repair").waitFor();
       if (captureUiProofEnabled) {
-        await page.screenshot({
-          fullPage: true,
-          path: path.join(terminalMetadataProofDir, "01-running-subtitle.png"),
-        });
+        await writeFile(
+          path.join(
+            path.join(suite.artifactDir, "remote-session-sidebar-metadata"),
+            "01-running-subtitle.png",
+          ),
+          await takeControlUiViewportScreenshot(page, page.locator(".shell"), [row]),
+        );
       }
-      await gateway.setMethodResponse("sessions.list", completed);
-      const listCount = (await gateway.getRequests("sessions.list")).length;
+      await gateway.setSessionsListResponse(completed);
+      const listCount = (await gateway.getRequests("sessions.list", rosterMatch)).length;
       await gateway.emitGatewayEvent("session.message", {
         activeRunIds: [],
         hasActiveRun: false,
@@ -218,15 +236,18 @@ suite.define(() => {
         status: "done",
       });
       await row.getByText("Repair landed cleanly").waitFor();
-      await expectRequestCountStable(gateway, "sessions.list", listCount);
+      await expectRequestCountStable(gateway, "sessions.list", listCount, 500, rosterMatch);
       expect(await row.textContent()).not.toContain("[[");
       if (captureUiProofEnabled) {
-        await page.screenshot({
-          fullPage: true,
-          path: path.join(terminalMetadataProofDir, "02-final-reply-subtitle.png"),
-        });
+        await writeFile(
+          path.join(
+            path.join(suite.artifactDir, "remote-session-sidebar-metadata"),
+            "02-final-reply-subtitle.png",
+          ),
+          await takeControlUiViewportScreenshot(page, page.locator(".shell"), [row]),
+        );
       }
-      const listRequests = await gateway.getRequests("sessions.list");
+      const listRequests = await gateway.getRequests("sessions.list", rosterMatch);
       expect(listRequests.at(-1)?.params).toMatchObject({ includeLastMessage: true });
     } finally {
       await suite.closeBrowserContext(context);
@@ -234,11 +255,7 @@ suite.define(() => {
   });
 
   it("keeps long sidebar labels clipped after a session switch", async () => {
-    const context = await suite.newBrowserContext({
-      locale: "en-US",
-      serviceWorkers: "block",
-      viewport: { height: 900, width: 1280 },
-    });
+    const context = await suite.newBrowserContext(createControlUiE2eContextOptions());
     const page = await context.newPage();
     await page.clock.install();
     const sessions = chatSessionListResponse();
@@ -255,7 +272,7 @@ suite.define(() => {
     });
 
     try {
-      await page.goto(`${suite.server.baseUrl}chat`);
+      await page.goto(controlUiSessionUrl(suite.server.baseUrl, "agent:main:session-a"));
       const recentRow = page.locator(
         '.sidebar-recent-session[data-session-key="agent:main:session-b"]',
       );
@@ -328,58 +345,60 @@ suite.define(() => {
 
   it("keeps session titles on the first line and collapses rows that have no second line", async () => {
     if (captureUiProofEnabled) {
-      await mkdir(sessionSecondRowProofDir, { recursive: true });
+      await mkdir(path.join(suite.artifactDir, "session-status-second-row-implementation"), {
+        recursive: true,
+      });
     }
     const context = await suite.newBrowserContext({
       locale: "en-US",
       serviceWorkers: "block",
       viewport: { height: 900, width: 1280 },
       ...(captureUiProofEnabled
-        ? { recordVideo: { dir: sessionSecondRowProofDir, size: { height: 900, width: 1280 } } }
+        ? {
+            recordVideo: {
+              dir: path.join(suite.artifactDir, "session-status-second-row-implementation"),
+              size: { height: 900, width: 1280 },
+            },
+          }
         : {}),
     });
     const page = await context.newPage();
     const busyKey = "agent:main:busy-session";
     const plainKey = "agent:main:plain-session";
     const longKey = "agent:main:long-title-session";
-    const homeKey = "agent:main:main";
+    const unreadKey = "agent:main:unread-session";
+    const runningKey = "agent:main:running-session";
     await installMockGateway(page, {
-      featureMethods: [...defaultControlUiFeatureMethods, "board.get"],
       methodResponses: {
-        "board.get": {
-          cases: [homeKey, busyKey, plainKey, longKey].map((sessionKey) => ({
-            match: { sessionKey },
-            response: {
-              sessionKey,
-              revision: 1,
-              tabs:
-                sessionKey === homeKey || sessionKey === busyKey
-                  ? [{ tabId: "overview", title: "Overview", position: 0, chatDock: "right" }]
-                  : [],
-              widgets: [],
-            },
-          })),
-        },
         "sessions.list": chatSessionListResponse([
+          {
+            key: unreadKey,
+            kind: "direct",
+            label: "Movies and recommendations for the weekend",
+            icon: "🎬",
+            updatedAt: 3,
+            unread: true,
+          },
+          {
+            key: runningKey,
+            kind: "direct",
+            label: "Running session",
+            hasActiveRun: true,
+            status: "running",
+            updatedAt: 4,
+          },
           {
             key: busyKey,
             kind: "direct",
             label: "Terminal tab bar redesign proposal",
             updatedAt: 2,
-            activeRunIds: ["run-busy-session"],
-            hasActiveRun: true,
-            observerDigest: {
-              agentId: "main",
-              runId: "run-busy-session",
-              headline:
-                "The isolated clone is ready, but direct Git fetch and every remaining operation continue in the background",
-              health: "on-track",
-              updatedAt: 2,
-              revision: 1,
-            },
+            hasActiveRun: false,
+            lastMessagePreview:
+              "The isolated clone is ready, but direct Git fetch and every remaining operation continue in the background",
             incognito: true,
             hasAutomation: true,
-            status: "running",
+            boardFace: "dashboard",
+            status: "done",
             unread: true,
           },
           {
@@ -393,10 +412,10 @@ suite.define(() => {
             kind: "direct",
             label:
               "An extremely long single-line session title that keeps going and going far past the sidebar width",
+            incognito: true,
             updatedAt: 1,
-            activeRunIds: ["run-long-title"],
-            hasActiveRun: true,
-            status: "running",
+            hasActiveRun: false,
+            status: "done",
             unread: true,
           },
         ]),
@@ -405,16 +424,20 @@ suite.define(() => {
     });
 
     try {
-      await page.goto(`${suite.server.baseUrl}chat`);
+      await page.goto(controlUiSessionUrl(suite.server.baseUrl, plainKey));
       const busyRow = page.locator(`.sidebar-recent-session[data-session-key="${busyKey}"]`);
       const plainRow = page.locator(`.sidebar-recent-session[data-session-key="${plainKey}"]`);
       await busyRow.locator(".session-row-badges").waitFor();
       expect(await busyRow.locator(".sidebar-recent-session__subtitle").count()).toBe(0);
       expect(await busyRow.getAttribute("class")).toContain("sidebar-recent-session--single-line");
       if (captureUiProofEnabled) {
-        await page.locator(".shell-nav").screenshot({
-          path: path.join(sessionSecondRowProofDir, "00-default-hidden-preview.png"),
-        });
+        await writeFile(
+          path.join(
+            path.join(suite.artifactDir, "session-status-second-row-implementation"),
+            "00-default-hidden-preview.png",
+          ),
+          await takeControlUiElementScreenshot(page, page.locator(".shell-nav"), [busyRow]),
+        );
       }
       await page.locator(".sidebar-session-toolbar .sidebar-session-sort").click();
       const previewToggle = page.locator('wa-dropdown-item[value="show-preview"]');
@@ -426,38 +449,17 @@ suite.define(() => {
       await previewToggle.click();
       await busyRow.locator(".sidebar-recent-session__subtitle").waitFor();
       const sidebar = page.locator("openclaw-app-sidebar");
-      const homeBoard = sidebar
-        .locator(".nav-item--home")
-        .getByRole("img", { name: "Dashboard available" })
-        .locator("svg");
-      const sessionBoard = busyRow.getByRole("img", { name: "Dashboard available" }).locator("svg");
+      expect(await sidebar.getByRole("img", { name: "Dashboard available" }).count()).toBe(0);
+      expect(await sidebar.getByRole("img", { name: "Automation attached" }).count()).toBe(0);
       const ordinaryBadge = busyRow.locator(".session-row-badge--incognito svg");
-      await homeBoard.waitFor({ state: "visible" });
-      await sessionBoard.waitFor({ state: "visible" });
-      const automationBadge = busyRow
-        .getByRole("img", { name: "Automation attached" })
-        .locator("svg");
       for (const colorScheme of ["dark", "light"] as const) {
         await page.emulateMedia({ colorScheme });
         await expect.poll(() => page.locator("html").getAttribute("data-theme")).toBe(colorScheme);
-        const automationStyle = await automationBadge.evaluate((element) => {
-          const style = getComputedStyle(element);
-          return { color: style.color, strokeWidth: style.strokeWidth };
-        });
-        for (const board of [homeBoard, sessionBoard]) {
-          expect
-            .soft(
-              await board.evaluate((element) => {
-                const style = getComputedStyle(element);
-                return { color: style.color, strokeWidth: style.strokeWidth };
-              }),
-            )
-            .toEqual(automationStyle);
-        }
         for (const reducedMotion of ["no-preference", "reduce"] as const) {
           await page.emulateMedia({ reducedMotion });
-          const spinnerColors = await busyRow
-            .locator(".session-run-spinner")
+          const spinnerColors = await page
+            .locator(`[data-session-key="${runningKey}"]`)
+            .locator(".sidebar-session-indicator .session-glyph__ring")
             .evaluate((element) => {
               const style = getComputedStyle(element);
               const accent = document.createElement("span").style;
@@ -468,10 +470,13 @@ suite.define(() => {
         }
         await page.emulateMedia({ reducedMotion: "no-preference" });
         if (captureUiProofEnabled) {
-          await page.locator(".shell-nav").screenshot({
-            animations: "disabled",
-            path: path.join(sessionSecondRowProofDir, `indicators-${colorScheme}.png`),
-          });
+          await writeFile(
+            path.join(
+              path.join(suite.artifactDir, "session-status-second-row-implementation"),
+              `indicators-${colorScheme}.png`,
+            ),
+            await takeControlUiElementScreenshot(page, page.locator(".shell-nav"), [busyRow]),
+          );
         }
       }
       const shellNav = page.locator(".shell-nav");
@@ -487,31 +492,29 @@ suite.define(() => {
           .toBe(sidebarWidth);
         await page.mouse.move(900, 400);
         if (captureUiProofEnabled) {
-          await page.screenshot({
-            animations: "disabled",
-            fullPage: true,
-            path: path.join(sessionSecondRowProofDir, `01-second-row-endcap-${sidebarWidth}.png`),
-          });
-          await shellNav.screenshot({
-            animations: "disabled",
-            path: path.join(sessionSecondRowProofDir, `01-sidebar-${sidebarWidth}.png`),
-          });
+          await writeFile(
+            path.join(
+              path.join(suite.artifactDir, "session-status-second-row-implementation"),
+              `01-second-row-endcap-${sidebarWidth}.png`,
+            ),
+            await takeControlUiViewportScreenshot(page, page.locator(".shell"), [busyRow]),
+          );
+          await writeFile(
+            path.join(
+              path.join(suite.artifactDir, "session-status-second-row-implementation"),
+              `01-sidebar-${sidebarWidth}.png`,
+            ),
+            await takeControlUiElementScreenshot(page, shellNav, [busyRow]),
+          );
         }
         badgeSizes.push(
-          await Promise.all(
-            [homeBoard, sessionBoard, ordinaryBadge].map((icon) =>
-              icon.evaluate((element) => {
-                const { height, width } = element.getBoundingClientRect();
-                return { height, width };
-              }),
-            ),
-          ),
+          await ordinaryBadge.evaluate((element) => {
+            const { height, width } = element.getBoundingClientRect();
+            return { height, width };
+          }),
         );
       }
 
-      // Rotation expands the spinner element's square DOMRect even though its
-      // circular ink is unchanged; freeze it while asserting endcap geometry.
-      await page.addStyleTag({ content: ".session-run-spinner { animation: none !important; }" });
       const layout = await busyRow.evaluate((row) => {
         const rect = (selector: string) => {
           const element = row.querySelector<HTMLElement>(selector);
@@ -529,9 +532,7 @@ suite.define(() => {
         };
         return {
           atoms: Array.from(
-            row.querySelectorAll(
-              ".sidebar-recent-session__details-endcap :is(svg, .session-run-spinner, .session-unread-dot)",
-            ),
+            row.querySelectorAll(".sidebar-recent-session__details-endcap svg"),
             (element) => {
               const box = element.getBoundingClientRect();
               return { bottom: box.bottom, left: box.left, right: box.right, top: box.top };
@@ -541,14 +542,15 @@ suite.define(() => {
           busyHeight: row.getBoundingClientRect().height,
           endcap: rect(".sidebar-recent-session__details-endcap"),
           name: rect(".sidebar-recent-session__name"),
-          spinner: rect(".session-run-spinner"),
-          state: rect(".session-row-state"),
+          unread: rect(".sidebar-session-indicator .session-unread-dot"),
+          lead: rect(".sidebar-session-indicator"),
           subtitle: rect(".sidebar-recent-session__subtitle"),
         };
       });
       const plain = await plainRow.evaluate((row) => ({
         height: row.getBoundingClientRect().height,
         singleLine: row.classList.contains("sidebar-recent-session--single-line"),
+        nameLeft: row.querySelector(".sidebar-recent-session__name")!.getBoundingClientRect().left,
       }));
 
       // A row with no secondary metadata no longer reserves the second line: it
@@ -562,15 +564,24 @@ suite.define(() => {
         (layout.subtitle.top + layout.subtitle.bottom) / 2,
         1,
       );
-      expect((layout.state.top + layout.state.bottom) / 2).toBeCloseTo(
-        (layout.subtitle.top + layout.subtitle.bottom) / 2,
+      expect((layout.unread.top + layout.unread.bottom) / 2).toBeCloseTo(
+        (layout.lead.top + layout.lead.bottom) / 2,
         1,
       );
-      expect(layout.state.left).toBeGreaterThanOrEqual(layout.endcap.left);
-      expect(layout.state.right).toBeLessThanOrEqual(layout.endcap.right);
-      expect(layout.spinner.left).toBeGreaterThanOrEqual(layout.endcap.left);
-      expect(layout.spinner.right).toBeLessThanOrEqual(layout.endcap.right);
-      expect(layout.atoms.length).toBeGreaterThanOrEqual(3);
+      expect((layout.unread.left + layout.unread.right) / 2).toBeCloseTo(
+        (layout.lead.left + layout.lead.right) / 2,
+        1,
+      );
+      expect(layout.unread.right - layout.unread.left).toBe(7);
+      expect(layout.unread.height).toBe(7);
+      expect(layout.unread.left).toBeGreaterThanOrEqual(layout.lead.left);
+      expect(layout.unread.right).toBeLessThanOrEqual(layout.lead.right);
+      expect(layout.unread.top).toBeGreaterThanOrEqual(layout.lead.top);
+      expect(layout.unread.bottom).toBeLessThanOrEqual(layout.lead.bottom);
+      expect(layout.lead.right).toBeLessThanOrEqual(layout.name.left);
+      expect(layout.name.left).toBeCloseTo(plain.nameLeft, 1);
+      expect(await busyRow.locator(".session-row-state").count()).toBe(0);
+      expect(layout.atoms).toHaveLength(1);
       for (const atom of layout.atoms) {
         expect(atom.left).toBeGreaterThanOrEqual(layout.endcap.left);
         expect(atom.right).toBeLessThanOrEqual(layout.endcap.right);
@@ -578,27 +589,34 @@ suite.define(() => {
         expect(atom.bottom).toBeLessThanOrEqual(layout.endcap.bottom);
       }
 
-      // A long title must truncate instead of crushing the collapsed row's icon
-      // endcap: the spinner/unread icons keep their intrinsic width and stay
-      // inside the row, exactly like the two-line endcap under a long subtitle.
+      // Long titles must not crush either the leading unread dot or trailing metadata.
       const longRow = page.locator(`.sidebar-recent-session[data-session-key="${longKey}"]`);
       const longLayout = await longRow.evaluate((row) => {
         const endcap = row.querySelector(".sidebar-recent-session__details-endcap");
         const name = row.querySelector(".sidebar-recent-session__name");
-        if (!endcap || !name) {
+        const lead = row.querySelector(".sidebar-session-indicator");
+        const unread = lead?.querySelector(".session-unread-dot");
+        if (!endcap || !name || !lead || !unread) {
           throw new Error("Missing long-title session row fixture");
         }
         const endcapBox = endcap.getBoundingClientRect();
         const rowBox = row.getBoundingClientRect();
+        const rect = (element: Element) => {
+          const { x, y, left, right, top, bottom, width, height } = element.getBoundingClientRect();
+          return { x, y, left, right, top, bottom, width, height };
+        };
         return {
           atoms: Array.from(
-            endcap.querySelectorAll(":scope :is(svg, .session-run-spinner, .session-unread-dot)"),
+            endcap.querySelectorAll(":scope svg"),
             (element) => element.getBoundingClientRect().width,
           ),
           endcapWidth: endcapBox.width,
           endcapRight: endcapBox.right,
           nameOverflowing: name.scrollWidth > name.clientWidth,
           rowRight: rowBox.right,
+          lead: rect(lead),
+          unread: rect(unread),
+          nameLeft: name.getBoundingClientRect().left,
           singleLine: row.classList.contains("sidebar-recent-session--single-line"),
         };
       });
@@ -608,6 +626,62 @@ suite.define(() => {
       const intrinsicAtomWidth = longLayout.atoms.reduce((sum, width) => sum + width, 0);
       expect(intrinsicAtomWidth).toBeGreaterThan(0);
       expect(longLayout.endcapWidth).toBeGreaterThanOrEqual(intrinsicAtomWidth);
+      expect(longLayout.unread.width).toBe(7);
+      expect(longLayout.unread.height).toBe(7);
+      expect(longLayout.unread.x + longLayout.unread.width / 2).toBeCloseTo(
+        longLayout.lead.x + longLayout.lead.width / 2,
+        1,
+      );
+      expect(longLayout.unread.y + longLayout.unread.height / 2).toBeCloseTo(
+        longLayout.lead.y + longLayout.lead.height / 2,
+        1,
+      );
+      expect(longLayout.unread.left).toBeGreaterThanOrEqual(longLayout.lead.left);
+      expect(longLayout.unread.right).toBeLessThanOrEqual(longLayout.lead.right);
+      expect(longLayout.unread.top).toBeGreaterThanOrEqual(longLayout.lead.top);
+      expect(longLayout.unread.bottom).toBeLessThanOrEqual(longLayout.lead.bottom);
+      expect(longLayout.lead.right).toBeLessThanOrEqual(longLayout.nameLeft);
+      expect(longLayout.nameLeft).toBeCloseTo(plain.nameLeft, 1);
+
+      const unreadRow = page.locator(`.sidebar-recent-session[data-session-key="${unreadKey}"]`);
+      const unreadBadge = unreadRow.locator(
+        ".sidebar-session-indicator .session-glyph__badge--unread",
+      );
+      const unreadTitle = unreadRow.locator(".sidebar-recent-session__name");
+      await unreadBadge.waitFor({ state: "visible" });
+      const restingBadge = await unreadBadge.boundingBox();
+      const restingTitle = await unreadTitle.boundingBox();
+      const restingWidth = await unreadTitle.evaluate((element) => element.clientWidth);
+      await unreadRow.hover();
+      if (captureUiProofEnabled) {
+        await writeFile(
+          path.join(
+            path.join(suite.artifactDir, "session-status-second-row-implementation"),
+            "03-unread-hover.png",
+          ),
+          await takeControlUiElementScreenshot(page, shellNav, [unreadRow]),
+        );
+      }
+      await unreadBadge.waitFor({ state: "visible" });
+      expect(await unreadBadge.boundingBox()).toEqual(restingBadge);
+      expect((await unreadTitle.boundingBox())?.x).toBe(restingTitle?.x);
+      const hoverWidth = await unreadTitle.evaluate((element) => element.clientWidth);
+      const actionReserve = await unreadRow.evaluate((element) =>
+        Number.parseFloat(
+          getComputedStyle(element).getPropertyValue("--session-row-actions-reserve"),
+        ),
+      );
+      // The leading badge stays fixed while the title reserves the full action width.
+      expect(restingWidth - hoverWidth).toBeCloseTo(actionReserve, 0);
+      await page.mouse.move(900, 400);
+      await unreadBadge.waitFor({ state: "visible" });
+      await unreadRow.locator("[data-session-menu]").focus();
+      await unreadBadge.waitFor({ state: "visible" });
+      expect(await unreadBadge.boundingBox()).toEqual(restingBadge);
+      expect((await unreadTitle.boundingBox())?.x).toBe(restingTitle?.x);
+      expect(await unreadTitle.evaluate((element) => element.clientWidth)).toBe(hoverWidth);
+      await sidebarResizer.focus();
+      await unreadBadge.waitFor({ state: "visible" });
 
       await busyRow.hover();
       await expect
@@ -625,18 +699,17 @@ suite.define(() => {
         )
         .toBe("1");
       if (captureUiProofEnabled) {
-        await page.screenshot({
-          fullPage: true,
-          path: path.join(sessionSecondRowProofDir, "02-hover-actions.png"),
-        });
+        await writeFile(
+          path.join(
+            path.join(suite.artifactDir, "session-status-second-row-implementation"),
+            "02-hover-actions.png",
+          ),
+          await takeControlUiViewportScreenshot(page, page.locator(".shell"), [busyRow]),
+        );
       }
       await plainRow.waitFor();
-      for (const sizes of badgeSizes) {
-        expect(sizes).toEqual([
-          { height: 12, width: 12 },
-          { height: 12, width: 12 },
-          { height: 12, width: 12 },
-        ]);
+      for (const size of badgeSizes) {
+        expect(size).toEqual({ height: 12, width: 12 });
       }
     } finally {
       await suite.closeBrowserContext(context);
@@ -644,32 +717,32 @@ suite.define(() => {
   });
 
   it("keeps the authenticated assistant avatar stable across same-agent switches", async () => {
-    const context = await suite.newBrowserContext({
-      locale: "en-US",
-      serviceWorkers: "block",
-      viewport: { height: 900, width: 1280 },
-    });
+    const context = await suite.newBrowserContext(createControlUiE2eContextOptions());
     const page = await context.newPage();
     const avatarBody = Buffer.from(
       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nPcAAAAASUVORK5CYII=",
       "base64",
     );
-    await page.route(/\/avatar\/main\?meta=1$/, (route) =>
-      route.fulfill({
-        contentType: "application/json",
-        body: JSON.stringify({ avatarUrl: "/avatar/main", avatarStatus: "local" }),
-      }),
-    );
-    await page.route(/\/avatar\/main$/, (route) =>
-      route.fulfill({ contentType: "image/png", body: avatarBody }),
-    );
+    const avatarAuthorizations: Array<string | undefined> = [];
+    await page.route(/\/avatar\/main\?v=fixture$/, (route) => {
+      avatarAuthorizations.push(route.request().headers().authorization);
+      return route.fulfill({ contentType: "image/png", body: avatarBody });
+    });
     await installMockGateway(page, {
-      methodResponses: { "sessions.list": chatSessionListResponse() },
+      methodResponses: {
+        "agent.identity.get": {
+          agentId: "main",
+          name: "OpenClaw",
+          avatar: "/avatar/main?v=fixture",
+          avatarStatus: "local",
+        },
+        "sessions.list": chatSessionListResponse(),
+      },
       sessionKey: "agent:main:session-a",
     });
 
     try {
-      await page.goto(`${suite.server.baseUrl}chat`);
+      await page.goto(controlUiSessionUrl(suite.server.baseUrl, "agent:main:session-a"));
       const documentMarker = await page.evaluate(() => {
         const marker = crypto.randomUUID();
         (window as Window & { __openclawAvatarTestDocument?: string })[
@@ -701,6 +774,7 @@ suite.define(() => {
 
       await expect.poll(() => avatar.getAttribute("src")).toMatch(/^blob:/);
       await expect.poll(() => avatar.isVisible()).toBe(true);
+      expect(avatarAuthorizations).toEqual(["Bearer e2e-device-token"]);
       expect(
         await page.evaluate(
           () =>
