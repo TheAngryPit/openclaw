@@ -669,13 +669,15 @@ export async function runGitCandidatePreflight(params: {
         rebaseFrom,
         runLint: !params.targetRevision && shouldRunDevPreflightLint(),
       });
-      // Only candidate failures and missing managers may try an older revision.
-      if (candidate.status !== "failed" && candidate.status !== "manager-unavailable") {
+      // Node requirements and package managers can differ across older revisions.
+      if (candidate.status === "ok" || candidate.status === "insufficient-space") {
         tested = candidate;
         break;
       }
-      // A missing manager must not hide another candidate's checkout/build failure.
-      if (tested?.status !== "failed") {
+      // Preserve build failures over manager failures, and manager failures over
+      // runtime-only rejection when a compatible candidate was attempted.
+      const runtimeMismatch = candidate.status === "node-runtime-incompatible";
+      if (tested?.status !== "failed" && (!runtimeMismatch || !tested)) {
         tested = candidate;
       }
     }

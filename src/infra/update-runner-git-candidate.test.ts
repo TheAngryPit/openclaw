@@ -254,7 +254,60 @@ describe("Git candidate activation", () => {
     },
   );
 
-  it("rejects a rebased dev candidate with an incompatible Node engine before build", async () => {
+  it("falls back when only the latest dev candidate requires an incompatible Node runtime", async () => {
+    const requiredMajor = Number.parseInt(process.versions.node.split(".")[0]!, 10) + 1;
+    const requiredEngine = `>=${requiredMajor}.0.0`;
+    const olderCandidate = await advanceRemote();
+    await fs.writeFile(
+      path.join(remote, "package.json"),
+      JSON.stringify({
+        name: "openclaw",
+        version: "2026.9.1",
+        packageManager: "pnpm@12.0.0",
+        engines: { node: requiredEngine },
+      }),
+    );
+    await git(remote, "add", "package.json");
+    await git(remote, "commit", "-m", "require newer node");
+    const incompatibleCandidate = await git(remote, "rev-parse", "HEAD");
+
+    const packageManagerCommands: string[][] = [];
+    const command = runCommand;
+    runCommand = async (argv, options) => {
+      if (["pnpm", "npm", "corepack", "bun"].includes(argv[0]!)) {
+        packageManagerCommands.push([...argv]);
+      }
+      return command(argv, options);
+    };
+
+    const result = await update();
+
+    expect(result.status, JSON.stringify(result)).toBe("ok");
+    const runtimeSteps = result.steps.filter((step) =>
+      step.name.startsWith("preflight node runtime ("),
+    );
+    expect(runtimeSteps).toHaveLength(1);
+    expect(runtimeSteps[0]).toMatchObject({
+      name: `preflight node runtime (${incompatibleCandidate.slice(0, 8)})`,
+      exitCode: 1,
+    });
+    const runtimeOutput = `${runtimeSteps[0]?.stdoutTail ?? ""}\n${runtimeSteps[0]?.stderrTail ?? ""}`;
+    expect(runtimeOutput).toContain(requiredEngine);
+    expect(runtimeOutput).toContain(process.execPath);
+    expect(runtimeOutput).toContain(process.versions.node);
+    expect(packageManagerCommands).toContainEqual(["pnpm", "build"]);
+    expect(
+      result.steps.some(
+        (step) => step.name === `preflight checkout (${olderCandidate.slice(0, 8)})`,
+      ),
+    ).toBe(true);
+    expect(events).toEqual(["build", "validate", "stop", "migrate"]);
+    expect(await git(root, "rev-parse", "HEAD")).toBe(olderCandidate);
+    await expectRuntime(root, olderCandidate);
+  });
+
+  it("rejects after all bounded rebased dev candidates require an incompatible Node runtime", async () => {
+    const upstreamBase = beforeSha;
     const requiredMajor = Number.parseInt(process.versions.node.split(".")[0]!, 10) + 1;
     const requiredEngine = `>=${requiredMajor}.0.0`;
     await fs.writeFile(
@@ -275,16 +328,13 @@ describe("Git candidate activation", () => {
     await fs.writeFile(path.join(remote, "latest.txt"), "latest\n");
     await git(remote, "add", "latest.txt");
     await git(remote, "commit", "-m", "latest candidate");
-    const incompatibleCandidate = await git(remote, "rev-parse", "HEAD");
+    const latestCandidate = await git(remote, "rev-parse", "HEAD");
 
     const packageManagerCommands: string[][] = [];
     const command = runCommand;
     runCommand = async (argv, options) => {
       if (["pnpm", "npm", "corepack", "bun"].includes(argv[0]!)) {
         packageManagerCommands.push([...argv]);
-      }
-      if (argv[0] === "pnpm" && argv[1] === "build") {
-        return { code: 1, stdout: "", stderr: "candidate build failed" };
       }
       return command(argv, options);
     };
@@ -298,21 +348,19 @@ describe("Git candidate activation", () => {
     const runtimeSteps = result.steps.filter((step) =>
       step.name.startsWith("preflight node runtime ("),
     );
-    expect(runtimeSteps).toHaveLength(1);
-    expect(runtimeSteps[0]).toMatchObject({
-      name: `preflight node runtime (${incompatibleCandidate.slice(0, 8)})`,
-      exitCode: 1,
-    });
-    const runtimeOutput = `${runtimeSteps[0]?.stdoutTail ?? ""}\n${runtimeSteps[0]?.stderrTail ?? ""}`;
-    expect(runtimeOutput).toContain(requiredEngine);
-    expect(runtimeOutput).toContain(process.execPath);
-    expect(runtimeOutput).toContain(process.versions.node);
+    expect(runtimeSteps).toMatchObject(
+      [latestCandidate, olderCandidate, upstreamBase].map((sha) => ({
+        name: `preflight node runtime (${sha.slice(0, 8)})`,
+        exitCode: 1,
+      })),
+    );
+    for (const step of runtimeSteps) {
+      const output = `${step.stdoutTail ?? ""}\n${step.stderrTail ?? ""}`;
+      expect(output).toContain(requiredEngine);
+      expect(output).toContain(process.execPath);
+      expect(output).toContain(process.versions.node);
+    }
     expect(packageManagerCommands).toEqual([]);
-    expect(
-      result.steps.some(
-        (step) => step.name === `preflight checkout (${olderCandidate.slice(0, 8)})`,
-      ),
-    ).toBe(false);
     expect(stopped).toBe(false);
     expect(events).toEqual([]);
     expect(await git(root, "rev-parse", "HEAD")).toBe(beforeSha);
