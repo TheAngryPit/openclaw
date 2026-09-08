@@ -1,8 +1,103 @@
 import { describe, expect, it, vi } from "vitest";
+import { GatewayPendingRequests } from "../../../../packages/gateway-client/src/pending-request.js";
+import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
-import { loadModelProvidersData } from "./load.ts";
+import { createTestGatewayClient } from "../../test-helpers/gateway-client.ts";
+import { loadModelProviderCost, loadModelProvidersData, loadModelProviderUsage } from "./load.ts";
 
 describe("loadModelProvidersData", () => {
+  it.each([false, true])(
+    "reads the refreshed catalog after auth publication, including auth failure %s",
+    async (authFails) => {
+      const auth = createDeferred();
+      let authPending = true;
+      const client = createTestGatewayClient(async (method) => {
+        if (method === "models.authStatus") {
+          try {
+            await auth.promise;
+          } finally {
+            authPending = false;
+          }
+          return { ts: 1, providers: [] };
+        }
+        if (method === "models.list") {
+          if (authPending) {
+            throw new Error(
+              "Model catalog changed while preparing this result. Retry the request.",
+            );
+          }
+          return { models: [{ id: "published", name: "Published", provider: "ollama" }] };
+        }
+        if (method === "config.get") {
+          return { config: {}, hash: "hash" };
+        }
+        throw new Error(`Unexpected request: ${method}`);
+      });
+
+      const loading = loadModelProvidersData(client, { agentId: "writer", refresh: true });
+      if (authFails) {
+        auth.reject(new Error("Authentication status unavailable"));
+      } else {
+        auth.resolve();
+      }
+      const result = await loading;
+
+      expect(result.models).toEqual([{ id: "published", name: "Published", provider: "ollama" }]);
+      expect(result.catalogError).toBeNull();
+      expect(result.error).toBe(authFails ? "Authentication status unavailable" : null);
+    },
+  );
+
+  it("does not acquire models when the page retires during auth publication", async () => {
+    const auth = createDeferred();
+    const modelRequests: unknown[] = [];
+    const client = createTestGatewayClient(async (method, params) => {
+      if (method === "models.authStatus") {
+        await auth.promise;
+        return { ts: 1, providers: [] };
+      }
+      if (method === "models.list") {
+        modelRequests.push(params);
+        return { models: [] };
+      }
+      if (method === "config.get") {
+        return { config: {}, hash: "hash" };
+      }
+      throw new Error(`Unexpected request: ${method}`);
+    });
+    const controller = new AbortController();
+
+    const loading = loadModelProvidersData(client, {
+      agentId: "writer",
+      refresh: true,
+      signal: controller.signal,
+    });
+    controller.abort();
+    auth.resolve();
+    await loading;
+
+    expect(modelRequests).toEqual([]);
+  });
+
+  it("keeps failed provider outcomes from a fulfilled explicit refresh", async () => {
+    const client = createTestGatewayClient(async (method) => {
+      if (method === "models.list") {
+        return {
+          models: [{ provider: "ollama", id: "retained", name: "Retained model", available: true }],
+          providerOutcomes: [{ provider: "ollama", status: "unavailable" }],
+        };
+      }
+      return method === "models.authStatus"
+        ? { ts: 1, providers: [] }
+        : { config: {}, hash: "hash" };
+    });
+    const result = await loadModelProvidersData(client, { agentId: "main", refresh: true });
+
+    expect(result.providerOutcomes).toEqual([{ provider: "ollama", status: "unavailable" }]);
+    expect(result.models).toContainEqual(expect.objectContaining({ id: "retained" }));
+    expect(result.error).toBeNull();
+  });
+
   it("keeps full catalog discovery out of the initial page load", async () => {
     const request = vi.fn(async (method: string, _params?: unknown) => {
       switch (method) {
@@ -22,7 +117,7 @@ describe("loadModelProvidersData", () => {
     });
     const client = { request } as unknown as GatewayBrowserClient;
 
-    await loadModelProvidersData(client, { agentId: "writer" });
+    const result = await loadModelProvidersData(client, { agentId: "writer" });
 
     expect(request).toHaveBeenCalledWith("models.list", {
       view: "configured",
@@ -35,6 +130,10 @@ describe("loadModelProvidersData", () => {
           method === "models.list" && (params as { view?: string } | undefined)?.view === "all",
       ),
     ).toHaveLength(0);
+    expect(request.mock.calls.some(([method]) => method === "usage.status")).toBe(false);
+    expect(request.mock.calls.some(([method]) => method === "sessions.usage")).toBe(false);
+    expect(result.providerUsage).toBeNull();
+    expect(result.costByProvider).toBeNull();
   });
 
   it("scopes only credential status to the selected agent", async () => {
@@ -66,10 +165,8 @@ describe("loadModelProvidersData", () => {
       ["models.list", { view: "configured", agentId: "writer", refresh: true }],
     ]);
     expect(result.providerOutcomes).toEqual([]);
-    expect(request).toHaveBeenCalledWith("usage.status");
-    const sessionUsageCall = request.mock.calls.find(([method]) => method === "sessions.usage");
-    expect(sessionUsageCall?.[1]).not.toHaveProperty("agentId");
-    expect(sessionUsageCall?.[1]).toHaveProperty("agentScope", "all");
+    expect(request.mock.calls.some(([method]) => method === "usage.status")).toBe(false);
+    expect(request.mock.calls.some(([method]) => method === "sessions.usage")).toBe(false);
   });
 
   it("does not send a configured refresh for an already-retired page task", async () => {
@@ -139,6 +236,35 @@ describe("loadModelProvidersData", () => {
     expect(result.error).toBeNull();
   });
 
+  it("surfaces unavailable auth preparation without discarding configured models", async () => {
+    const unavailable = {
+      code: "PREPARED_MODEL_AUTH_UNAVAILABLE",
+      message: "Model authentication status is unavailable. Refresh Models after setup finishes.",
+    };
+    const request = vi.fn(async (method: string) => {
+      switch (method) {
+        case "models.authStatus":
+          return { ts: 1, providers: [], unavailable };
+        case "models.list":
+          return { models: [{ id: "configured", name: "Configured", provider: "test-provider" }] };
+        case "config.get":
+          return { config: {}, hash: "hash" };
+        default:
+          throw new Error(`Unexpected request: ${method}`);
+      }
+    });
+
+    const result = await loadModelProvidersData({ request } as unknown as GatewayBrowserClient, {
+      agentId: "main",
+    });
+
+    expect(result.error).toBe(unavailable.message);
+    expect(result.authStatus).toMatchObject({ unavailable });
+    expect(result.models).toEqual([
+      { id: "configured", name: "Configured", provider: "test-provider" },
+    ]);
+  });
+
   it("degrades an invalid auth-status response without discarding other provider data", async () => {
     const request = vi.fn(async (method: string) => {
       switch (method) {
@@ -165,8 +291,8 @@ describe("loadModelProvidersData", () => {
     expect(result.providerOutcomes).toEqual([]);
     expect(result.catalogError).toBeNull();
     expect(result.config).toEqual({});
-    expect(result.providerUsage).toEqual({ ok: true, value: { updatedAt: 1, providers: [] } });
-    expect(result.costByProvider).toEqual([]);
+    expect(result.providerUsage).toBeNull();
+    expect(result.costByProvider).toBeNull();
     expect(result.error).toBeNull();
   });
 
@@ -189,13 +315,12 @@ describe("loadModelProvidersData", () => {
     });
     const client = { request } as unknown as GatewayBrowserClient;
 
-    const result = await loadModelProvidersData(client, { agentId: "main" });
+    const result = await loadModelProviderUsage(client, new AbortController().signal);
 
-    expect(result.providerUsage).toEqual({
+    expect(result).toEqual({
       ok: false,
       error: { kind: "request-failed" },
     });
-    expect(result.error).toBeNull();
   });
 
   it("keeps provider-scoped usage errors as data instead of a global request failure", async () => {
@@ -227,13 +352,59 @@ describe("loadModelProvidersData", () => {
     });
     const client = { request } as unknown as GatewayBrowserClient;
 
-    const result = await loadModelProvidersData(client, { agentId: "main" });
+    const result = await loadModelProviderUsage(client, new AbortController().signal);
 
-    expect(result.providerUsage).toMatchObject({
+    expect(result).toMatchObject({
       ok: true,
       value: { providers: [{ error: "provider API unavailable" }] },
     });
   });
+
+  it.each(["before dispatch", "while pending"] as const)(
+    "retires both supplemental requests when aborted %s",
+    async (when) => {
+      const pending = new GatewayPendingRequests({
+        createRequestId: () => "models-test",
+        nowMs: () => 0,
+      });
+      const sent: Array<{ method: string; params?: Record<string, unknown> }> = [];
+      const sender = {
+        send(frame: string) {
+          sent.push(JSON.parse(frame));
+        },
+      };
+      const client = {
+        request: <T>(...args: Parameters<GatewayBrowserClient["request"]>) =>
+          pending.request<T>(sender, ...args),
+      } as GatewayBrowserClient;
+      const controller = new AbortController();
+      if (when === "before dispatch") {
+        controller.abort();
+      }
+      const loading = Promise.allSettled([
+        loadModelProviderUsage(client, controller.signal),
+        loadModelProviderCost(client, controller.signal),
+      ]);
+      try {
+        if (when === "while pending") {
+          expect(sent.map(({ method }) => method)).toEqual(["usage.status", "sessions.usage"]);
+          expect(sent[0]?.params).toBeUndefined();
+          expect(sent[1]?.params).toMatchObject({ agentScope: "all", groupBy: "family" });
+          expect(sent[1]?.params).not.toHaveProperty("agentId");
+          expect(pending.hasPending).toBe(true);
+          controller.abort();
+        } else {
+          expect(sent).toEqual([]);
+        }
+        expect(pending.hasPending).toBe(false);
+        expect(await loading).toMatchObject([{ status: "rejected" }, { status: "rejected" }]);
+      } finally {
+        // Release any leaked wait if a cancellation regression makes the assertion fail.
+        pending.flush(new Error("test cleanup"));
+        await loading;
+      }
+    },
+  );
 
   it("surfaces an explicit catalog refresh failure while retaining cached configured models", async () => {
     const request = vi.fn(async (method: string, params?: unknown) => {
@@ -270,6 +441,7 @@ describe("loadModelProvidersData", () => {
     expect(result.models).toEqual([{ id: "cached", name: "Cached", provider: "openai" }]);
     expect(request.mock.calls.filter(([method]) => method === "models.list")).toEqual([
       ["models.list", { view: "configured", agentId: "writer", refresh: true }],
+      ["models.list", { view: "configured", agentId: "writer", preparedOnly: true }],
     ]);
   });
 });

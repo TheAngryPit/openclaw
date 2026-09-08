@@ -42,6 +42,7 @@ import {
   runInstalledBrowserOverrideImportSmoke,
   shouldRunWindowsInstalledBrowserOverrideImportSmoke,
   verifyInstalledCandidate,
+  withNpmDiagnostics,
 } from "./install.ts";
 import {
   ensureDevUpdateGitInstall,
@@ -60,6 +61,7 @@ import {
 } from "./installed.ts";
 import { installLaneCompanions } from "./lane-companions.ts";
 import { maybeRunDiscordRoundtrip } from "./network-smokes.ts";
+import { runPackagedSelfUpdateTransition } from "./packaged-self-update.ts";
 import {
   reserveGatewayPortForLane,
   runCleanup,
@@ -121,6 +123,9 @@ export async function runFreshLane(params: LaneBaseParams & { build: CandidateBu
 
     await installLaneCompanions({ ...params, lane, env });
 
+    // Own the configured port through setup; release only when the gateway can claim it.
+    const gatewayPortReservation = await reserveGatewayPortForLane(lane);
+    cleanup.push(() => gatewayPortReservation.release());
     await runTimedLanePhase(lane, "onboard", async () => {
       await runOnboard({
         lane,
@@ -139,13 +144,14 @@ export async function runFreshLane(params: LaneBaseParams & { build: CandidateBu
       });
     });
 
-    const gateway = await runTimedLanePhase(lane, "start-gateway", async () =>
-      startGateway({
+    const gateway = await runTimedLanePhase(lane, "start-gateway", async () => {
+      await gatewayPortReservation.release();
+      return startGateway({
         lane,
         env,
         logPath: join(params.logsDir, "fresh-gateway.log"),
-      }),
-    );
+      });
+    });
     gatewayHolder.current = gateway;
     cleanup.push(() => stopGateway(gatewayHolder.current));
 
@@ -246,6 +252,15 @@ export async function runUpgradeLane(
       version: readInstalledVersion(lane.prefixDir),
     };
 
+    if (baseline.version === "2026.9.2" && params.build.candidateVersion === "2026.9.3") {
+      return await runPackagedSelfUpdateTransition({
+        ...params,
+        lane,
+        env,
+        baselineVersion: baseline.version,
+      });
+    }
+
     const updateEnv = buildRealUpdateEnv(env);
     const updateArgs = buildPackagedUpgradeUpdateArgs(params.candidateUrl);
     const updateLogPath = join(params.logsDir, "upgrade-update.log");
@@ -253,14 +268,16 @@ export async function runUpgradeLane(
     let usedWindowsPackagedUpgradeTimeoutFallback = false;
     await runTimedLanePhase(lane, "update", async () => {
       try {
-        updateResult = await runOpenClaw({
-          lane,
-          env: updateEnv,
-          args: updateArgs,
-          logPath: updateLogPath,
-          timeoutMs: updateTimeoutMs(),
-          check: false,
-        });
+        updateResult = await withNpmDiagnostics(lane.homeDir, updateLogPath, updateEnv, () =>
+          runOpenClaw({
+            lane,
+            env: updateEnv,
+            args: updateArgs,
+            logPath: updateLogPath,
+            timeoutMs: updateTimeoutMs(),
+            check: false,
+          }),
+        );
       } catch (error) {
         if (!isRecoverableWindowsPackagedUpgradeTimeoutError(error, process.platform)) {
           throw error;
@@ -345,6 +362,9 @@ export async function runUpgradeLane(
 
     await installLaneCompanions({ ...params, lane, env });
 
+    // Own the configured port through setup; release only when the gateway can claim it.
+    const gatewayPortReservation = await reserveGatewayPortForLane(lane);
+    cleanup.push(() => gatewayPortReservation.release());
     await runTimedLanePhase(lane, "onboard", async () => {
       await runOnboard({
         lane,
@@ -363,13 +383,14 @@ export async function runUpgradeLane(
       });
     });
 
-    const gateway = await runTimedLanePhase(lane, "start-gateway", async () =>
-      startGateway({
+    const gateway = await runTimedLanePhase(lane, "start-gateway", async () => {
+      await gatewayPortReservation.release();
+      return startGateway({
         lane,
         env,
         logPath: join(params.logsDir, "upgrade-gateway.log"),
-      }),
-    );
+      });
+    });
     gatewayHolder.current = gateway;
     cleanup.push(() => stopGateway(gatewayHolder.current));
 
@@ -788,6 +809,8 @@ export async function runDevUpdateSuite(
 
     await installLaneCompanions({ ...params, lane, env, cliPath: verifiedShell.cliPath });
 
+    const gatewayPortReservation = await reserveGatewayPortForLane(lane);
+    cleanup.push(() => gatewayPortReservation.release());
     logLanePhase(lane, "onboard");
     await runOnboardWithInstalledCli({
       lane,
@@ -796,6 +819,7 @@ export async function runDevUpdateSuite(
       providerConfig: params.providerConfig,
       installDaemon: false,
       logPath: join(params.logsDir, "dev-update-onboard.log"),
+      allocateGatewayPort: false,
     });
 
     logLanePhase(lane, "models-set");
@@ -807,6 +831,7 @@ export async function runDevUpdateSuite(
       logPath: join(params.logsDir, "dev-update-models-set.log"),
     });
 
+    await gatewayPortReservation.release();
     logLanePhase(lane, "gateway-start");
     const gateway = await startManualGatewayFromInstalledCli({
       lane,

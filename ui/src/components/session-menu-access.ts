@@ -1,4 +1,5 @@
 import type { ApplicationGatewaySnapshot } from "../app/gateway.ts";
+import { t } from "../i18n/index.ts";
 import { readSessionMethodAccess } from "../lib/session-method-access.ts";
 import type { CloudWorkerStopAction } from "./cloud-worker-stop.ts";
 import type { SessionMenuActionKind } from "./session-menu.ts";
@@ -7,6 +8,7 @@ type SessionMenuAccessRow = {
   key: string;
   sessionId?: string;
   archived?: boolean;
+  pinnable?: boolean;
 };
 
 export function sessionMenuReasons(params: {
@@ -82,8 +84,10 @@ export function sessionMenuReasons(params: {
           "toggle-pin": patchReason,
           rename: patchReason,
           "set-icon": patchReason,
+          "set-color": patchReason,
         }
       : {}),
+    ...(session.pinnable === false ? { "toggle-pin": t("sessionsView.pinRootSessionsOnly") } : {}),
     ...(unreadReason ? { "toggle-unread": unreadReason } : {}),
     ...(categoryReason ? { "move-to-group": categoryReason } : {}),
     ...(archiveReason ? { "toggle-archived": archiveReason } : {}),

@@ -71,9 +71,15 @@ export const buzzPlugin = createChatChannelPlugin<ResolvedBuzzAccount, BuzzProbe
       threads: true,
     },
     threading: {
-      // Only automatic replies carry replyDelivery; explicit message-tool targets stay intact.
-      resolveReplyTransport: ({ replyDelivery }) =>
-        replyDelivery?.replyToMode === "off" ? { threadId: null, replyToId: null } : null,
+      resolveReplyTransport: ({ replyDelivery, threadId, replyToId, replyToIsExplicit }) => {
+        if (replyDelivery?.replyToMode === "off") {
+          return { threadId: null, replyToId: null };
+        }
+        // Implicit replies belong to the root; explicit child targets keep their nesting.
+        return threadId && replyToId && !replyToIsExplicit
+          ? { threadId, replyToId: String(threadId) }
+          : null;
+      },
     },
     agentPrompt: {
       messageToolHints: () => [
@@ -81,7 +87,7 @@ export const buzzPlugin = createChatChannelPlugin<ResolvedBuzzAccount, BuzzProbe
         "- Buzz mentions: write a unique current room member as `@Display Name`. For an explicit identity, include `nostr:npub...`; the public key must belong to the target room. Any unresolved or ambiguous label needs an explicit identity for every intended member.",
       ],
     },
-    reload: { configPrefixes: ["channels.buzz"] },
+    reload: { configPrefixes: ["channels.buzz"], accountScopedRestart: true },
     configSchema: BuzzConfigSchema,
     setupContract: buzzSetupContract,
     setupWizard: buzzSetupWizard,
