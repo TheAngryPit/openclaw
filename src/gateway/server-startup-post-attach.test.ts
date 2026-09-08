@@ -4,6 +4,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  createInfoErrorLogger,
+  createInfoWarnErrorLogger,
+} from "../../test/helpers/mock-logger.js";
 import { createDeferred } from "../../test/helpers/promise.js";
 import type { AuthProfileFailureReason } from "../agents/auth-profiles/types.js";
 import * as configPaths from "../config/paths.js";
@@ -11,6 +15,7 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { writeRestartSentinel } from "../infra/restart-sentinel.js";
 import type { PluginHookGatewayContext, PluginHookHandlerMap } from "../plugins/hook-types.js";
 import { registerPluginHttpRoute } from "../plugins/http-registry.js";
+import { createPluginMetadataSnapshotFixture } from "../plugins/plugin-metadata.test-support.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import { getPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
 import type { PluginServicesHandle } from "../plugins/services.js";
@@ -1753,6 +1758,21 @@ describe("startGatewayPostAttachRuntime", () => {
   });
 
   it("adopts a winning plugin generation without publishing stale deferred startup state", async () => {
+    const { logGatewayStartup } =
+      await vi.importActual<typeof import("./server-startup-log.js")>("./server-startup-log.js");
+    const log = { info: vi.fn(), warn: vi.fn() };
+    const startupConfig: OpenClawConfig = {
+      agents: { defaults: { model: "fixture/stale", thinkingDefault: "off" } },
+      channels: { "diagnostic-chat": { enabled: true } },
+    };
+    const winningConfig: OpenClawConfig = {
+      ...startupConfig,
+      agents: { defaults: { model: "fixture/current", thinkingDefault: "high" } },
+      plugins: { entries: { replacement: { enabled: true } } },
+    };
+    const winningMetadata = createPluginMetadataSnapshotFixture({
+      plugins: [{ id: "replacement", channels: ["diagnostic-chat"], origin: "global" }],
+    });
     const startupRegistry = {
       plugins: [{ id: "startup", status: "loaded" }],
       typedHooks: [],
@@ -1800,8 +1820,17 @@ describe("startGatewayPostAttachRuntime", () => {
         unlockStartupMethods,
         pluginRuntimeClaim,
         getCurrentPluginRegistry: () => winningRegistry,
+        getCurrentPluginMetadataSnapshot: () => winningMetadata,
+        getCurrentActivationSourceConfig: () => winningConfig,
+        cfgAtStart: startupConfig,
+        activationSourceConfig: startupConfig,
+        getConfig: () => winningConfig,
+        log,
       }),
-      createPostAttachRuntimeDeps({ startGatewaySidecars: startGatewaySidecarsCandidate }),
+      createPostAttachRuntimeDeps({
+        startGatewaySidecars: startGatewaySidecarsCandidate,
+        logGatewayStartup,
+      }),
     );
     await waitForGatewayTestState(() => expect(loadStartupPlugins).toHaveBeenCalledOnce());
     startupClaimCurrent = false;
@@ -1813,6 +1842,14 @@ describe("startGatewayPostAttachRuntime", () => {
     expect(onPluginServices).not.toHaveBeenCalled();
     expect(unlockStartupMethods).toHaveBeenCalledOnce();
     expect(onSidecarsReady).toHaveBeenCalledOnce();
+    expect
+      .soft(log.info)
+      .toHaveBeenCalledWith(
+        "agent model: fixture/current (thinking=high, fast=off)",
+        expect.any(Object),
+      );
+    expect(log.info).toHaveBeenCalledWith("http server listening (1 plugin: replacement)");
+    expect(log.warn).not.toHaveBeenCalled();
   });
 
   it("waits for sidecars by default before returning", async () => {
@@ -2291,15 +2328,8 @@ describe("startGatewayPostAttachRuntime", () => {
           deps: {} as never,
           startChannels,
           log: { warn: vi.fn() },
-          logHooks: {
-            info: vi.fn(),
-            warn: vi.fn(),
-            error: vi.fn(),
-          },
-          logChannels: {
-            info: vi.fn(),
-            error: vi.fn(),
-          },
+          logHooks: createInfoWarnErrorLogger(),
+          logChannels: createInfoErrorLogger(),
         });
 
         expect(startChannels).toHaveBeenCalledTimes(1);
@@ -2976,11 +3006,7 @@ describe("startGatewayPostAttachRuntime", () => {
           deps: {} as never,
           startChannels: vi.fn(async () => {}),
           log: { warn: vi.fn() },
-          logHooks: {
-            info: vi.fn(),
-            warn: vi.fn(),
-            error: vi.fn(),
-          },
+          logHooks: createInfoWarnErrorLogger(),
           logChannels,
           startupTrace: trace.startupTrace,
           prewarmPrimaryModel,
@@ -3003,6 +3029,38 @@ describe("startGatewayPostAttachRuntime", () => {
     expect(onChannelsStarted).toHaveBeenCalledOnce();
   });
 
+  it("continues startup tracing after a recovered channel startup error", async () => {
+    const trace = createStartupTraceRecorder();
+    const logChannels = { info: vi.fn(), error: vi.fn() };
+
+    await withEnvAsync(
+      { OPENCLAW_SKIP_CHANNELS: undefined, OPENCLAW_SKIP_PROVIDERS: undefined },
+      async () => {
+        await startGatewaySidecars({
+          cfg: { hooks: { internal: { enabled: false } } } as never,
+          pluginRegistry: createPostAttachParams().pluginRegistry,
+          defaultWorkspaceDir: testState.workspaceDir,
+          deps: {} as never,
+          startChannels: vi.fn(async () => {
+            throw new Error("channel unavailable");
+          }),
+          log: { warn: vi.fn() },
+          logHooks: createInfoWarnErrorLogger(),
+          logChannels,
+          startupTrace: trace.startupTrace,
+        });
+      },
+    );
+
+    expect(logChannels.error).toHaveBeenCalledWith(
+      "channel startup failed: Error: channel unavailable",
+    );
+    expect(trace.measures.indexOf("sidecars.channel-start")).toBeGreaterThanOrEqual(0);
+    expect(trace.measures.indexOf("sidecars.plugin-services")).toBeGreaterThan(
+      trace.measures.indexOf("sidecars.channel-start"),
+    );
+  });
+
   it("records prepared runtime build grouping in the startup trace", async () => {
     const trace = createStartupTraceRecorder();
 
@@ -3013,11 +3071,7 @@ describe("startGatewayPostAttachRuntime", () => {
       deps: {} as never,
       startChannels: vi.fn(async () => {}),
       log: { warn: vi.fn() },
-      logHooks: {
-        info: vi.fn(),
-        warn: vi.fn(),
-        error: vi.fn(),
-      },
+      logHooks: createInfoWarnErrorLogger(),
       logChannels: { info: vi.fn(), error: vi.fn() },
       startupTrace: trace.startupTrace,
     });
@@ -3249,15 +3303,8 @@ describe("startGatewayPostAttachRuntime", () => {
       startChannels,
       prewarmPrimaryModel,
       log: { warn: vi.fn() },
-      logHooks: {
-        info: vi.fn(),
-        warn: vi.fn(),
-        error: vi.fn(),
-      },
-      logChannels: {
-        info: vi.fn(),
-        error: vi.fn(),
-      },
+      logHooks: createInfoWarnErrorLogger(),
+      logChannels: createInfoErrorLogger(),
     });
 
     await waitForGatewayTestState(() => {
@@ -3423,15 +3470,8 @@ describe("startGatewayPostAttachRuntime", () => {
         startChannels,
         prewarmPrimaryModel,
         log: { warn: vi.fn() },
-        logHooks: {
-          info: vi.fn(),
-          warn: vi.fn(),
-          error: vi.fn(),
-        },
-        logChannels: {
-          info: vi.fn(),
-          error: vi.fn(),
-        },
+        logHooks: createInfoWarnErrorLogger(),
+        logChannels: createInfoErrorLogger(),
       }),
     ).rejects.toBe(modelRuntimeError);
 
@@ -3454,15 +3494,8 @@ describe("startGatewayPostAttachRuntime", () => {
       deps: {} as never,
       startChannels,
       log,
-      logHooks: {
-        info: vi.fn(),
-        warn: vi.fn(),
-        error: vi.fn(),
-      },
-      logChannels: {
-        info: vi.fn(),
-        error: vi.fn(),
-      },
+      logHooks: createInfoWarnErrorLogger(),
+      logChannels: createInfoErrorLogger(),
     });
 
     expect(log.warn).toHaveBeenCalledWith(
@@ -3519,15 +3552,8 @@ describe("startGatewayPostAttachRuntime", () => {
         onPostReadySidecars(sidecars);
       },
       log,
-      logHooks: {
-        info: vi.fn(),
-        warn: vi.fn(),
-        error: vi.fn(),
-      },
-      logChannels: {
-        info: vi.fn(),
-        error: vi.fn(),
-      },
+      logHooks: createInfoWarnErrorLogger(),
+      logChannels: createInfoErrorLogger(),
     });
     sidecarStartReturned = true;
 
@@ -3573,15 +3599,8 @@ describe("startGatewayPostAttachRuntime", () => {
       shouldCreatePostReadySidecars: () => !closeStarted,
       onPostReadySidecars,
       log: { warn: vi.fn() },
-      logHooks: {
-        info: vi.fn(),
-        warn: vi.fn(),
-        error: vi.fn(),
-      },
-      logChannels: {
-        info: vi.fn(),
-        error: vi.fn(),
-      },
+      logHooks: createInfoWarnErrorLogger(),
+      logChannels: createInfoErrorLogger(),
     });
 
     await waitForGatewayTestState(() => {
@@ -3780,15 +3799,8 @@ describe("startGatewayPostAttachRuntime", () => {
       deps: {} as never,
       startChannels: vi.fn(async () => {}),
       log,
-      logHooks: {
-        info: vi.fn(),
-        warn: vi.fn(),
-        error: vi.fn(),
-      },
-      logChannels: {
-        info: vi.fn(),
-        error: vi.fn(),
-      },
+      logHooks: createInfoWarnErrorLogger(),
+      logChannels: createInfoErrorLogger(),
     });
 
     expect(result.postReadySidecars).toHaveLength(2);
@@ -3809,15 +3821,8 @@ describe("startGatewayPostAttachRuntime", () => {
       deps: {} as never,
       startChannels: vi.fn(async () => {}),
       log: { warn: vi.fn() },
-      logHooks: {
-        info: vi.fn(),
-        warn: vi.fn(),
-        error: vi.fn(),
-      },
-      logChannels: {
-        info: vi.fn(),
-        error: vi.fn(),
-      },
+      logHooks: createInfoWarnErrorLogger(),
+      logChannels: createInfoErrorLogger(),
     });
 
     expect(result.postReadySidecars).toHaveLength(2);
@@ -3860,15 +3865,8 @@ describe("startGatewayPostAttachRuntime", () => {
             startChannels: vi.fn(async () => {}),
             shouldCreatePostReadySidecars: () => !closing,
             log: { warn: vi.fn() },
-            logHooks: {
-              info: vi.fn(),
-              warn: vi.fn(),
-              error: vi.fn(),
-            },
-            logChannels: {
-              info: vi.fn(),
-              error: vi.fn(),
-            },
+            logHooks: createInfoWarnErrorLogger(),
+            logChannels: createInfoErrorLogger(),
           }),
         );
 
@@ -3910,9 +3908,8 @@ describe("startGatewayPostAttachRuntime", () => {
       };
       if (
         scoped.readOnly !== true ||
-        scoped.scopedLiveProviderDiscovery !== true ||
-        scoped.providerDiscoveryProviderIds?.[0] !== "openai" ||
-        scoped.providerDiscoveryProviderIds.length !== 1
+        scoped.scopedLiveProviderDiscovery !== undefined ||
+        scoped.providerDiscoveryProviderIds !== undefined
       ) {
         return await hoisted.loadFullModelCatalog();
       }
@@ -3928,15 +3925,8 @@ describe("startGatewayPostAttachRuntime", () => {
       deps: {} as never,
       startChannels: vi.fn(async () => {}),
       log: { warn: vi.fn() },
-      logHooks: {
-        info: vi.fn(),
-        warn: vi.fn(),
-        error: vi.fn(),
-      },
-      logChannels: {
-        info: vi.fn(),
-        error: vi.fn(),
-      },
+      logHooks: createInfoWarnErrorLogger(),
+      logChannels: createInfoErrorLogger(),
     });
 
     expect(result.postReadySidecars).toHaveLength(2);
@@ -3949,8 +3939,6 @@ describe("startGatewayPostAttachRuntime", () => {
     expect(hoisted.loadModelCatalog).toHaveBeenCalledWith({
       config: expect.any(Object),
       readOnly: true,
-      providerDiscoveryProviderIds: ["openai"],
-      scopedLiveProviderDiscovery: true,
     });
     expect(hoisted.getModelRefStatus).toHaveBeenCalledWith(
       expect.objectContaining({ ref: { provider: "openai", model: "gpt-5.4" } }),
@@ -4365,15 +4353,8 @@ describe("startGatewayPostAttachRuntime", () => {
         deps,
         startChannels: vi.fn(async () => {}),
         log: { warn: vi.fn() },
-        logHooks: {
-          info: vi.fn(),
-          warn: vi.fn(),
-          error: vi.fn(),
-        },
-        logChannels: {
-          info: vi.fn(),
-          error: vi.fn(),
-        },
+        logHooks: createInfoWarnErrorLogger(),
+        logChannels: createInfoErrorLogger(),
       });
 
       expect(hoisted.commitInternalHooks).toHaveBeenCalledWith({ initial: true });
@@ -4414,15 +4395,8 @@ describe("startGatewayPostAttachRuntime", () => {
       deps: {} as never,
       startChannels: vi.fn(async () => {}),
       log: { warn: vi.fn() },
-      logHooks: {
-        info: vi.fn(),
-        warn: vi.fn(),
-        error: vi.fn(),
-      },
-      logChannels: {
-        info: vi.fn(),
-        error: vi.fn(),
-      },
+      logHooks: createInfoWarnErrorLogger(),
+      logChannels: createInfoErrorLogger(),
       startupTrace: trace.startupTrace,
       waitForPostReadyWork: () => postReadyWork,
     });
@@ -4459,15 +4433,8 @@ describe("startGatewayPostAttachRuntime", () => {
       deps: {} as never,
       startChannels: vi.fn(async () => {}),
       log: { warn: vi.fn() },
-      logHooks: {
-        info: vi.fn(),
-        warn: vi.fn(),
-        error: vi.fn(),
-      },
-      logChannels: {
-        info: vi.fn(),
-        error: vi.fn(),
-      },
+      logHooks: createInfoWarnErrorLogger(),
+      logChannels: createInfoErrorLogger(),
       startupTrace: trace.startupTrace,
     });
 
@@ -4979,15 +4946,8 @@ function createPostAttachParams(overrides: Partial<PostAttachParams> = {}): Post
       sendRecoveryNotice: vi.fn(),
     },
     resolveGatewayContext: vi.fn(() => ({ recoveryRuntime: {} }) as never),
-    logHooks: {
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-    },
-    logChannels: {
-      info: vi.fn(),
-      error: vi.fn(),
-    },
+    logHooks: createInfoWarnErrorLogger(),
+    logChannels: createInfoErrorLogger(),
     unlockStartupMethods: vi.fn(),
     providerAuthPrewarm: { enabled: false },
     unregisterConnectionDependentSidecar: vi.fn(),

@@ -21,4 +21,15 @@ describe("prettifyPlatform", () => {
   ])("uses device family %s to disambiguate MacIntel", (family, expected) => {
     expect(prettifyPlatform("MacIntel", family)).toBe(expected);
   });
+
+  it.each([
+    ["Win32", "iPad", "Windows"],
+    ["iOS 26.4", "Mac", "iOS 26.4"],
+    ["MacIntel 26.4", "Mac", "macOS 26.4"],
+  ])(
+    "preserves the platform and version contract for %s with family %s",
+    (platform, family, expected) => {
+      expect(prettifyPlatform(platform, family)).toBe(expected);
+    },
+  );
 });

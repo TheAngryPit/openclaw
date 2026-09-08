@@ -228,7 +228,7 @@ await openclaw.tools.call(calendarCreate.id, {
 Tool authors declare output contracts on the tool's `outputSchema` property.
 It describes `AgentToolResult.details`, not rendered content blocks. Include
 all non-throwing variants or omit it for unstable results. See
-[Code Mode output contracts](/tools/code-mode#declared-output-contracts) and
+[Code Mode output contracts](/tools/code-mode/output#declared-output-contracts) and
 [Tool plugins](/plugins/tool-plugins#output-contracts).
 
 The structured fallback mode exposes the same operations as tools:
@@ -336,6 +336,8 @@ Normal OpenClaw behavior still applies to final calls:
 - channel/runtime tool policy
 - approval hooks
 - plugin `before_tool_call` hooks
+- tool `executionMode`: sequential calls run exclusively with other calls in the
+  same catalog, including calls from other Tool Search or Code Mode cells
 - session identity, logs, and telemetry
 
 ## Config

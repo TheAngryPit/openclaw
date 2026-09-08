@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import nodePath from "node:path";
 import chokidar from "chokidar";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createInfoWarnErrorLogger } from "../../test/helpers/mock-logger.js";
 import { createDeferred } from "../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import type { ChannelPlugin } from "../channels/plugins/types.js";
@@ -924,6 +925,44 @@ describe("buildGatewayReloadPlan", () => {
     expect(plan.restartChannels).toEqual(new Set(["telegram"]));
   });
 
+  it.each<[string, boolean]>([
+    ["channels.mattermost.accounts.ops.groupPolicy", true],
+    ["channels.mattermost.accounts.support.groupPolicy", true],
+    ["channels.mattermost.accounts.ops.guilds.123.users", true],
+    ["channels.mattermost.accounts.very-long-account-name.groupPolicy", true],
+    ["channels.mattermost.accounts.locked.groupPolicy", false],
+    ["channels.mattermost.accounts.ops.token", false],
+    ["channels.mattermost.accounts.ops.guildsBackup", false],
+    ["channels.mattermost.accounts.ops", false],
+    ["channels.mattermost.accounts..groupPolicy", false],
+  ])("honors per-account dynamic policy paths: %s", (path, dynamic) => {
+    setActivePluginRegistry(
+      createTestRegistry([
+        {
+          pluginId: mattermostPlugin.id,
+          source: "test",
+          plugin: {
+            ...mattermostPlugin,
+            reload: {
+              configPrefixes: [
+                "channels.mattermost",
+                "channels.mattermost.accounts.very-long-account-name",
+                "channels.mattermost.accounts.locked.groupPolicy",
+              ],
+              noopPrefixes: [
+                "channels.mattermost.accounts.*.groupPolicy",
+                "channels.mattermost.accounts.*.guilds",
+              ],
+            },
+          },
+        },
+      ]),
+    );
+    const plan = buildGatewayReloadPlan([path]);
+    expect(isNoopGatewayReloadPlan(plan)).toBe(dynamic);
+    expect(plan.restartChannels).toEqual(new Set(dynamic ? [] : ["mattermost"]));
+  });
+
   it.each<[OpenClawConfig, OpenClawConfig]>([
     [{}, { messages: { ackReactionScope: "all" } }],
     [{ messages: { ackReactionScope: "all" } }, {}],
@@ -1612,11 +1651,7 @@ function createReloaderHarness(
       }
     };
   });
-  const log = {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-  };
+  const log = createInfoWarnErrorLogger();
   const initialConfig = options.initialConfig ?? { gateway: { reload: {} } };
   const reloader = startGatewayConfigReloader({
     testDebounceMs: 0,

@@ -23,7 +23,7 @@ Local onboarding defaults new local configs to `tools.profile: "coding"` when un
 | Profile     | Includes                                                                                                                                                                                                                                                |
 | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `minimal`   | `session_status` only                                                                                                                                                                                                                                   |
-| `coding`    | `group:fs`, `group:runtime`, `group:web`, `group:sessions`, `group:memory`, `cron`, `get_goal`, `create_goal`, `update_goal`, `progress_card`, `ask_user`, `skill_workshop`, `image`, `image_generate`, `music_generate`, `video_generate`              |
+| `coding`    | `group:fs`, `group:runtime`, `group:web`, `group:sessions`, `group:memory`, `cron`, `get_goal`, `create_goal`, `update_goal`, `progress_card`, `ask_user`, `skill_workshop`, `view_image`, `image_generate`, `music_generate`, `video_generate`         |
 | `messaging` | `group:messaging`, `sessions`, `sessions_list`, `sessions_history`, `sessions_search`, `conversations_list`, `conversations_send`, `conversations_turn`, `sessions_send`, `sessions_spawn`, `sessions_yield`, `subagents`, `session_status`, `ask_user` |
 | `full`      | No restriction (same as unset)                                                                                                                                                                                                                          |
 
@@ -43,7 +43,7 @@ Local onboarding defaults new local configs to `tools.profile: "coding"` when un
 | `group:messaging`  | `message`                                                                                                                                                                                                                                                |
 | `group:nodes`      | `nodes`, `computer`                                                                                                                                                                                                                                      |
 | `group:agents`     | `agents_list`, `get_goal`, `create_goal`, `update_goal`, `progress_card`, `ask_user`, `skill_workshop`                                                                                                                                                   |
-| `group:media`      | `image`, `image_generate`, `music_generate`, `video_generate`, `tts`                                                                                                                                                                                     |
+| `group:media`      | `view_image`, `image_generate`, `music_generate`, `video_generate`, `tts`                                                                                                                                                                                |
 | `group:openclaw`   | All built-in tools above except `read`/`write`/`edit`/`apply_patch`/`exec`/`process`/`canvas` (excludes plugin tools)                                                                                                                                    |
 | `group:plugins`    | Tools owned by loaded plugins, including configured MCP servers exposed through `bundle-mcp`                                                                                                                                                             |
 
@@ -95,7 +95,7 @@ whose structured results cannot cross the JSON-only bridge stay direct.
 `enabled` defaults to `false`, including when the object sets other Code Mode
 options. To engage code mode only for models whose catalog entry flags
 `compat.codeMode: "preferred"`, enable `"auto"` explicitly. See
-[Code Mode - automatic per-model activation](/tools/code-mode#automatic-per-model-activation).
+[Code Mode - automatic per-model activation](/tools/code-mode/configuration#automatic-per-model-activation).
 
 ```json5
 {
@@ -172,7 +172,7 @@ Further restrict tools for specific providers or models. Order: base profile →
 
 ### `tools.toolsBySender`
 
-Restricts tools for the current turn's originating requester. This is defense-in-depth on top of channel access control; sender values must come from the channel adapter, not message text. It does not authenticate other content in the model prompt; see [Requester-scoped controls and prompt context](/gateway/security#requester-scoped-controls-and-prompt-context).
+Restricts tools for the current turn's originating requester. This is defense-in-depth on top of channel access control; sender values must come from the channel adapter, not message text. It does not authenticate other content in the model prompt; see [Requester-scoped controls and prompt context](/gateway/security/hardened-baseline#requester-scoped-controls-and-prompt-context).
 
 ```json5
 {

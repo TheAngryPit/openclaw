@@ -368,6 +368,11 @@ export class GatewayBrowserClient {
     );
   }
 
+  /** Changes before a stopped or replaced connection can deliver stale auth work. */
+  get connectionGeneration(): number {
+    return this.recovery.generation;
+  }
+
   get recoveryScope() {
     return this.recovery.value;
   }
@@ -436,6 +441,9 @@ export class GatewayBrowserClient {
     if (deviceIdentity) {
       selectedAuth = this.selectConnectAuth({ role, deviceId: deviceIdentity.deviceId });
     }
+    // The single secret input uses token; retain explicit native passwords and
+    // copy only selected shared auth, never bootstrap or device credentials.
+    selectedAuth.authPassword ??= selectedAuth.authToken;
     const scopes = resolveGatewayConnectScopes({
       requestedScopes: selectedAuth.authBootstrapToken
         ? this.opts.bootstrapProfile === CONTROL_UI_OWNER_BOOTSTRAP_PROFILE_HINT
@@ -471,6 +479,7 @@ export class GatewayBrowserClient {
           "task-suggestions",
           "terminal-offset-seq",
           "terminal-session-metadata",
+          "terminal-upload-path-style",
           "tool-events",
           "inline-widgets",
           "ui-commands",

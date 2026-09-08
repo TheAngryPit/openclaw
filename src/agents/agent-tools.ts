@@ -677,6 +677,7 @@ function createOpenClawCodingToolsInternal(options?: OpenClawCodingToolsOptions)
       config: execRuntimeConfig,
       preparedRunEnvironment,
       reviewer: options?.exec?.reviewer ?? execConfig.reviewer,
+      reviewTranscript: options?.exec?.reviewTranscript,
       trigger: options?.trigger,
       node: options?.exec?.node ?? execConfig.node,
       pathPrepend: mergeGatewayAgentCliPath(options?.exec?.pathPrepend ?? execConfig.pathPrepend),
@@ -1125,7 +1126,6 @@ function createOpenClawCodingToolsInternal(options?: OpenClawCodingToolsOptions)
     emitBeforeToolCallDiagnostics: options?.emitBeforeToolCallDiagnostics,
     ...(options?.swarmCollector ? { approvalMode: "deny" as const } : {}),
     abortSignal: options?.abortSignal,
-    agentId: executionAgentId,
     recordToolPrepStage: options?.recordToolPrepStage,
   }).map((tool) => wrapToolWithGatewayCallerIdentity(tool, toolCallerIdentity));
 }

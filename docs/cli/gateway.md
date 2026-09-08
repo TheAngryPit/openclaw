@@ -298,6 +298,11 @@ openclaw gateway usage-cost --all-agents
 openclaw gateway usage-cost --json
 ```
 
+Human-readable output warns that totals may be incomplete when the usage cache is
+refreshing, partial, or stale. The command returns the available snapshot from
+one request; run it again later to check for refreshed totals. JSON output preserves
+the `cacheStatus` object so scripts can inspect the same state.
+
 <ParamField path="--days <days>" type="number" default="30">
   Number of days to include.
 </ParamField>
@@ -619,6 +624,10 @@ openclaw gateway stop
 openclaw gateway restart
 openclaw gateway uninstall
 ```
+
+`gateway stop` remains available when plugin configuration needs Doctor migration.
+It still validates core configuration and refuses configuration written by a newer
+OpenClaw binary. Start and restart continue to validate plugin configuration.
 
 ### Recover an unreadable native service definition
 

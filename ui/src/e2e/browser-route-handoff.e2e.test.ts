@@ -97,6 +97,16 @@ suite.define(() => {
                     },
                   },
                   {
+                    match: { path: "/screencast" },
+                    response: {
+                      __mockError: {
+                        code: "UNAVAILABLE",
+                        message: "Browser screencast requires Playwright in this gateway build.",
+                        details: { code: "SCREENCAST_UNSUPPORTED", reason: "playwright" },
+                      },
+                    },
+                  },
+                  {
                     match: { path: "/screenshot" },
                     response: { path: "/proof/default.png", targetId: "default-tab" },
                   },
@@ -265,7 +275,12 @@ suite.define(() => {
             result: {
               content: [{ type: "text", text: "Browser control output" }],
               details: {
-                browserTab: { target: "host", profile: "managed", targetId: "default-tab" },
+                browserTab: {
+                  target: "host",
+                  profile: "managed",
+                  targetId: "default-tab",
+                  url: "https://default.example/",
+                },
               },
             },
           });
