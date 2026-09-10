@@ -518,7 +518,11 @@ function filterPluginDoctorStateMigrationRecords(
     }
     records.push(record);
   }
-  return records;
+  // Discovery order is a precedence detail, not a migration dependency contract. A
+  // configured alias can move one owner ahead of the bundled candidates, while the
+  // candidate inventory still starts from the bundled tree. Keep each owner's declared
+  // action order intact, but make the owner sequence stable across both views.
+  return records.toSorted((left, right) => left.id.localeCompare(right.id));
 }
 
 export type PluginDoctorStateMigrationInventory = {

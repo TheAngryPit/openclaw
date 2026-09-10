@@ -45,6 +45,52 @@ afterEach(async () => {
 });
 
 describe("plugin Doctor migration settlement", () => {
+  it.each([
+    {
+      name: "reordered",
+      plannedActions: [
+        { pluginId: "owner", id: "a-finalize" },
+        { pluginId: "owner", id: "z-prepare" },
+      ],
+    },
+    {
+      name: "removed",
+      plannedActions: [{ pluginId: "owner", id: "z-prepare" }],
+    },
+  ])("refuses a genuinely $name action within one owner", async ({ plannedActions }) => {
+    const root = await tempDirs.make("openclaw-plugin-doctor-order-guard-");
+    const env = {
+      ...process.env,
+      HOME: root,
+      OPENCLAW_CONFIG_PATH: path.join(root, "openclaw.json"),
+      OPENCLAW_STATE_DIR: root,
+    };
+    controls.entries = ["z-prepare", "a-finalize"].map((id) => ({
+      pluginId: "owner",
+      channelIds: [],
+      trustedForDurableStores: false,
+      migration: {
+        id,
+        label: id,
+        phase: "after-session-repair" as const,
+        detectLegacyState: () => ({ preview: ["pending"] }),
+        migrateLegacyState: () => ({ changes: [`migrated ${id}`], warnings: [] }),
+      },
+    }));
+
+    await expect(
+      runPostSessionPluginDoctorStateRepairs({
+        config: {},
+        env,
+        maintenanceAuthority: { assertCurrent() {} },
+        plannedActions,
+      }),
+    ).resolves.toEqual({
+      changes: [],
+      warnings: [expect.stringContaining("immutable action order")],
+    });
+  });
+
   it.each(["none", "later-action", "later-warning", "detector", "lease-settlement"] as const)(
     "preserves completed mutations and replay truth when failure is %s",
     async (failure) => {
