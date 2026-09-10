@@ -48,6 +48,7 @@ describe("plugin Doctor migration settlement", () => {
   it.each([
     {
       name: "reordered",
+      actionIds: ["z-prepare", "a-finalize"],
       plannedActions: [
         { pluginId: "owner", id: "a-finalize" },
         { pluginId: "owner", id: "z-prepare" },
@@ -55,9 +56,18 @@ describe("plugin Doctor migration settlement", () => {
     },
     {
       name: "removed",
+      actionIds: ["z-prepare", "a-finalize"],
       plannedActions: [{ pluginId: "owner", id: "z-prepare" }],
     },
-  ])("refuses a genuinely $name action within one owner", async ({ plannedActions }) => {
+    {
+      name: "duplicated",
+      actionIds: ["z-prepare", "z-prepare"],
+      plannedActions: [
+        { pluginId: "owner", id: "z-prepare" },
+        { pluginId: "owner", id: "z-prepare" },
+      ],
+    },
+  ])("refuses a genuinely $name action within one owner", async ({ actionIds, plannedActions }) => {
     const root = await tempDirs.make("openclaw-plugin-doctor-order-guard-");
     const env = {
       ...process.env,
@@ -65,7 +75,8 @@ describe("plugin Doctor migration settlement", () => {
       OPENCLAW_CONFIG_PATH: path.join(root, "openclaw.json"),
       OPENCLAW_STATE_DIR: root,
     };
-    controls.entries = ["z-prepare", "a-finalize"].map((id) => ({
+    const observed: string[] = [];
+    controls.entries = actionIds.map((id) => ({
       pluginId: "owner",
       channelIds: [],
       trustedForDurableStores: false,
@@ -73,8 +84,14 @@ describe("plugin Doctor migration settlement", () => {
         id,
         label: id,
         phase: "after-session-repair" as const,
-        detectLegacyState: () => ({ preview: ["pending"] }),
-        migrateLegacyState: () => ({ changes: [`migrated ${id}`], warnings: [] }),
+        detectLegacyState: () => {
+          observed.push(`detect ${id}`);
+          return { preview: ["pending"] };
+        },
+        migrateLegacyState: () => {
+          observed.push(`migrate ${id}`);
+          return { changes: [`migrated ${id}`], warnings: [] };
+        },
       },
     }));
 
@@ -89,6 +106,7 @@ describe("plugin Doctor migration settlement", () => {
       changes: [],
       warnings: [expect.stringContaining("immutable action order")],
     });
+    expect(observed).toEqual([]);
   });
 
   it.each(["none", "later-action", "later-warning", "detector", "lease-settlement"] as const)(
