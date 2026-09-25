@@ -591,7 +591,8 @@ final class AuthenticatedControlUIWebViewCoordinator: NSObject, WKNavigationDele
         }
         guard let accessResponseCheck = self.accessResponseCheck,
               let response = navigationResponse.response as? HTTPURLResponse,
-              GatewayTLSAuthority(url: response.url) == self.expectedOrigin
+              let responseURL = response.url,
+              GatewayTLSAuthority(url: responseURL) == self.expectedOrigin
         else {
             decisionHandler(.allow)
             return
@@ -793,9 +794,13 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
                     return
                 }
                 do {
-                    let rule = try await WKContentRuleListStore.default().compileContentRuleList(
+                    guard let rule = try await WKContentRuleListStore.default().compileContentRuleList(
                         forIdentifier: "openclaw.gateway-cookie-origin",
                         encodedContentRuleList: rules)
+                    else {
+                        coordinator.failAccessCookieBoundary(in: webView)
+                        return
+                    }
                     guard coordinator.isAccessAdmissionCurrent() else { return }
                     webView.configuration.userContentController.add(rule)
                     AuthenticatedControlUIAccessCookieInstaller.install(

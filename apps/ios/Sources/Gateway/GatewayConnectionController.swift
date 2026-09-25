@@ -1154,14 +1154,17 @@ extension GatewayConnectionController {
         guard !host.isEmpty else { return }
 
         let configuredPort = defaults.integer(forKey: "gateway.manual.port")
-        let configuredTLS = defaults.bool(forKey: "gateway.manual.tls")
-        let useTLS = self.resolveManualUseTLS(host: host, useTLS: configuredTLS)
+        let useTLS = self.resolveManualUseTLS(host: host, useTLS: defaults.bool(forKey: "gateway.manual.tls"))
         guard let port = Self.resolvedManualPort(host: host, port: configuredPort) else { return }
 
         let stableID = self.manualStableID(host: host, port: port)
         let tlsParams = self.resolveManualTLSParams(stableID: stableID, tlsEnabled: useTLS)
         guard let url = self.buildGatewayURL(host: host, port: port, useTLS: tlsParams?.required == true)
         else { return }
+
+        // Legacy manual defaults can exist without a registry row. Access admission
+        // persists its origin before opening sign-in, so establish the route owner first.
+        guard GatewaySettingsStore.upsertLegacyManualGateway(stableID, host, port, useTLS) else { return }
 
         let credentials = GatewaySettingsStore.loadGatewayCredentials(
             instanceId: instanceId,

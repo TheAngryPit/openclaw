@@ -482,6 +482,17 @@ enum GatewaySettingsStore {
         return self.saveGatewayRegistry(registry)
     }
 
+    static func upsertLegacyManualGateway(_ stableID: String, _ host: String, _ port: Int, _ useTLS: Bool) -> Bool {
+        self.upsertGatewayRegistryEntry(.init(
+            stableID: stableID,
+            kind: .manual,
+            name: "\(host):\(port)",
+            host: host,
+            port: port,
+            useTLS: useTLS,
+            lastConnectedAtMs: nil), activate: true)
+    }
+
     @discardableResult
     static func saveGatewayAccessOrigin(stableID: String, origin: CloudflareAccessOrigin?) -> Bool {
         var registry = self.loadGatewayRegistry()

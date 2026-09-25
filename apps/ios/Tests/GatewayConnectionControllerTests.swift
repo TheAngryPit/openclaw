@@ -2121,6 +2121,36 @@ private func waitUntil(
         }
     }
 
+    @Test @MainActor func `legacy manual auto connect registers route before Access admission`() async {
+        let registryIsolation = GatewayRegistryTestIsolation()
+        defer { registryIsolation.restore() }
+        let host = "legacy-access-\(UUID().uuidString).example.invalid"
+        let stableID = "manual|\(host.lowercased())|443"
+        await withUserDefaults([
+            "gateway.autoconnect": false,
+            "gateway.manual.enabled": true,
+            "gateway.manual.host": host,
+            "gateway.manual.port": 443,
+            "gateway.manual.tls": true,
+            "node.instanceId": "ios-test",
+        ]) {
+            let appModel = NodeAppModel()
+            defer { appModel.disconnectGateway() }
+            let controller = GatewayConnectionController(appModel: appModel, startDiscovery: false)
+            #expect(GatewaySettingsStore.loadGatewayRegistry().entries.isEmpty)
+
+            UserDefaults.standard.set(true, forKey: "gateway.autoconnect")
+            controller._test_triggerAutoConnect()
+
+            let entry = GatewaySettingsStore.loadGatewayRegistry().entries.first {
+                GatewayStableIdentifier.matches($0.stableID, stableID)
+            }
+            #expect(entry?.kind == .manual)
+            #expect(entry?.host == host)
+            #expect(GatewaySettingsStore.activeGatewayEntry()?.stableID == stableID)
+        }
+    }
+
     @Test @MainActor func `active manual TLS auto connect uses system trust before legacy defaults`() async {
         let registryIsolation = GatewayRegistryTestIsolation()
         defer { registryIsolation.restore() }
