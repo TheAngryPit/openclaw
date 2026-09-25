@@ -6,6 +6,7 @@ import os
 struct GatewayIngressAuthorization: Sendable {
     typealias Request = @Sendable (URLRequest) async throws -> (Data, URLResponse)
     let origin: CloudflareAccessOrigin
+    let principal: CloudflareAccessPrincipal
     let revision: UInt64
     let headers: @Sendable (URL) async throws -> [String: String]
     let isCurrent: @MainActor @Sendable () -> Bool
@@ -262,7 +263,7 @@ final class GatewayIngressController {
         if GatewayStableIdentifier.matches(self.attention?.stableID, route.stableID) {
             self.attention = nil
         }
-        return self.authorization(registration: registration, origin: origin, snapshot: snapshot)
+        return try self.authorization(registration: registration, origin: origin, snapshot: snapshot)
     }
 
     func signIn(for attention: Attention, admissionCheckpoint: UInt64) async throws {
@@ -647,11 +648,13 @@ final class GatewayIngressController {
     private func authorization(
         registration: Registration,
         origin: CloudflareAccessOrigin,
-        snapshot: CloudflareAccessSessionStore.Snapshot) -> GatewayIngressAuthorization
+        snapshot: CloudflareAccessSessionStore.Snapshot) throws -> GatewayIngressAuthorization
     {
         let revision = snapshot.revision
+        let principal = try CloudflareAccessPrincipal.verified(from: snapshot.session, now: self.now())
         return GatewayIngressAuthorization(
             origin: origin,
+            principal: principal,
             revision: revision,
             headers: { [weak self] url in
                 guard let self else { throw CancellationError() }

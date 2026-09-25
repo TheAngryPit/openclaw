@@ -28,6 +28,46 @@ struct SettingsHubTests {
         }
     }
 
+    @Test func `Access cookie resource rule admits only the Gateway authority`() async throws {
+        let gateway = try #require(URL(string: "https://gateway.example.test/dashboard"))
+        let rules = try #require(AuthenticatedControlUIAccessCookieBoundary.rules(for: gateway))
+        let encoded = try #require(rules.data(using: .utf8))
+        let entries = try #require(JSONSerialization.jsonObject(with: encoded) as? [[String: Any]])
+        #expect((entries.first?["action"] as? [String: String])?["type"] == "block-cookies")
+        #expect(entries.count == 3)
+
+        let allowed = [
+            "https://gateway.example.test/dashboard",
+            "https://gateway.example.test:443/assets/app.js",
+            "wss://gateway.example.test/socket",
+        ]
+        let rejected = [
+            "https://gateway.example.test:8443/steal",
+            "wss://gateway.example.test:8443/socket",
+            "https://gateway.example.test.evil.test/steal",
+        ]
+        for entry in entries.dropFirst() {
+            let trigger = try #require(entry["trigger"] as? [String: String])
+            let pattern = try #require(trigger["url-filter"])
+            let expression = try NSRegularExpression(pattern: pattern)
+            let matches: (String) -> Bool = { value in
+                expression.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) != nil
+            }
+            let usesWebSocket = pattern.hasPrefix("^wss:")
+            let expected = allowed.filter { $0.hasPrefix(usesWebSocket ? "wss:" : "https:") }
+            for value in expected {
+                #expect(matches(value))
+            }
+            for value in rejected {
+                #expect(!matches(value))
+            }
+            #expect((entry["action"] as? [String: String])?["type"] == "ignore-previous-rules")
+        }
+        _ = try await WKContentRuleListStore.default().compileContentRuleList(
+            forIdentifier: "openclaw.access.cookie.boundary.test",
+            encodedContentRuleList: rules)
+    }
+
     @Test func `WebView waits for Access cookie storage and drops stale grants before first load`() throws {
         let originURL = try #require(URL(string: "https://gateway.example.test"))
         let cookie = try #require(HTTPCookie(properties: [

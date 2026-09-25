@@ -130,6 +130,7 @@ struct SettingsHubScreen: View {
 
 struct EmbeddedDashboardContent: View {
     @State private var bridge: IOSDeviceSettingsBridge
+    @State private var failedAccessBoundaryIdentity: Int?
     let embedCompatibility: DashboardEmbedCompatibility?
     let url: URL
     let config: GatewayConnectConfig?
@@ -162,14 +163,26 @@ struct EmbeddedDashboardContent: View {
     var body: some View {
         let storedOperatorToken = AuthenticatedControlUI.storedOperatorToken(config: self.config)
         let authorization = self.config?.ingressAuthorization
+        let webContentIdentity = AuthenticatedControlUI.webContentIdentity(
+            config: self.config,
+            storedOperatorToken: storedOperatorToken,
+            authorizationRevision: authorization?.revision)
         VStack(spacing: 0) {
             self.gatewayUpgradeBanner
             if let authorization {
                 if let cookie = authorization.dashboardCookie(self.url) {
-                    self.dashboardWebView(
-                        storedOperatorToken: storedOperatorToken,
-                        accessCookie: cookie,
-                        authorization: authorization)
+                    if self.failedAccessBoundaryIdentity == webContentIdentity {
+                        self.accessUnavailable
+                    } else {
+                        self.dashboardWebView(
+                            storedOperatorToken: storedOperatorToken,
+                            accessCookie: cookie,
+                            authorization: authorization,
+                            webContentIdentity: webContentIdentity,
+                            onAccessCookieBoundaryFailure: {
+                                self.failedAccessBoundaryIdentity = webContentIdentity
+                            })
+                    }
                 } else {
                     self.accessUnavailable
                 }
@@ -177,15 +190,19 @@ struct EmbeddedDashboardContent: View {
                 self.dashboardWebView(
                     storedOperatorToken: storedOperatorToken,
                     accessCookie: nil,
-                    authorization: nil)
+                    authorization: nil,
+                    webContentIdentity: webContentIdentity)
             }
         }
     }
 
+    @MainActor
     private func dashboardWebView(
         storedOperatorToken: String?,
         accessCookie: HTTPCookie?,
-        authorization: GatewayIngressAuthorization?) -> some View
+        authorization: GatewayIngressAuthorization?,
+        webContentIdentity: Int,
+        onAccessCookieBoundaryFailure: (@MainActor () -> Void)? = nil) -> some View
     {
         AuthenticatedControlUIWebView(
             url: self.url,
@@ -202,16 +219,16 @@ struct EmbeddedDashboardContent: View {
             accessAdmissionIsCurrent: authorization.map { authorization in
                 { authorization.isCurrent() }
             },
-            accessResponseCheck: authorization?.checkResponse)
-            .id(AuthenticatedControlUI.webContentIdentity(
-                config: self.config,
-                storedOperatorToken: storedOperatorToken))
+            accessResponseCheck: authorization?.checkResponse,
+            onAccessCookieBoundaryFailure: onAccessCookieBoundaryFailure)
+            .id(webContentIdentity)
             .accessibilityIdentifier("SettingsHub.Dashboard")
     }
 
-    @ViewBuilder private var accessUnavailable: some View {
+    private var accessUnavailable: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("The embedded Dashboard can't use the current Cloudflare Access session. Native chat and Gateway settings remain available.")
+            Text(
+                "Dashboard unavailable with this Cloudflare session. Native chat and settings still work.")
                 .font(OpenClawType.body)
             if let openGateway {
                 Button(action: openGateway) {

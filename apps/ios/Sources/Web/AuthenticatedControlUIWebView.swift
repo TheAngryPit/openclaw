@@ -52,6 +52,7 @@ enum AuthenticatedControlUI {
     }
 
     /// Origin-gated document-start script for the Control UI native-auth contract.
+    @MainActor
     static func authUserScript(
         config: GatewayConnectConfig?,
         pageURL: URL?,
@@ -66,6 +67,8 @@ enum AuthenticatedControlUI {
         let storedAuthorization = Self.storedOperatorAuthorization(
             config: config,
             expectedToken: storedToken)
+        let shouldClearStaleOperatorAuth = config.ingressAuthorization?.principal != nil &&
+            storedAuthorization == nil
         if let storedAuthorization {
             payload["client"] = [
                 "id": config.nodeOptions.clientId,
@@ -78,13 +81,18 @@ enum AuthenticatedControlUI {
         }
         if !token.isEmpty {
             payload["token"] = token
-        } else if storedAuthorization == nil, !storedToken.isEmpty {
+        } else if storedAuthorization == nil,
+                  !shouldClearStaleOperatorAuth,
+                  !storedToken.isEmpty
+        {
             payload["token"] = storedToken
         }
         if !password.isEmpty {
             payload["password"] = password
         }
-        guard payload["token"] != nil || payload["password"] != nil || storedAuthorization != nil else {
+        guard payload["token"] != nil || payload["password"] != nil ||
+            storedAuthorization != nil || shouldClearStaleOperatorAuth
+        else {
             return nil
         }
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
@@ -116,6 +124,15 @@ enum AuthenticatedControlUI {
                 `openclaw.device.auth.v1:${scope}`,
                 JSON.stringify(deviceAuthSeed.authorization));
               localStorage.removeItem("openclaw.device.auth.v1");
+            } else if (\(shouldClearStaleOperatorAuth)) {
+              const gateway = new URL(\(Self.jsStringLiteral(config.url.absoluteString)), location.href);
+              gateway.hash = "";
+              const path = gateway.pathname === "/"
+                ? ""
+                : gateway.pathname.replace(/\\/+$/, "") || gateway.pathname;
+              const scope = `${gateway.protocol}//${gateway.host}${path}${gateway.search}`;
+              localStorage.removeItem(`openclaw.device.auth.v1:${scope}`);
+              localStorage.removeItem("openclaw.device.auth.v1");
             }
             if (\(usesNativeNavigationChrome)) {
               Object.defineProperty(window, "__OPENCLAW_NATIVE_WEB_CHROME__", {
@@ -132,14 +149,20 @@ enum AuthenticatedControlUI {
         """
     }
 
+    @MainActor
     static func storedOperatorToken(config: GatewayConnectConfig?) -> String? {
         self.storedOperatorAuthorization(config: config)?.entry.token
     }
 
-    static func webContentIdentity(config: GatewayConnectConfig?, storedOperatorToken: String?) -> Int {
+    static func webContentIdentity(
+        config: GatewayConnectConfig?,
+        storedOperatorToken: String?,
+        authorizationRevision: UInt64? = nil) -> Int
+    {
         var hasher = Hasher()
         hasher.combine(config?.controlUIInputs)
         hasher.combine(storedOperatorToken?.trimmingCharacters(in: .whitespacesAndNewlines))
+        hasher.combine(authorizationRevision)
         return hasher.finalize()
     }
 
@@ -162,11 +185,15 @@ enum AuthenticatedControlUI {
         return String(raw.dropFirst().dropLast())
     }
 
+    @MainActor
     private static func storedOperatorAuthorization(
         config: GatewayConnectConfig?,
         expectedToken: String? = nil) -> StoredOperatorAuthorization?
     {
         guard let config else { return nil }
+        if let authorization = config.ingressAuthorization, !authorization.isCurrent() {
+            return nil
+        }
         // Endpoint handoffs may explicitly suppress device-token reuse; every auth surface
         // must honor that boundary or a stale token can override the supplied password.
         guard config.nodeOptions.includeDeviceIdentity,
@@ -174,13 +201,22 @@ enum AuthenticatedControlUI {
         else { return nil }
         let profile = config.nodeOptions.deviceIdentityProfile
         let gatewayID = config.nodeOptions.deviceAuthGatewayID ?? config.effectiveStableID
-        guard let identity = DeviceIdentityStore.loadOrCreatePersisted(profile: profile),
-              let entry = DeviceAuthStore.loadToken(
-                  deviceId: identity.deviceId,
-                  role: "operator",
-                  gatewayID: gatewayID,
-                  profile: profile)
+        let bindingStore = GatewayAccessDeviceAuthBindingStore.shared
+        guard let stored = bindingStore.storedDeviceAuth(
+            role: "operator",
+            gatewayID: gatewayID,
+            profile: profile),
+            bindingStore.allowsStoredDeviceAuth(
+                entry: stored,
+                principal: config.ingressAuthorization?.principal,
+                gatewayID: gatewayID,
+                role: "operator",
+                profile: profile,
+                fallbackAllowed: true),
+            let identity = DeviceIdentityStore.loadOrCreatePersisted(profile: profile),
+            identity.deviceId == stored.deviceID
         else { return nil }
+        let entry = stored.entry
         if let expectedToken,
            entry.token.trimmingCharacters(in: .whitespacesAndNewlines) != expectedToken
         {
@@ -240,6 +276,28 @@ enum AuthenticatedControlUI {
     }
 }
 
+/// WebKit cookies ignore ports. Match the macOS Dashboard's resource-layer rule
+/// before the Access cookie is installed, so another port cannot receive it.
+enum AuthenticatedControlUIAccessCookieBoundary {
+    static func rules(for url: URL) -> String? {
+        guard let authority = GatewayTLSAuthority(url: url),
+              authority.scheme == "https", authority.port == 443,
+              let host = url.host
+        else { return nil }
+        let escapedHost = NSRegularExpression.escapedPattern(for: host)
+        let rules: [[String: Any]] = [
+            ["trigger": ["url-filter": ".*"], "action": ["type": "block-cookies"]],
+        ] + ["https", "wss"].map { scheme in
+            [
+                "trigger": ["url-filter": "^\(scheme)://\(escapedHost)(:443)?/"],
+                "action": ["type": "ignore-previous-rules"],
+            ]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: rules) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+}
+
 @MainActor
 enum AuthenticatedControlUIAccessCookieInstaller {
     typealias Admission = @MainActor @Sendable () -> Bool
@@ -270,7 +328,7 @@ enum AuthenticatedControlUIAccessCookieInstaller {
 
     private static func isUsable(_ cookie: HTTPCookie, isCurrent: Admission) -> Bool {
         cookie.isSecure && cookie.isHTTPOnly &&
-            cookie.expiresDate.map({ $0 > Date() }) == true &&
+            cookie.expiresDate.map { $0 > Date() } == true &&
             isCurrent()
     }
 }
@@ -379,6 +437,7 @@ final class AuthenticatedControlUIWebViewCoordinator: NSObject, WKNavigationDele
     private let accessCookie: HTTPCookie?
     private let accessAdmissionIsCurrent: AuthenticatedControlUIAccessCookieInstaller.Admission?
     private let accessResponseCheck: (@Sendable (HTTPURLResponse) async throws -> Void)?
+    private let onAccessCookieBoundaryFailure: (@MainActor () -> Void)?
     private var hasExitedNavigationScope = false
     private var hasRetiredAccess = false
     private var activeNavigation: WKNavigation?
@@ -394,7 +453,8 @@ final class AuthenticatedControlUIWebViewCoordinator: NSObject, WKNavigationDele
         embedCompatibility: DashboardEmbedCompatibility? = nil,
         accessCookie: HTTPCookie? = nil,
         accessAdmissionIsCurrent: AuthenticatedControlUIAccessCookieInstaller.Admission? = nil,
-        accessResponseCheck: (@Sendable (HTTPURLResponse) async throws -> Void)? = nil)
+        accessResponseCheck: (@Sendable (HTTPURLResponse) async throws -> Void)? = nil,
+        onAccessCookieBoundaryFailure: (@MainActor () -> Void)? = nil)
     {
         self.url = url
         self.authScript = authScript
@@ -408,6 +468,7 @@ final class AuthenticatedControlUIWebViewCoordinator: NSObject, WKNavigationDele
         self.accessCookie = accessCookie
         self.accessAdmissionIsCurrent = accessAdmissionIsCurrent
         self.accessResponseCheck = accessResponseCheck
+        self.onAccessCookieBoundaryFailure = onAccessCookieBoundaryFailure
     }
 
     func isAccessAdmissionCurrent() -> Bool {
@@ -415,7 +476,7 @@ final class AuthenticatedControlUIWebViewCoordinator: NSObject, WKNavigationDele
         return !self.hasRetiredAccess &&
             accessCookie.isSecure &&
             accessCookie.isHTTPOnly &&
-            accessCookie.expiresDate.map({ $0 > Date() }) == true &&
+            accessCookie.expiresDate.map { $0 > Date() } == true &&
             self.accessAdmissionIsCurrent?() == true
     }
 
@@ -431,6 +492,13 @@ final class AuthenticatedControlUIWebViewCoordinator: NSObject, WKNavigationDele
             ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
             modifiedSince: .distantPast,
             completionHandler: {})
+    }
+
+    func failAccessCookieBoundary(in webView: WKWebView) {
+        guard self.accessCookie != nil else { return }
+        let shouldReportFailure = self.isAccessAdmissionCurrent()
+        self.retireAccess(in: webView)
+        if shouldReportFailure { self.onAccessCookieBoundaryFailure?() }
     }
 
     func installUserScripts(in controller: WKUserContentController) {
@@ -634,6 +702,7 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
     let accessCookie: HTTPCookie?
     let accessAdmissionIsCurrent: AuthenticatedControlUIAccessCookieInstaller.Admission?
     let accessResponseCheck: (@Sendable (HTTPURLResponse) async throws -> Void)?
+    let onAccessCookieBoundaryFailure: (@MainActor () -> Void)?
 
     init(
         url: URL,
@@ -646,7 +715,8 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
         embedCompatibility: DashboardEmbedCompatibility? = nil,
         accessCookie: HTTPCookie? = nil,
         accessAdmissionIsCurrent: AuthenticatedControlUIAccessCookieInstaller.Admission? = nil,
-        accessResponseCheck: (@Sendable (HTTPURLResponse) async throws -> Void)? = nil)
+        accessResponseCheck: (@Sendable (HTTPURLResponse) async throws -> Void)? = nil,
+        onAccessCookieBoundaryFailure: (@MainActor () -> Void)? = nil)
     {
         self.url = url
         self.authScript = authScript
@@ -659,6 +729,7 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
         self.accessCookie = accessCookie
         self.accessAdmissionIsCurrent = accessAdmissionIsCurrent
         self.accessResponseCheck = accessResponseCheck
+        self.onAccessCookieBoundaryFailure = onAccessCookieBoundaryFailure
     }
 
     func makeCoordinator() -> AuthenticatedControlUIWebViewCoordinator {
@@ -673,7 +744,8 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
             embedCompatibility: self.embedCompatibility,
             accessCookie: self.accessCookie,
             accessAdmissionIsCurrent: self.accessAdmissionIsCurrent,
-            accessResponseCheck: self.accessResponseCheck)
+            accessResponseCheck: self.accessResponseCheck,
+            onAccessCookieBoundaryFailure: self.onAccessCookieBoundaryFailure)
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -710,21 +782,41 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
         let request = URLRequest(url: self.url, cachePolicy: .reloadIgnoringLocalCacheData)
         if let accessCookie = self.accessCookie {
             let cookieStore = configuration.websiteDataStore.httpCookieStore
-            AuthenticatedControlUIAccessCookieInstaller.install(
-                cookie: accessCookie,
-                isCurrent: { [weak coordinator = context.coordinator, weak webView] in
-                    coordinator?.isAccessAdmissionCurrent() == true && webView != nil
-                },
-                setCookie: { cookie, completion in
-                    cookieStore.setCookie(cookie) {
-                        Task { @MainActor in completion() }
-                    }
-                },
-                deleteCookie: { cookie in cookieStore.delete(cookie) },
-                load: { [weak webView] in
-                    guard let webView else { return }
-                    _ = webView.load(request)
-                })
+            Task { @MainActor [weak webView, weak coordinator = context.coordinator] in
+                guard let webView, let coordinator else { return }
+                guard coordinator.isAccessAdmissionCurrent() else {
+                    coordinator.retireAccess(in: webView)
+                    return
+                }
+                guard let rules = AuthenticatedControlUIAccessCookieBoundary.rules(for: self.url) else {
+                    coordinator.failAccessCookieBoundary(in: webView)
+                    return
+                }
+                do {
+                    let rule = try await WKContentRuleListStore.default().compileContentRuleList(
+                        forIdentifier: "openclaw.gateway-cookie-origin",
+                        encodedContentRuleList: rules)
+                    guard coordinator.isAccessAdmissionCurrent() else { return }
+                    webView.configuration.userContentController.add(rule)
+                    AuthenticatedControlUIAccessCookieInstaller.install(
+                        cookie: accessCookie,
+                        isCurrent: { [weak coordinator, weak webView] in
+                            coordinator?.isAccessAdmissionCurrent() == true && webView != nil
+                        },
+                        setCookie: { cookie, completion in
+                            cookieStore.setCookie(cookie) {
+                                Task { @MainActor in completion() }
+                            }
+                        },
+                        deleteCookie: { cookie in cookieStore.delete(cookie) },
+                        load: { [weak webView] in
+                            guard let webView else { return }
+                            _ = webView.load(request)
+                        })
+                } catch {
+                    coordinator.failAccessCookieBoundary(in: webView)
+                }
+            }
         } else {
             _ = webView.load(request)
         }

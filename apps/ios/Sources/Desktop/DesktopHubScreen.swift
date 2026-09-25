@@ -107,6 +107,7 @@ struct DesktopHubScreen: View {
             queryItems: [])
     }
 
+    @MainActor
     static func desktopAuthUserScript(
         config: GatewayConnectConfig?,
         source: String?,
@@ -119,6 +120,7 @@ struct DesktopHubScreen: View {
             storedOperatorToken: AuthenticatedControlUI.storedOperatorToken(config: config))
     }
 
+    @MainActor
     static func desktopAuthUserScript(
         config: GatewayConnectConfig?,
         source: String?,

@@ -101,12 +101,14 @@ struct TerminalHubScreen: View {
     /// the Control UI via its `__OPENCLAW_NATIVE_CONTROL_AUTH__` startup contract
     /// (the same mechanism the macOS Dashboard window uses), so the token never
     /// appears in the page URL, WebKit history, or gateway request logs.
+    @MainActor
     static func terminalAuthUserScript(config: GatewayConnectConfig?) -> String? {
         self.terminalAuthUserScript(
             config: config,
             storedOperatorToken: self.storedOperatorToken(config: config))
     }
 
+    @MainActor
     static func terminalAuthUserScript(
         config: GatewayConnectConfig?,
         storedOperatorToken: String?) -> String?
@@ -125,6 +127,7 @@ struct TerminalHubScreen: View {
             storedOperatorToken: storedOperatorToken)
     }
 
+    @MainActor
     private static func storedOperatorToken(config: GatewayConnectConfig?) -> String? {
         AuthenticatedControlUI.storedOperatorToken(config: config)
     }

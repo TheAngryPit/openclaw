@@ -3797,7 +3797,9 @@ extension NodeAppModel {
             bootstrapToken: bootstrapToken,
             password: password,
             deviceAuthGatewayID: connectOptions.deviceAuthGatewayID ?? effectiveStableID,
-            allowStoredDeviceAuth: connectOptions.allowStoredDeviceAuth)
+            allowStoredDeviceAuth: connectOptions.allowStoredDeviceAuth,
+            ingressPrincipal: ingressAuthorization?.principal,
+            deviceIdentityProfile: connectOptions.deviceIdentityProfile)
         if let activeConfig = activeGatewayConnectConfig,
            activeConfig.hasSameConnectionInputs(as: nextConfig),
            nodeGatewayTask != nil,
@@ -4295,15 +4297,27 @@ extension NodeAppModel {
         bootstrapToken: String?,
         password: String?,
         deviceAuthGatewayID: String,
-        allowStoredDeviceAuth: Bool = true) -> Bool
+        allowStoredDeviceAuth: Bool = true,
+        ingressPrincipal: CloudflareAccessPrincipal? = nil,
+        deviceIdentityProfile: GatewayDeviceIdentityProfile = .primary) -> Bool
     {
-        Self.shouldStartOperatorGatewayLoop(
+        let bindingStore = GatewayAccessDeviceAuthBindingStore.shared
+        let storedOperatorAuth = bindingStore.storedDeviceAuth(
+            role: "operator",
+            gatewayID: deviceAuthGatewayID,
+            profile: deviceIdentityProfile)
+        let canUseStoredOperatorAuth = bindingStore.allowsStoredDeviceAuth(
+            entry: storedOperatorAuth,
+            principal: ingressPrincipal,
+            gatewayID: deviceAuthGatewayID,
+            role: "operator",
+            profile: deviceIdentityProfile,
+            fallbackAllowed: allowStoredDeviceAuth)
+        return Self.shouldStartOperatorGatewayLoop(
             token: token,
             bootstrapToken: bootstrapToken,
             password: password,
-            hasStoredOperatorToken: allowStoredDeviceAuth && self.hasStoredGatewayRoleToken(
-                "operator",
-                gatewayID: deviceAuthGatewayID))
+            hasStoredOperatorToken: canUseStoredOperatorAuth && storedOperatorAuth != nil)
     }
 
     private func hasStoredGatewayRoleToken(_ role: String, gatewayID: String) -> Bool {
@@ -4396,6 +4410,14 @@ extension NodeAppModel {
             else { return nil }
             let instanceID = GatewaySettingsStore.currentInstanceID()
             let deviceAuthGatewayID = nodeOptions.deviceAuthGatewayID ?? stableID
+            if let principal = config.ingressAuthorization?.principal {
+                _ = GatewayAccessDeviceAuthBindingStore.shared.bindGatewayIssuedToken(
+                    principal: principal,
+                    gatewayID: deviceAuthGatewayID,
+                    role: "operator",
+                    profile: nodeOptions.deviceIdentityProfile,
+                    persistedRoles: authRoles.persisted)
+            }
             if let metadata = GatewaySettingsStore.loadGatewayCredentialMetadata(
                 instanceId: instanceID,
                 gatewayStableID: deviceAuthGatewayID),
@@ -4424,7 +4446,9 @@ extension NodeAppModel {
                    bootstrapToken: nil,
                    password: config.password,
                    deviceAuthGatewayID: deviceAuthGatewayID,
-                   allowStoredDeviceAuth: true)
+                   allowStoredDeviceAuth: true,
+                   ingressPrincipal: config.ingressAuthorization?.principal,
+                   deviceIdentityProfile: reconnectOptions.deviceIdentityProfile)
             {
                 let sessionBox = config.webSocketSessionBox()
                 self.startOperatorGatewayLoop(
@@ -4757,30 +4781,29 @@ extension NodeAppModel {
                     GatewaySettingsStore.loadGatewayClientIdOverride(stableID: stableID) ?? reconnectOptions.clientId
                 let talkPermissionUpgradeRequest = self.forceOperatorTalkPermissionUpgradeRequest
                 let deviceAuthGatewayID = reconnectOptions.deviceAuthGatewayID ?? stableID
-                let operatorOptions = self.makeOperatorConnectOptions(
+                let principal = ingressAuthorization?.principal
+                let operatorAuthState = self.operatorDeviceAuthState(
+                    gatewayID: deviceAuthGatewayID,
+                    principal: principal,
+                    profile: reconnectOptions.deviceIdentityProfile,
+                    fallbackAllowed: reconnectOptions.allowStoredDeviceAuth)
+                let reconnectCredentials = GatewayNodeSessionCredentials(
+                    token: reconnectAuth.token,
+                    bootstrapToken: reconnectAuth.bootstrapToken,
+                    password: reconnectAuth.password)
+                let operatorOptions = self.reconnectOperatorOptions(
                     clientId: effectiveClientId,
-                    displayName: reconnectOptions.clientDisplayName,
-                    deviceAuthGatewayID: deviceAuthGatewayID,
-                    includeAdminScope: self.shouldRequestOperatorAdminScope(
-                        gatewayID: deviceAuthGatewayID,
-                        token: reconnectAuth.token,
-                        password: reconnectAuth.password,
-                        forceTalkPermissionUpgradeRequest: talkPermissionUpgradeRequest),
-                    includeApprovalScope: self.shouldRequestOperatorApprovalScope(
-                        gatewayID: deviceAuthGatewayID,
-                        token: reconnectAuth.token,
-                        password: reconnectAuth.password,
-                        forceTalkPermissionUpgradeRequest: talkPermissionUpgradeRequest),
-                    forceExplicitScopes: talkPermissionUpgradeRequest,
-                    allowStoredDeviceAuth: reconnectOptions.allowStoredDeviceAuth)
+                    reconnectOptions: reconnectOptions,
+                    gatewayID: deviceAuthGatewayID,
+                    credentials: reconnectCredentials,
+                    principal: principal,
+                    forceTalkPermissionUpgradeRequest: talkPermissionUpgradeRequest,
+                    allowStoredDeviceAuth: operatorAuthState.allowStoredDeviceAuth)
 
                 do {
                     try await self.operatorGateway.connect(
                         url: url,
-                        credentials: GatewayNodeSessionCredentials(
-                            token: reconnectAuth.token,
-                            bootstrapToken: reconnectAuth.bootstrapToken,
-                            password: reconnectAuth.password),
+                        credentials: reconnectCredentials,
                         connectOptions: operatorOptions,
                         sessionBox: sessionBox,
                         extraHeadersProvider: {
@@ -4790,10 +4813,14 @@ extension NodeAppModel {
                             return GatewaySettingsStore.loadGatewayCustomHeaders(gatewayStableID: stableID)
                         },
                         onConnected: { [weak self] in
-                            await self?.handleOperatorGatewayConnected(
+                            await self?.handleOperatorGatewayConnectedAfterDeviceAuthHandshake(
                                 url: url,
                                 stableID: stableID,
-                                routeGeneration: routeGeneration)
+                                routeGeneration: routeGeneration,
+                                principal: principal,
+                                gatewayID: deviceAuthGatewayID,
+                                profile: reconnectOptions.deviceIdentityProfile,
+                                previousTokenVersion: operatorAuthState.tokenVersion)
                         },
                         onDisconnected: { [weak self] reason in
                             guard let self else { return }
@@ -4875,6 +4902,80 @@ extension NodeAppModel {
                 }
             }
         }
+    }
+
+    private func operatorDeviceAuthState(
+        gatewayID: String,
+        principal: CloudflareAccessPrincipal?,
+        profile: GatewayDeviceIdentityProfile,
+        fallbackAllowed: Bool) -> (
+        allowStoredDeviceAuth: Bool,
+        tokenVersion: GatewayAccessDeviceAuthBindingStore.TokenVersion?)
+    {
+        let bindingStore = GatewayAccessDeviceAuthBindingStore.shared
+        let stored = bindingStore.storedDeviceAuth(
+            role: "operator",
+            gatewayID: gatewayID,
+            profile: profile)
+        return (
+            allowStoredDeviceAuth: bindingStore.allowsStoredDeviceAuth(
+                entry: stored,
+                principal: principal,
+                gatewayID: gatewayID,
+                role: "operator",
+                profile: profile,
+                fallbackAllowed: fallbackAllowed),
+            tokenVersion: bindingStore.tokenVersion(for: stored))
+    }
+
+    private func reconnectOperatorOptions(
+        clientId: String,
+        reconnectOptions: GatewayConnectOptions,
+        gatewayID: String,
+        credentials: GatewayNodeSessionCredentials,
+        principal: CloudflareAccessPrincipal?,
+        forceTalkPermissionUpgradeRequest: Bool,
+        allowStoredDeviceAuth: Bool) -> GatewayConnectOptions
+    {
+        self.makeOperatorConnectOptions(
+            clientId: clientId,
+            displayName: reconnectOptions.clientDisplayName,
+            deviceAuthGatewayID: gatewayID,
+            includeAdminScope: self.shouldRequestOperatorAdminScope(
+                gatewayID: gatewayID,
+                token: credentials.token,
+                password: credentials.password,
+                forceTalkPermissionUpgradeRequest: forceTalkPermissionUpgradeRequest,
+                ingressPrincipal: principal,
+                deviceIdentityProfile: reconnectOptions.deviceIdentityProfile),
+            includeApprovalScope: self.shouldRequestOperatorApprovalScope(
+                gatewayID: gatewayID,
+                token: credentials.token,
+                password: credentials.password,
+                forceTalkPermissionUpgradeRequest: forceTalkPermissionUpgradeRequest,
+                ingressPrincipal: principal,
+                deviceIdentityProfile: reconnectOptions.deviceIdentityProfile),
+            forceExplicitScopes: forceTalkPermissionUpgradeRequest,
+            allowStoredDeviceAuth: allowStoredDeviceAuth)
+    }
+
+    private func handleOperatorGatewayConnectedAfterDeviceAuthHandshake(
+        url: URL,
+        stableID: String,
+        routeGeneration: UInt64,
+        principal: CloudflareAccessPrincipal?,
+        gatewayID: String,
+        profile: GatewayDeviceIdentityProfile,
+        previousTokenVersion: GatewayAccessDeviceAuthBindingStore.TokenVersion?) async
+    {
+        guard self.isCurrentGatewayRoute(generation: routeGeneration, stableID: stableID) else { return }
+        _ = GatewayAccessDeviceAuthBindingStore.shared.bindCurrentTokenAfterHandshake(
+            principal: principal,
+            gatewayID: gatewayID,
+            role: "operator",
+            profile: profile,
+            previousVersion: previousTokenVersion)
+        await self.handleOperatorGatewayConnected(url: url, stableID: stableID, routeGeneration: routeGeneration)
     }
 
     private func handleOperatorGatewayRouteInvalidated(routeGeneration: UInt64, stableID: String) {
@@ -5256,16 +5357,21 @@ extension NodeAppModel {
         gatewayID: String,
         token: String?,
         password: String?,
-        forceTalkPermissionUpgradeRequest: Bool = false) -> Bool
+        forceTalkPermissionUpgradeRequest: Bool = false,
+        ingressPrincipal: CloudflareAccessPrincipal? = nil,
+        deviceIdentityProfile: GatewayDeviceIdentityProfile = .primary) -> Bool
     {
-        let storedOperatorScopes = DeviceIdentityStore.loadOrCreatePersisted()
-            .flatMap { identity in
-                DeviceAuthStore.loadToken(
-                    deviceId: identity.deviceId,
-                    role: "operator",
-                    gatewayID: gatewayID)
-            }?
-            .scopes ?? []
+        let bindingStore = GatewayAccessDeviceAuthBindingStore.shared
+        let storedOperatorAuth = bindingStore.storedDeviceAuth(
+            role: "operator",
+            gatewayID: gatewayID,
+            profile: deviceIdentityProfile)
+        let storedOperatorScopes = bindingStore.authorizedScopes(
+            entry: storedOperatorAuth,
+            principal: ingressPrincipal,
+            gatewayID: gatewayID,
+            role: "operator",
+            profile: deviceIdentityProfile)
         return Self.shouldRequestOperatorApprovalScope(
             token: token,
             password: password,
@@ -5297,16 +5403,21 @@ extension NodeAppModel {
         gatewayID: String,
         token: String?,
         password: String?,
-        forceTalkPermissionUpgradeRequest: Bool = false) -> Bool
+        forceTalkPermissionUpgradeRequest: Bool = false,
+        ingressPrincipal: CloudflareAccessPrincipal? = nil,
+        deviceIdentityProfile: GatewayDeviceIdentityProfile = .primary) -> Bool
     {
-        let storedOperatorScopes = DeviceIdentityStore.loadOrCreatePersisted()
-            .flatMap { identity in
-                DeviceAuthStore.loadToken(
-                    deviceId: identity.deviceId,
-                    role: "operator",
-                    gatewayID: gatewayID)
-            }?
-            .scopes ?? []
+        let bindingStore = GatewayAccessDeviceAuthBindingStore.shared
+        let storedOperatorAuth = bindingStore.storedDeviceAuth(
+            role: "operator",
+            gatewayID: gatewayID,
+            profile: deviceIdentityProfile)
+        let storedOperatorScopes = bindingStore.authorizedScopes(
+            entry: storedOperatorAuth,
+            principal: ingressPrincipal,
+            gatewayID: gatewayID,
+            role: "operator",
+            profile: deviceIdentityProfile)
         return Self.shouldRequestOperatorAdminScope(
             token: token,
             password: password,
@@ -5440,16 +5551,25 @@ extension NodeAppModel {
             self.hasOperatorAdminScope = false
             return
         }
+        guard config.ingressAuthorization?.isCurrent() ?? true else {
+            self.hasOperatorAdminScope = false
+            return
+        }
+        let profile = config.nodeOptions.deviceIdentityProfile
         let gatewayID = config.nodeOptions.deviceAuthGatewayID ?? config.effectiveStableID
-        self.hasOperatorAdminScope = DeviceIdentityStore.loadOrCreatePersisted()
-            .flatMap { identity in
-                DeviceAuthStore.loadToken(
-                    deviceId: identity.deviceId,
-                    role: "operator",
-                    gatewayID: gatewayID)
-            }?
-            .scopes
-            .contains("operator.admin") == true
+        let bindingStore = GatewayAccessDeviceAuthBindingStore.shared
+        let stored = bindingStore.storedDeviceAuth(
+            role: "operator",
+            gatewayID: gatewayID,
+            profile: profile)
+        let scopes = bindingStore.authorizedScopes(
+            entry: stored,
+            principal: config.ingressAuthorization?.principal,
+            gatewayID: gatewayID,
+            role: "operator",
+            profile: profile)
+        self.hasOperatorAdminScope = config.nodeOptions.allowStoredDeviceAuth &&
+            scopes.contains("operator.admin")
     }
 }
 
@@ -10021,7 +10141,9 @@ extension NodeAppModel {
             bootstrapToken: cfg.bootstrapToken,
             password: cfg.password,
             deviceAuthGatewayID: cfg.nodeOptions.deviceAuthGatewayID ?? cfg.effectiveStableID,
-            allowStoredDeviceAuth: cfg.nodeOptions.allowStoredDeviceAuth)
+            allowStoredDeviceAuth: cfg.nodeOptions.allowStoredDeviceAuth,
+            ingressPrincipal: cfg.ingressAuthorization?.principal,
+            deviceIdentityProfile: cfg.nodeOptions.deviceIdentityProfile)
         guard canStartReconnectLoop else {
             GatewayDiagnostics.log(
                 "watch exec approval: watch_request_reconnect_timeout "
