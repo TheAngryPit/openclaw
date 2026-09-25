@@ -26,9 +26,13 @@ struct CloudflareAccessTestTokens {
         ]]])
     }
 
-    static func application() throws -> CloudflareAccessApplication {
-        try CloudflareAccessApplication(
-            origin: CloudflareAccessOrigin(#require(URL(string: "https://gateway.example.test:8443"))),
+    static func application(port: Int = 8443) throws -> CloudflareAccessApplication {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "gateway.example.test"
+        if port != 443 { components.port = port }
+        return try CloudflareAccessApplication(
+            origin: CloudflareAccessOrigin(#require(components.url)),
             issuer: #require(URL(string: "https://example.cloudflareaccess.com")),
             audience: "test-audience")
     }

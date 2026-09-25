@@ -499,19 +499,8 @@ targets:
         group: Shared
       - path: Sources/Services/ExactOpaqueIdentifier.swift
         group: Sources/Services
-      - path: Sources/Gateway/CloudflareAccessClient.swift
-        group: Sources/Gateway
-      - path: Sources/Gateway/CloudflareAccessJWT.swift
-        group: Sources/Gateway
-      - path: Sources/Gateway/CloudflareAccessSession.swift
-        group: Sources/Gateway
-      - path: Sources/Gateway/CloudflareAccessSessionStore.swift
-        group: Sources/Gateway
-      - path: Sources/Gateway/CloudflareAccessTransfer.swift
-        group: Sources/Gateway
     dependencies:
       - package: OpenClawKit
-      - package: Sodium
     settings:
       base:
         CODE_SIGN_IDENTITY: "$(OPENCLAW_CODE_SIGN_IDENTITY)"

@@ -815,8 +815,7 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
                         },
                         deleteCookie: { cookie in cookieStore.delete(cookie) },
                         load: { [weak webView] in
-                            guard let webView else { return }
-                            _ = webView.load(request)
+                            _ = webView?.load(request)
                         })
                 } catch {
                     coordinator.failAccessCookieBoundary(in: webView)

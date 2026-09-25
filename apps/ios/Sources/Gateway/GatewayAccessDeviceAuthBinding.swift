@@ -11,7 +11,6 @@ struct CloudflareAccessPrincipal: Equatable, Sendable {
 
     static func verified(from session: CloudflareAccessSession, now: Date = Date()) throws -> Self {
         try session.validate(now: now)
-        guard !session.subject.isEmpty else { throw CloudflareAccessError.invalidSession }
         return Self(fingerprint: GatewayAccessBindingDigest.make([
             "cloudflare-access-principal-v1",
             session.origin.url.absoluteString,

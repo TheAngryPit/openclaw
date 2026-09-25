@@ -277,17 +277,17 @@ describe.skipIf(process.platform === "win32")("iOS Access simulator workflow", (
     expect(tests[0]?.args.filter((arg) => arg.startsWith("-only-testing:"))).toEqual(
       expect.arrayContaining([
         ...authClasses.map((name) => `-only-testing:OpenClawTests/${name}`),
-        ...authClasses.map((name) => `-only-testing:OpenClawLogicTests/${name}`),
         "-only-testing:OpenClawTests/GatewayIngressControllerTests",
+        "-only-testing:OpenClawTests/GatewayAccessDeviceAuthBindingTests",
         "-only-testing:OpenClawTests/GatewayConnectionControllerTests",
         "-only-testing:OpenClawTests/GatewayConnectionSecurityTests",
         "-only-testing:OpenClawTests/GatewaySettingsStoreTests",
         "-only-testing:OpenClawTests/GatewayOperatorFleetTests",
       ]),
     );
-    expect(commands.filter((command) => command.tool === "python3").map((command) => command.args)).toEqual([
-      ["scripts/ios-access-restart-proof.py", "watch-fixture"],
-    ]);
+    expect(
+      commands.filter((command) => command.tool === "python3").map((command) => command.args),
+    ).toEqual([["scripts/ios-access-restart-proof.py", "watch-fixture"]]);
     for (const name of authClasses) {
       expect(readFileSync(`apps/ios/Tests/${name}.swift`, "utf8")).toContain(`struct ${name}`);
     }
@@ -303,6 +303,7 @@ describe.skipIf(process.platform === "win32")("iOS Access simulator workflow", (
     expect(tests[0]?.args).toEqual(
       expect.arrayContaining([
         ...authClasses.map((name) => `-only-testing:OpenClawTests/${name}`),
+        "-only-testing:OpenClawTests/GatewayAccessDeviceAuthBindingTests",
         "-only-testing:OpenClawLogicTests/WatchVoiceTurnTrackerTests",
         "-only-testing:OpenClawTests/NodeAppModelInvokeTests",
         "-only-testing:OpenClawTests/OpenClawTypographyTests",

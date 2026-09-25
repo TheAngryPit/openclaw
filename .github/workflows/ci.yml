@@ -6440,10 +6440,8 @@ jobs:
             -only-testing:OpenClawTests/CloudflareAccessTransferTests
             -only-testing:OpenClawTests/CloudflareAccessSessionStoreTests
             -only-testing:OpenClawTests/SettingsHubTests
-            -only-testing:OpenClawLogicTests/CloudflareAccessClientTests
-            -only-testing:OpenClawLogicTests/CloudflareAccessTransferTests
-            -only-testing:OpenClawLogicTests/CloudflareAccessSessionStoreTests
             -only-testing:OpenClawTests/GatewayIngressControllerTests
+            -only-testing:OpenClawTests/GatewayAccessDeviceAuthBindingTests
             -only-testing:OpenClawTests/GatewayConnectionControllerTests
             -only-testing:OpenClawTests/GatewayConnectionSecurityTests
             -only-testing:OpenClawTests/GatewaySettingsStoreTests
