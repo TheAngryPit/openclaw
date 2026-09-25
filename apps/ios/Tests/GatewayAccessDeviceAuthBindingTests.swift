@@ -273,7 +273,7 @@ struct GatewayAccessDeviceAuthBindingTests {
             dashboardCookie: { _ in nil },
             checkResponse: { _ in },
             load: { request, operation in try await operation(request) })
-        var config = GatewayConnectConfig(
+        var config = try GatewayConnectConfig(
             url: #require(URL(string: "wss://gateway.example.test")),
             stableID: self.gatewayID,
             tls: nil,
@@ -291,7 +291,7 @@ struct GatewayAccessDeviceAuthBindingTests {
                 clientDisplayName: "Phone",
                 allowStoredDeviceAuth: false))
         config.ingressAuthorization = ingress
-        let script = AuthenticatedControlUI.authUserScript(
+        let script = try AuthenticatedControlUI.authUserScript(
             config: config,
             pageURL: #require(URL(string: "https://gateway.example.test/ui")),
             storedOperatorToken: "legacy-admin-token")

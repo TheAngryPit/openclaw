@@ -216,10 +216,10 @@ final class GatewayOperatorFleet {
             clientId: nodeOptions.clientId,
             clientMode: "ui",
             clientDisplayName: nodeOptions.clientDisplayName,
+            deviceIdentityProfile: nodeOptions.deviceIdentityProfile,
             includeDeviceIdentity: true,
             allowStoredDeviceAuth: nodeOptions.allowStoredDeviceAuth,
-            deviceAuthGatewayID: nodeOptions.deviceAuthGatewayID,
-            deviceIdentityProfile: nodeOptions.deviceIdentityProfile)
+            deviceAuthGatewayID: nodeOptions.deviceAuthGatewayID)
     }
 }
 

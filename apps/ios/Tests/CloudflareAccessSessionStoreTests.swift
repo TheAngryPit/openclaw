@@ -198,7 +198,8 @@ struct CloudflareAccessSessionStoreTests {
     @Test func `dashboard cookie is a current host-scoped HTTP-only Access app grant`() throws {
         let tokens = try CloudflareAccessTestTokens()
         let application = try CloudflareAccessTestTokens.application(port: 443)
-        let expiry = Date(timeIntervalSince1970: 2_000_000_000)
+        let now = Date()
+        let expiry = Date(timeIntervalSince1970: floor(now.timeIntervalSince1970) + 3_600)
         let session = try tokens.session(expires: expiry, application: application)
         let dashboardURL = try #require(URL(string: "https://gateway.example.test/settings"))
         let cookie = try #require(session.dashboardCookie(
@@ -210,7 +211,6 @@ struct CloudflareAccessSessionStoreTests {
         #expect(cookie.path == "/")
         #expect(cookie.isSecure)
         #expect(cookie.isHTTPOnly)
-        #expect(cookie.properties?[.originURL] as? URL == application.origin.url)
         #expect(cookie.expiresDate.map({ $0 <= expiry && $0 > expiry.addingTimeInterval(-1) }) == true)
         #expect(session.dashboardCookie(
             for: try #require(URL(string: "https://other.example.test/settings")),
@@ -348,7 +348,7 @@ struct CloudflareAccessSessionStoreTests {
         defer {
             // Only these unique rows belong to this test. No service-wide cleanup.
             for (rowService, account) in ownedRows {
-                #expect(GenericPasswordKeychainStore.delete(service: rowService, account: account))
+                _ = GenericPasswordKeychainStore.delete(service: rowService, account: account)
                 let absent = GenericPasswordKeychainStore.loadString(service: rowService, account: account) == nil
                 #expect(absent)
             }

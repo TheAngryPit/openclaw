@@ -302,7 +302,7 @@ enum AuthenticatedControlUIAccessCookieBoundary {
 enum AuthenticatedControlUIAccessCookieInstaller {
     typealias Admission = @MainActor @Sendable () -> Bool
     typealias Completion = @MainActor @Sendable () -> Void
-    typealias CookieWriter = @MainActor @Sendable (HTTPCookie, Completion) -> Void
+    typealias CookieWriter = @MainActor @Sendable (HTTPCookie, @escaping Completion) -> Void
     typealias CookieRemover = @MainActor @Sendable (HTTPCookie) -> Void
     typealias Loader = @MainActor @Sendable () -> Void
 
@@ -600,6 +600,11 @@ final class AuthenticatedControlUIWebViewCoordinator: NSObject, WKNavigationDele
         Task {
             do {
                 try await accessResponseCheck(response)
+                guard self.isAccessAdmissionCurrent() else {
+                    self.retireAccess(in: webView)
+                    decisionHandler(.cancel)
+                    return
+                }
                 decisionHandler(.allow)
             } catch {
                 self.retireAccess(in: webView)
