@@ -1086,6 +1086,7 @@ struct GatewayIngressControllerTests {
         try await relaunched.forget(stableID: fixture.stableID)
         #expect(fixture.persisted == nil)
     }
+
     @Test @MainActor
     func `Dashboard Access cookie admission tracks owner revision and distinguishes Gateway auth denial`() async throws {
         let fixture = try IngressTestHarness(port: 443)
@@ -1113,5 +1114,4 @@ struct GatewayIngressControllerTests {
         #expect(!admitted.isCurrent())
         #expect(admitted.dashboardCookie(pageURL) == nil)
     }
-
 }

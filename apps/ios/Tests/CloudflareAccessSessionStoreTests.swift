@@ -199,7 +199,7 @@ struct CloudflareAccessSessionStoreTests {
         let tokens = try CloudflareAccessTestTokens()
         let application = try CloudflareAccessTestTokens.application(port: 443)
         let now = Date()
-        let expiry = Date(timeIntervalSince1970: floor(now.timeIntervalSince1970) + 3_600)
+        let expiry = Date(timeIntervalSince1970: floor(now.timeIntervalSince1970) + 3600)
         let session = try tokens.session(expires: expiry, application: application)
         let dashboardURL = try #require(URL(string: "https://gateway.example.test/settings"))
         let cookie = try #require(session.dashboardCookie(
@@ -211,19 +211,19 @@ struct CloudflareAccessSessionStoreTests {
         #expect(cookie.path == "/")
         #expect(cookie.isSecure)
         #expect(cookie.isHTTPOnly)
-        #expect(cookie.expiresDate.map({ $0 <= expiry && $0 > expiry.addingTimeInterval(-1) }) == true)
-        #expect(session.dashboardCookie(
-            for: try #require(URL(string: "https://other.example.test/settings")),
+        #expect(cookie.expiresDate.map { $0 <= expiry && $0 > expiry.addingTimeInterval(-1) } == true)
+        #expect(try session.dashboardCookie(
+            for: #require(URL(string: "https://other.example.test/settings")),
             now: expiry.addingTimeInterval(-1)) == nil)
-        #expect(session.dashboardCookie(
-            for: try #require(URL(string: "https://gateway.example.test:8443/settings")),
+        #expect(try session.dashboardCookie(
+            for: #require(URL(string: "https://gateway.example.test:8443/settings")),
             now: expiry.addingTimeInterval(-1)) == nil)
         #expect(session.dashboardCookie(for: dashboardURL, now: expiry) == nil)
 
         let nonstandard = try CloudflareAccessTestTokens.application(port: 8443)
         let nonstandardSession = try tokens.session(expires: expiry, application: nonstandard)
-        #expect(nonstandardSession.dashboardCookie(
-            for: try #require(URL(string: "https://gateway.example.test:8443/settings")),
+        #expect(try nonstandardSession.dashboardCookie(
+            for: #require(URL(string: "https://gateway.example.test:8443/settings")),
             now: expiry.addingTimeInterval(-1)) == nil)
     }
 

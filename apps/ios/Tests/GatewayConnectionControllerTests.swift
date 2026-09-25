@@ -2838,7 +2838,9 @@ private func waitUntil(
         appModel.applyGatewayConnectConfig(config)
         let previousOwnerID = appModel.chatViewModelOwnerID
         appModel._test_setGatewaySessionResetTask(Task {
-            for await _ in resetRelease.stream { return }
+            for await _ in resetRelease.stream {
+                return
+            }
         })
         let controller = GatewayConnectionController(
             appModel: appModel,
