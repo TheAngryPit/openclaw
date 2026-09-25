@@ -24,7 +24,9 @@ export function isCiProofTestFile(file: string): boolean {
 // Runtime integration and released-state matrices retain their canonical Vitest
 // owners, but automatic CI runs them only when the test itself changes.
 export const RELEASE_ONLY_RUNTIME_TEST_FILES = [
+  "src/agents/agent-bundle-mcp-retention.test.ts",
   "src/agents/harness/acp-native-execution.process.test.ts",
+  "src/agents/mcp-stdio-client.cleanup.real.test.ts",
   "src/agents/worktrees/service.exact-state-races.test.ts",
   "src/cli/capability-web-output.process.test.ts",
   "src/cli/gateway-backed-exit.process.test.ts",
@@ -65,6 +67,7 @@ export const RELEASE_ONLY_RUNTIME_TEST_FILES = [
   "src/gateway/server.sessions.archive-worktree-lifecycle.test.ts",
   "src/gateway/server.sessions.create.projects.test.ts",
   "src/gateway/server.sessions.delete-worktree-lifecycle.test.ts",
+  "src/gateway/session-row-projection.keyed-marks.benchmark.test.ts",
   "src/gateway/worker-environments/live-chat.test.ts",
   "src/gateway/worker-environments/node-workspace-transfer-retention.test.ts",
   "src/gateway/worker-environments/placement-abandon-lifecycle.test.ts",
@@ -95,6 +98,7 @@ export const RELEASE_ONLY_RUNTIME_TEST_FILES = [
   "test/plugins/codex-model-catalog.gateway.test.ts",
   "test/scripts/bench-sqlite-reliability.test.ts",
   "test/scripts/check-openclaw-package-tarball.bundled-mcp.test.ts",
+  "test/scripts/ci-changed-node-test-plan.integration.test.ts",
   "test/scripts/ci-linux-git.test.ts",
   "test/scripts/full-release-validation-at-sha.test.ts",
   "test/scripts/package-acceptance-workflow.test.ts",
