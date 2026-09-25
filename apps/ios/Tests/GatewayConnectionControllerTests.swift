@@ -88,7 +88,7 @@ struct GatewayRegistryTestIsolation {
     }
 }
 
-private struct TemporaryOpenClawState {
+struct TemporaryOpenClawState {
     private let previousStateDirectory: String?
     private let previousInstanceID: Any?
     private let instanceID: String?
@@ -339,19 +339,19 @@ private func waitUntil(
         }
     }
 
-    @Test @MainActor func `location permission requires global services and app authorization`() {
-        #expect(GatewayConnectionController._test_isLocationAvailable(
-            servicesEnabled: true,
-            status: .authorizedWhenInUse))
-        #expect(GatewayConnectionController._test_isLocationAvailable(
-            servicesEnabled: true,
-            status: .authorizedAlways))
-        #expect(!GatewayConnectionController._test_isLocationAvailable(
-            servicesEnabled: false,
-            status: .authorizedAlways))
-        #expect(!GatewayConnectionController._test_isLocationAvailable(
-            servicesEnabled: true,
-            status: .denied))
+    @Test @MainActor func `location permission requires global services and app authorization`() async {
+        let whenInUse = await GatewayConnectionController._test_isLocationAvailable(
+            status: .authorizedWhenInUse, servicesEnabled: { true })
+        let always = await GatewayConnectionController._test_isLocationAvailable(
+            status: .authorizedAlways, servicesEnabled: { true })
+        let disabled = await GatewayConnectionController._test_isLocationAvailable(
+            status: .authorizedAlways, servicesEnabled: { false })
+        let denied = await GatewayConnectionController._test_isLocationAvailable(
+            status: .denied, servicesEnabled: { true })
+        #expect(whenInUse)
+        #expect(always)
+        #expect(!disabled)
+        #expect(!denied)
     }
 
     @Test @MainActor func `registration permissions exclude watch availability`() async {

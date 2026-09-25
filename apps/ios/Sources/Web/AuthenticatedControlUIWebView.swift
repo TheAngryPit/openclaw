@@ -241,6 +241,41 @@ enum AuthenticatedControlUI {
 }
 
 @MainActor
+enum AuthenticatedControlUIAccessCookieInstaller {
+    typealias Admission = @MainActor @Sendable () -> Bool
+    typealias Completion = @MainActor @Sendable () -> Void
+    typealias CookieWriter = @MainActor @Sendable (HTTPCookie, Completion) -> Void
+    typealias CookieRemover = @MainActor @Sendable (HTTPCookie) -> Void
+    typealias Loader = @MainActor @Sendable () -> Void
+
+    static func install(
+        cookie: HTTPCookie,
+        isCurrent: @escaping Admission,
+        setCookie: @escaping CookieWriter,
+        deleteCookie: @escaping CookieRemover,
+        load: @escaping Loader)
+    {
+        guard self.isUsable(cookie, isCurrent: isCurrent) else {
+            deleteCookie(cookie)
+            return
+        }
+        setCookie(cookie) {
+            guard self.isUsable(cookie, isCurrent: isCurrent) else {
+                deleteCookie(cookie)
+                return
+            }
+            load()
+        }
+    }
+
+    private static func isUsable(_ cookie: HTTPCookie, isCurrent: Admission) -> Bool {
+        cookie.isSecure && cookie.isHTTPOnly &&
+            cookie.expiresDate.map({ $0 > Date() }) == true &&
+            isCurrent()
+    }
+}
+
+@MainActor
 enum AuthenticatedControlUIWebViewNavigationDecision: Equatable {
     case allow
     case cancel
@@ -341,7 +376,11 @@ final class AuthenticatedControlUIWebViewCoordinator: NSObject, WKNavigationDele
     private let allowedMainFramePathPrefix: String?
     private let onMainFrameNavigationOutsideScope: (() -> Void)?
     private let tls: GatewayTLSParams?
+    private let accessCookie: HTTPCookie?
+    private let accessAdmissionIsCurrent: AuthenticatedControlUIAccessCookieInstaller.Admission?
+    private let accessResponseCheck: (@Sendable (HTTPURLResponse) async throws -> Void)?
     private var hasExitedNavigationScope = false
+    private var hasRetiredAccess = false
     private var activeNavigation: WKNavigation?
 
     init(
@@ -352,7 +391,10 @@ final class AuthenticatedControlUIWebViewCoordinator: NSObject, WKNavigationDele
         authScript: String? = nil,
         deviceSettingsBridge: IOSDeviceSettingsBridge? = nil,
         usesNativeEmbed: Bool = false,
-        embedCompatibility: DashboardEmbedCompatibility? = nil)
+        embedCompatibility: DashboardEmbedCompatibility? = nil,
+        accessCookie: HTTPCookie? = nil,
+        accessAdmissionIsCurrent: AuthenticatedControlUIAccessCookieInstaller.Admission? = nil,
+        accessResponseCheck: (@Sendable (HTTPURLResponse) async throws -> Void)? = nil)
     {
         self.url = url
         self.authScript = authScript
@@ -363,6 +405,32 @@ final class AuthenticatedControlUIWebViewCoordinator: NSObject, WKNavigationDele
         self.allowedMainFramePathPrefix = allowedMainFramePathPrefix.map(Self.normalizedPath)
         self.onMainFrameNavigationOutsideScope = onMainFrameNavigationOutsideScope
         self.tls = tls
+        self.accessCookie = accessCookie
+        self.accessAdmissionIsCurrent = accessAdmissionIsCurrent
+        self.accessResponseCheck = accessResponseCheck
+    }
+
+    func isAccessAdmissionCurrent() -> Bool {
+        guard let accessCookie = self.accessCookie else { return true }
+        return !self.hasRetiredAccess &&
+            accessCookie.isSecure &&
+            accessCookie.isHTTPOnly &&
+            accessCookie.expiresDate.map({ $0 > Date() }) == true &&
+            self.accessAdmissionIsCurrent?() == true
+    }
+
+    func retireAccess(in webView: WKWebView) {
+        guard self.accessCookie != nil, !self.hasRetiredAccess else { return }
+        self.hasRetiredAccess = true
+        self.activeNavigation = nil
+        self.retireEmbedCompatibility()
+        webView.navigationDelegate = nil
+        webView.stopLoading()
+        webView.loadHTMLString("", baseURL: nil)
+        webView.configuration.websiteDataStore.removeData(
+            ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
+            modifiedSince: .distantPast,
+            completionHandler: {})
     }
 
     func installUserScripts(in controller: WKUserContentController) {
@@ -440,6 +508,38 @@ final class AuthenticatedControlUIWebViewCoordinator: NSObject, WKNavigationDele
     }
 
     func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationResponse: WKNavigationResponse,
+        decisionHandler: @escaping @MainActor @Sendable (WKNavigationResponsePolicy) -> Void)
+    {
+        guard self.accessCookie != nil else {
+            decisionHandler(.allow)
+            return
+        }
+        guard self.isAccessAdmissionCurrent() else {
+            self.retireAccess(in: webView)
+            decisionHandler(.cancel)
+            return
+        }
+        guard let accessResponseCheck = self.accessResponseCheck,
+              let response = navigationResponse.response as? HTTPURLResponse,
+              GatewayTLSAuthority(url: response.url) == self.expectedOrigin
+        else {
+            decisionHandler(.allow)
+            return
+        }
+        Task {
+            do {
+                try await accessResponseCheck(response)
+                decisionHandler(.allow)
+            } catch {
+                self.retireAccess(in: webView)
+                decisionHandler(.cancel)
+            }
+        }
+    }
+
+    func webView(
         _: WKWebView,
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping @MainActor @Sendable (
@@ -482,6 +582,7 @@ final class AuthenticatedControlUIWebViewCoordinator: NSObject, WKNavigationDele
         to candidateURL: URL?,
         isMainFrame: Bool?) -> AuthenticatedControlUIWebViewNavigationDecision
     {
+        guard self.accessCookie == nil || self.isAccessAdmissionCurrent() else { return .cancel }
         if isMainFrame == false {
             return .allow
         }
@@ -530,6 +631,9 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
     let deviceSettingsBridge: IOSDeviceSettingsBridge?
     let usesNativeEmbed: Bool
     let embedCompatibility: DashboardEmbedCompatibility?
+    let accessCookie: HTTPCookie?
+    let accessAdmissionIsCurrent: AuthenticatedControlUIAccessCookieInstaller.Admission?
+    let accessResponseCheck: (@Sendable (HTTPURLResponse) async throws -> Void)?
 
     init(
         url: URL,
@@ -539,7 +643,10 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
         onMainFrameNavigationOutsideScope: (() -> Void)? = nil,
         deviceSettingsBridge: IOSDeviceSettingsBridge? = nil,
         usesNativeEmbed: Bool = false,
-        embedCompatibility: DashboardEmbedCompatibility? = nil)
+        embedCompatibility: DashboardEmbedCompatibility? = nil,
+        accessCookie: HTTPCookie? = nil,
+        accessAdmissionIsCurrent: AuthenticatedControlUIAccessCookieInstaller.Admission? = nil,
+        accessResponseCheck: (@Sendable (HTTPURLResponse) async throws -> Void)? = nil)
     {
         self.url = url
         self.authScript = authScript
@@ -549,6 +656,9 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
         self.deviceSettingsBridge = deviceSettingsBridge
         self.usesNativeEmbed = usesNativeEmbed
         self.embedCompatibility = embedCompatibility
+        self.accessCookie = accessCookie
+        self.accessAdmissionIsCurrent = accessAdmissionIsCurrent
+        self.accessResponseCheck = accessResponseCheck
     }
 
     func makeCoordinator() -> AuthenticatedControlUIWebViewCoordinator {
@@ -560,7 +670,10 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
             authScript: self.authScript,
             deviceSettingsBridge: self.deviceSettingsBridge,
             usesNativeEmbed: self.usesNativeEmbed,
-            embedCompatibility: self.embedCompatibility)
+            embedCompatibility: self.embedCompatibility,
+            accessCookie: self.accessCookie,
+            accessAdmissionIsCurrent: self.accessAdmissionIsCurrent,
+            accessResponseCheck: self.accessResponseCheck)
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -594,11 +707,35 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
         scrollView.horizontalScrollIndicatorInsets = .zero
         scrollView.automaticallyAdjustsScrollIndicatorInsets = false
 
-        webView.load(URLRequest(url: self.url, cachePolicy: .reloadIgnoringLocalCacheData))
+        let request = URLRequest(url: self.url, cachePolicy: .reloadIgnoringLocalCacheData)
+        if let accessCookie = self.accessCookie {
+            let cookieStore = configuration.websiteDataStore.httpCookieStore
+            AuthenticatedControlUIAccessCookieInstaller.install(
+                cookie: accessCookie,
+                isCurrent: { [weak coordinator = context.coordinator, weak webView] in
+                    coordinator?.isAccessAdmissionCurrent() == true && webView != nil
+                },
+                setCookie: { cookie, completion in
+                    cookieStore.setCookie(cookie) {
+                        Task { @MainActor in completion() }
+                    }
+                },
+                deleteCookie: { cookie in cookieStore.delete(cookie) },
+                load: { [weak webView] in
+                    guard let webView else { return }
+                    _ = webView.load(request)
+                })
+        } else {
+            _ = webView.load(request)
+        }
         return webView
     }
 
-    func updateUIView(_ webView: WKWebView, context _: Context) {
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        guard context.coordinator.isAccessAdmissionCurrent() else {
+            context.coordinator.retireAccess(in: webView)
+            return
+        }
         self.applyAppearance(to: webView)
         // Connection changes recreate the view via `.id`; unrelated SwiftUI passes must not reload it.
     }
@@ -611,6 +748,7 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
         _ webView: WKWebView,
         coordinator: AuthenticatedControlUIWebViewCoordinator)
     {
+        coordinator.retireAccess(in: webView)
         coordinator.retireEmbedCompatibility()
         coordinator.deviceSettingsBridge?.detach(from: webView)
         webView.configuration.userContentController.removeScriptMessageHandler(

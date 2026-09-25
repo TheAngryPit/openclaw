@@ -6219,6 +6219,17 @@ jobs:
             -only-testing:OpenClawTests/CloudflareAccessClientTests
             -only-testing:OpenClawTests/CloudflareAccessTransferTests
             -only-testing:OpenClawTests/CloudflareAccessSessionStoreTests
+            -only-testing:OpenClawTests/SettingsHubTests
+            -only-testing:OpenClawLogicTests/CloudflareAccessClientTests
+            -only-testing:OpenClawLogicTests/CloudflareAccessTransferTests
+            -only-testing:OpenClawLogicTests/CloudflareAccessSessionStoreTests
+            -only-testing:OpenClawTests/GatewayIngressControllerTests
+            -only-testing:OpenClawTests/GatewayConnectionControllerTests
+            -only-testing:OpenClawTests/GatewayConnectionSecurityTests
+            -only-testing:OpenClawTests/GatewaySettingsStoreTests
+            -only-testing:OpenClawTests/GatewayOperatorFleetTests
+            -only-testing:OpenClawTests/IOSMediaArtifactLoaderTests
+            -only-testing:OpenClawTests/OpenClawTypographyTests
           )
           if [[ "$IOS_CI_PHASE" == "tests" ]]; then
             test_args+=(
@@ -6246,6 +6257,7 @@ jobs:
             -parallel-testing-enabled NO \
             "${test_args[@]}" \
             test
+          python3 scripts/ios-access-restart-proof.py "${IOS_SIMULATOR_ID:?}"
           if [[ "$IOS_CI_PHASE" == "tests" ]]; then
             run_apple_command_logged apps/ios/build/LifecycleTestResults/OpenClawWatchDeliveryUITests.log xcodebuild \
               -project apps/ios/OpenClaw.xcodeproj \

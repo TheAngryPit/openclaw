@@ -28,6 +28,40 @@ struct SettingsHubTests {
         }
     }
 
+    @Test func `WebView waits for Access cookie storage and drops stale grants before first load`() throws {
+        let originURL = try #require(URL(string: "https://gateway.example.test"))
+        let cookie = try #require(HTTPCookie(properties: [
+            .name: "CF_Authorization",
+            .value: "synthetic-access-token",
+            .originURL: originURL,
+            .path: "/",
+            .secure: "TRUE",
+            .expires: Date().addingTimeInterval(60),
+            HTTPCookiePropertyKey("HttpOnly"): "TRUE",
+        ]))
+        let currentGrant = AccessCookieInstallFixture()
+        currentGrant.install(cookie)
+        #expect(!currentGrant.didLoad)
+        currentGrant.completeInstallation()
+        #expect(currentGrant.didLoad)
+        #expect(!currentGrant.didDelete)
+
+        let staleGrant = AccessCookieInstallFixture()
+        staleGrant.install(cookie)
+        #expect(!staleGrant.didLoad)
+        staleGrant.isCurrent = false
+        staleGrant.completeInstallation()
+        #expect(!staleGrant.didLoad)
+        #expect(staleGrant.didDelete)
+
+        let staleCoordinator = AuthenticatedControlUIWebViewCoordinator(
+            url: originURL,
+            tls: nil,
+            accessCookie: cookie,
+            accessAdmissionIsCurrent: { false })
+        #expect(staleCoordinator.navigationDecision(to: originURL, isMainFrame: true) == .cancel)
+    }
+
     @Test func `device panels reach their native iOS destinations`() {
         let routes: [(DeviceSettingsPanel, SettingsRoute)] = [
             (.connection, .gateway),
@@ -169,6 +203,28 @@ struct SettingsHubTests {
 }
 
 @MainActor
+private final class AccessCookieInstallFixture {
+    var isCurrent = true
+    var completion: AuthenticatedControlUIAccessCookieInstaller.Completion?
+    var didLoad = false
+    var didDelete = false
+
+    func install(_ cookie: HTTPCookie) {
+        AuthenticatedControlUIAccessCookieInstaller.install(
+            cookie: cookie,
+            isCurrent: { self.isCurrent },
+            setCookie: { _, completion in self.completion = completion },
+            deleteCookie: { _ in self.didDelete = true },
+            load: { self.didLoad = true })
+    }
+
+    func completeInstallation() {
+        self.completion?()
+        self.completion = nil
+    }
+}
+
+@MainActor
 private func waitForDashboardCondition(_ condition: () -> Bool) async throws {
     let deadline = ContinuousClock.now.advanced(by: .seconds(10))
     while !condition() {
@@ -185,7 +241,7 @@ final class SettingsHubVisualProofTests: XCTestCase {
         <body style="font: 17px -apple-system; padding: 24px; color: #222; background: white">
         <h1>Settings</h1><p>Manage your Gateway preferences.</p></body></html>
         """
-        let fixture = try DashboardHTTPFixture(html: html)
+        let fixture = try SettingsHubHTTPFixture(html: html)
         defer { fixture.stop() }
         let fixtureURL = try await fixture.start()
 
@@ -294,7 +350,7 @@ final class SettingsHubVisualProofTests: XCTestCase {
 }
 
 @MainActor
-private final class DashboardHTTPFixture {
+private final class SettingsHubHTTPFixture {
     private struct Client {
         let connection: NWConnection
         var request = Data()

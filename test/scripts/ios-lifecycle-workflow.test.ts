@@ -81,7 +81,7 @@ if (tool === "uname") {
 }
 `,
   );
-  for (const tool of ["xcrun", "xcodebuild", "pnpm", "uname"]) {
+  for (const tool of ["xcrun", "xcodebuild", "pnpm", "python3", "uname"]) {
     const executable = path.join(bin, tool);
     writeFileSync(executable, `#!/bin/sh\nexec '${process.execPath}' '${runner}' '${tool}' "$@"\n`);
     chmodSync(executable, 0o755);
@@ -275,8 +275,19 @@ describe.skipIf(process.platform === "win32")("iOS Access simulator workflow", (
     expect(tests).toHaveLength(1);
     expect(tests[0]?.args).toContain("platform=iOS Simulator,id=watch-fixture");
     expect(tests[0]?.args.filter((arg) => arg.startsWith("-only-testing:"))).toEqual(
-      authClasses.map((name) => `-only-testing:OpenClawTests/${name}`),
+      expect.arrayContaining([
+        ...authClasses.map((name) => `-only-testing:OpenClawTests/${name}`),
+        ...authClasses.map((name) => `-only-testing:OpenClawLogicTests/${name}`),
+        "-only-testing:OpenClawTests/GatewayIngressControllerTests",
+        "-only-testing:OpenClawTests/GatewayConnectionControllerTests",
+        "-only-testing:OpenClawTests/GatewayConnectionSecurityTests",
+        "-only-testing:OpenClawTests/GatewaySettingsStoreTests",
+        "-only-testing:OpenClawTests/GatewayOperatorFleetTests",
+      ]),
     );
+    expect(commands.filter((command) => command.tool === "python3").map((command) => command.args)).toEqual([
+      ["scripts/ios-access-restart-proof.py", "watch-fixture"],
+    ]);
     for (const name of authClasses) {
       expect(readFileSync(`apps/ios/Tests/${name}.swift`, "utf8")).toContain(`struct ${name}`);
     }

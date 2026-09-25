@@ -1,3 +1,4 @@
+import Foundation
 import OpenClawKit
 import SwiftUI
 
@@ -160,24 +161,67 @@ struct EmbeddedDashboardContent: View {
 
     var body: some View {
         let storedOperatorToken = AuthenticatedControlUI.storedOperatorToken(config: self.config)
+        let authorization = self.config?.ingressAuthorization
         VStack(spacing: 0) {
             self.gatewayUpgradeBanner
-            AuthenticatedControlUIWebView(
-                url: self.url,
-                authScript: AuthenticatedControlUI.authUserScript(
-                    config: self.config,
-                    pageURL: self.url,
+            if let authorization {
+                if let cookie = authorization.dashboardCookie(self.url) {
+                    self.dashboardWebView(
+                        storedOperatorToken: storedOperatorToken,
+                        accessCookie: cookie,
+                        authorization: authorization)
+                } else {
+                    self.accessUnavailable
+                }
+            } else {
+                self.dashboardWebView(
                     storedOperatorToken: storedOperatorToken,
-                    usesNativeNavigationChrome: true),
-                tls: self.config?.tls,
-                deviceSettingsBridge: self.bridge,
-                usesNativeEmbed: true,
-                embedCompatibility: self.embedCompatibility)
-                .id(AuthenticatedControlUI.webContentIdentity(
-                    config: self.config,
-                    storedOperatorToken: storedOperatorToken))
-                .accessibilityIdentifier("SettingsHub.Dashboard")
+                    accessCookie: nil,
+                    authorization: nil)
+            }
         }
+    }
+
+    private func dashboardWebView(
+        storedOperatorToken: String?,
+        accessCookie: HTTPCookie?,
+        authorization: GatewayIngressAuthorization?) -> some View
+    {
+        AuthenticatedControlUIWebView(
+            url: self.url,
+            authScript: AuthenticatedControlUI.authUserScript(
+                config: self.config,
+                pageURL: self.url,
+                storedOperatorToken: storedOperatorToken,
+                usesNativeNavigationChrome: true),
+            tls: self.config?.tls,
+            deviceSettingsBridge: self.bridge,
+            usesNativeEmbed: true,
+            embedCompatibility: self.embedCompatibility,
+            accessCookie: accessCookie,
+            accessAdmissionIsCurrent: authorization.map { authorization in
+                { authorization.isCurrent() }
+            },
+            accessResponseCheck: authorization?.checkResponse)
+            .id(AuthenticatedControlUI.webContentIdentity(
+                config: self.config,
+                storedOperatorToken: storedOperatorToken))
+            .accessibilityIdentifier("SettingsHub.Dashboard")
+    }
+
+    @ViewBuilder private var accessUnavailable: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("The embedded Dashboard can't use the current Cloudflare Access session. Native chat and Gateway settings remain available.")
+                .font(OpenClawType.body)
+            if let openGateway {
+                Button(action: openGateway) {
+                    Text("Open Gateway settings")
+                        .font(OpenClawType.subheadSemiBold)
+                }
+            }
+        }
+        .padding()
+        .accessibilityIdentifier("SettingsHub.AccessUnavailable")
     }
 
     @ViewBuilder private var gatewayUpgradeBanner: some View {

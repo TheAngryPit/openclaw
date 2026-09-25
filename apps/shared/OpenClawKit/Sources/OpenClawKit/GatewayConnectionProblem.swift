@@ -236,7 +236,7 @@ public enum GatewayConnectionProblemMapper {
                 owner: .iphone,
                 title: "Browser sign-in required",
                 message: "Sign in to this gateway in the browser, then continue with OpenClaw pairing.",
-                actionLabel: "Retry",
+                actionLabel: "Sign in",
                 retryable: true,
                 pauseReconnect: true)
         }
