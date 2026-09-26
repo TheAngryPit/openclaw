@@ -434,10 +434,7 @@ final class GatewayIngressController {
 
     private func route(stableID: String, origin: CloudflareAccessOrigin) -> Route? {
         let key = GatewayStableIdentifier.Key(stableID)
-        if let route = self.routes[key]?.route,
-           GatewayStableIdentifier.matches(route.stableID, stableID),
-           (try? CloudflareAccessOrigin(route.url)) == origin
-        {
+        if let route = self.routes[key]?.route {
             return route
         }
 

@@ -645,7 +645,7 @@ struct GatewayIngressControllerTests {
             #expect(fixture.profileRows[0].accessOrigin == nil)
             #expect(ingress.attention == nil)
         }
-        #expect(storage.values[fixture.application.origin] == nil)
+        #expect((storage.values[fixture.application.origin] == nil) == !cold)
         #expect(storage.values[replacementOrigin] == before[replacementOrigin])
         #expect(storage.deleted.allSatisfy { $0 == fixture.application.origin })
         #expect(fixture.browser.presented.count == (cold ? 1 : 0))
