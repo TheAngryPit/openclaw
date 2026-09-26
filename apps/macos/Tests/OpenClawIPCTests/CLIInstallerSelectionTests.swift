@@ -86,7 +86,7 @@ struct CLIInstallerSelectionTests {
                 """.write(to: executable, atomically: false, encoding: .utf8)
                 let node = executable.deletingLastPathComponent().appendingPathComponent("node")
                 try makeExecutableForTests(at: node)
-                try "#!/bin/sh\nprintf 'v24.15.0\\n'\n".write(to: node, atomically: false, encoding: .utf8)
+                try "#!/bin/sh\nprintf 'v24.16.0\\n'\n".write(to: node, atomically: false, encoding: .utf8)
             }
             try await body(external, managed)
         }
