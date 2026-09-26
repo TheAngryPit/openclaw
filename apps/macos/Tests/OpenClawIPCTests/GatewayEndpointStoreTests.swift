@@ -659,6 +659,13 @@ struct GatewayEndpointStoreTests {
         let remoteTokenSnapshot = self.makeLaunchAgentSnapshot(
             env: ["GW_PASSWORD": "custom-password"], // pragma: allowlist secret
             password: "custom-password")
+        let serviceTokenSnapshot = self.makeLaunchAgentSnapshot(
+            env: [
+                "GW_PASSWORD": "custom-password", // pragma: allowlist secret
+                "OPENCLAW_GATEWAY_TOKEN": "service-token",
+            ],
+            token: "service-token",
+            password: "custom-password")
 
         let cases: [(
             root: [String: Any],
@@ -671,6 +678,7 @@ struct GatewayEndpointStoreTests {
             (passwordRoot, nil, "custom-password", true, snapshot), // pragma: allowlist secret
             (trustedProxyRoot, nil, "custom-password", true, snapshot), // pragma: allowlist secret
             (remoteTokenRoot, "remote-token", nil, true, remoteTokenSnapshot),
+            (remoteTokenRoot, "service-token", nil, true, serviceTokenSnapshot),
         ]
         for testCase in cases {
             let config = GatewayEndpointStore._testLocalConfig(

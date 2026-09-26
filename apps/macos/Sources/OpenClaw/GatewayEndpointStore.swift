@@ -288,6 +288,10 @@ actor GatewayEndpointStore {
             return token
         }
 
+        if let token = GatewayRemoteConfig.resolveTokenString(root: root), !token.isEmpty {
+            return token
+        }
+
         return nil
     }
 
@@ -310,13 +314,6 @@ actor GatewayEndpointStore {
             }
             // A non-empty local token, including an unresolved SecretRef, stays authoritative.
             if !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return nil }
-        }
-        if let gateway = root["gateway"] as? [String: Any],
-           let remote = gateway["remote"] as? [String: Any],
-           let token = remote["token"] as? String
-        {
-            let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
         }
         return nil
     }
