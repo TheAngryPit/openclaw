@@ -80,11 +80,9 @@ struct CloudflareAccessSession: Codable, Sendable, CustomStringConvertible, Cust
 
     /// Builds the app-token cookie for an in-app Dashboard without exposing it to page JavaScript.
     func dashboardCookie(for url: URL, now: Date = Date()) -> HTTPCookie? {
-        guard self.origin.url.port == nil,
-              self.origin.contains(url),
+        guard self.origin.contains(url),
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
               components.scheme?.lowercased() == "https",
-              components.port.map({ $0 == 443 }) ?? true,
               components.user == nil,
               components.password == nil,
               components.fragment == nil,

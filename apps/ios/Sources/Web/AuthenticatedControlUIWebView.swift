@@ -281,15 +281,16 @@ enum AuthenticatedControlUI {
 enum AuthenticatedControlUIAccessCookieBoundary {
     static func rules(for url: URL) -> String? {
         guard let authority = GatewayTLSAuthority(url: url),
-              authority.scheme == "https", authority.port == 443,
+              authority.scheme == "https",
               let host = url.host
         else { return nil }
         let escapedHost = NSRegularExpression.escapedPattern(for: host)
+        let port = authority.port == 443 ? "(:443)?" : ":\(authority.port)"
         let rules: [[String: Any]] = [
             ["trigger": ["url-filter": ".*"], "action": ["type": "block-cookies"]],
         ] + ["https", "wss"].map { scheme in
             [
-                "trigger": ["url-filter": "^\(scheme)://\(escapedHost)(:443)?/"],
+                "trigger": ["url-filter": "^\(scheme)://\(escapedHost)\(port)/"],
                 "action": ["type": "ignore-previous-rules"],
             ]
         }

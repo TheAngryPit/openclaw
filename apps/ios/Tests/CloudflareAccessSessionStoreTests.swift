@@ -222,8 +222,18 @@ struct CloudflareAccessSessionStoreTests {
 
         let nonstandard = try CloudflareAccessTestTokens.application(port: 8443)
         let nonstandardSession = try tokens.session(expires: expiry, application: nonstandard)
+        let nonstandardURL = try #require(URL(string: "https://gateway.example.test:8443/settings"))
+        let nonstandardCookie = try #require(nonstandardSession.dashboardCookie(
+            for: nonstandardURL,
+            now: expiry.addingTimeInterval(-1)))
+        #expect(nonstandardCookie.domain == "gateway.example.test")
+        #expect(nonstandardCookie.isSecure)
+        #expect(nonstandardCookie.isHTTPOnly)
         #expect(try nonstandardSession.dashboardCookie(
             for: #require(URL(string: "https://gateway.example.test:8443/settings")),
+            now: expiry.addingTimeInterval(-1))?.value == nonstandardCookie.value)
+        #expect(try nonstandardSession.dashboardCookie(
+            for: #require(URL(string: "https://gateway.example.test:9443/settings")),
             now: expiry.addingTimeInterval(-1)) == nil)
     }
 
