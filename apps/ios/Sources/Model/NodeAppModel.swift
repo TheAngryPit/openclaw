@@ -4320,14 +4320,6 @@ extension NodeAppModel {
             hasStoredOperatorToken: canUseStoredOperatorAuth && storedOperatorAuth != nil)
     }
 
-    private func hasStoredGatewayRoleToken(_ role: String, gatewayID: String) -> Bool {
-        guard let identity = DeviceIdentityStore.loadOrCreatePersisted() else { return false }
-        return DeviceAuthStore.loadToken(
-            deviceId: identity.deviceId,
-            role: role,
-            gatewayID: gatewayID) != nil
-    }
-
     nonisolated static func shouldStartOperatorGatewayLoop(
         token: String?,
         bootstrapToken: String?,

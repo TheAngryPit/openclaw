@@ -15,6 +15,7 @@ func defaultGatewayTCPReachabilityProbe(
 }
 
 struct GatewaySetupAttempt: Equatable {
+    // periphery:ignore - Synthesized Equatable compares this ID to reject stale setup attempts.
     private let id = UUID()
     let admissionCheckpoint: UInt64
 }

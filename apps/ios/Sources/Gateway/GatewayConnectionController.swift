@@ -1606,10 +1606,6 @@ extension GatewayConnectionController {
 
 #if DEBUG
 extension GatewayConnectionController {
-    func _test_pendingAutoConnectState() -> (generation: UInt64?, pending: Bool) {
-        (self.pendingAutoConnectGeneration, self.pendingAutoConnectTask != nil)
-    }
-
     func _test_setGateways(_ gateways: [GatewayDiscoveryModel.DiscoveredGateway]) {
         self.gateways = gateways
     }
