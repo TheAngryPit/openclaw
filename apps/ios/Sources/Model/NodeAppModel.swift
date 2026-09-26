@@ -4204,6 +4204,13 @@ extension NodeAppModel {
                     role: "operator",
                     profile: nodeOptions.deviceIdentityProfile,
                     persistedRoles: authRoles.persisted)
+                guard GatewayAccessDeviceAuthBindingStore.shared.bindGatewayIssuedToken(
+                    principal: principal,
+                    gatewayID: deviceAuthGatewayID,
+                    role: "node",
+                    profile: nodeOptions.deviceIdentityProfile,
+                    persistedRoles: authRoles.persisted)
+                else { throw GatewayCredentialHandoffError.persistenceFailed }
             }
             if let metadata = GatewaySettingsStore.loadGatewayCredentialMetadata(
                 instanceId: instanceID,
@@ -4261,22 +4268,31 @@ extension NodeAppModel {
         _ nodeOptions: GatewayConnectOptions,
         stableID: String,
         routeGeneration: UInt64,
-        auth: (token: String?, bootstrapToken: String?, password: String?)) async -> GatewayConnectOptions?
+        auth: (token: String?, bootstrapToken: String?, password: String?),
+        previousTokenVersion: GatewayAccessDeviceAuthBindingStore.TokenVersion?) async -> GatewayConnectOptions?
     {
-        guard !nodeOptions.allowStoredDeviceAuth else { return nodeOptions }
-        guard Self.usesBootstrapCredential(
+        guard self.isCurrentGatewayRoute(generation: routeGeneration, stableID: stableID) else { return nil }
+        if !nodeOptions.allowStoredDeviceAuth, Self.usesBootstrapCredential(
             token: auth.token,
             bootstrapToken: auth.bootstrapToken,
             password: auth.password)
-        else {
-            return nodeOptions
+        {
+            let authRoles = await nodeGateway.currentDeviceAuthRoles()
+            return await self.completeSuccessfulGatewayAuthHandoff(
+                stableID: stableID,
+                routeGeneration: routeGeneration,
+                authRoles: authRoles,
+                nodeOptions: nodeOptions)
         }
-        let authRoles = await nodeGateway.currentDeviceAuthRoles()
-        return await self.completeSuccessfulGatewayAuthHandoff(
-            stableID: stableID,
-            routeGeneration: routeGeneration,
-            authRoles: authRoles,
-            nodeOptions: nodeOptions)
+        guard let config = self.activeGatewayConnectConfig,
+              GatewayStableIdentifier.matches(config.effectiveStableID, stableID)
+        else { return nil }
+        return Self.nodeOptionsAfterSuccessfulDeviceAuthHandshake(
+            nodeOptions,
+            principal: config.ingressAuthorization?.principal,
+            gatewayID: nodeOptions.deviceAuthGatewayID ?? stableID,
+            profile: nodeOptions.deviceIdentityProfile,
+            previousTokenVersion: previousTokenVersion)
     }
 
     private func handleGatewayCredentialHandoffFailure(
@@ -4685,6 +4701,51 @@ extension NodeAppModel {
         }
     }
 
+    private static func nodeDeviceAuthState(
+        gatewayID: String,
+        principal: CloudflareAccessPrincipal?,
+        profile: GatewayDeviceIdentityProfile,
+        fallbackAllowed: Bool,
+        bindingStore: GatewayAccessDeviceAuthBindingStore = .shared) -> (
+        allowStoredDeviceAuth: Bool,
+        tokenVersion: GatewayAccessDeviceAuthBindingStore.TokenVersion?)
+    {
+        let stored = bindingStore.storedDeviceAuth(
+            role: "node",
+            gatewayID: gatewayID,
+            profile: profile)
+        return (
+            allowStoredDeviceAuth: bindingStore.allowsStoredDeviceAuth(
+                entry: stored,
+                principal: principal,
+                gatewayID: gatewayID,
+                role: "node",
+                profile: profile,
+                fallbackAllowed: fallbackAllowed),
+            tokenVersion: bindingStore.tokenVersion(for: stored))
+    }
+
+    private static func nodeOptionsAfterSuccessfulDeviceAuthHandshake(
+        _ options: GatewayConnectOptions,
+        principal: CloudflareAccessPrincipal?,
+        gatewayID: String,
+        profile: GatewayDeviceIdentityProfile,
+        previousTokenVersion: GatewayAccessDeviceAuthBindingStore.TokenVersion?,
+        bindingStore: GatewayAccessDeviceAuthBindingStore = .shared) -> GatewayConnectOptions
+    {
+        guard let principal,
+              bindingStore.bindCurrentTokenAfterHandshake(
+                  principal: principal,
+                  gatewayID: gatewayID,
+                  role: "node",
+                  profile: profile,
+                  previousVersion: previousTokenVersion)
+        else { return options }
+        var next = options
+        next.allowStoredDeviceAuth = true
+        return next
+    }
+
     private func operatorDeviceAuthState(
         gatewayID: String,
         principal: CloudflareAccessPrincipal?,
@@ -4924,7 +4985,15 @@ extension NodeAppModel {
             fallbackToken: context.fallbackToken,
             fallbackBootstrapToken: context.fallbackBootstrapToken,
             fallbackPassword: context.fallbackPassword)
-        let connectedOptions = state.options
+        let deviceAuthGatewayID = state.options.deviceAuthGatewayID ?? context.stableID
+        let nodeAuthState = Self.nodeDeviceAuthState(
+            gatewayID: deviceAuthGatewayID,
+            principal: context.ingressAuthorization?.principal,
+            profile: state.options.deviceIdentityProfile,
+            fallbackAllowed: state.options.allowStoredDeviceAuth)
+        var candidateOptions = state.options
+        candidateOptions.allowStoredDeviceAuth = nodeAuthState.allowStoredDeviceAuth
+        let connectedOptions = candidateOptions
         GatewayDiagnostics.log("connect attempt epochMs=\(epochMs) url=\(context.url.absoluteString)")
 
         do {
@@ -4992,7 +5061,8 @@ extension NodeAppModel {
                 connectedOptions,
                 stableID: context.stableID,
                 routeGeneration: context.routeGeneration,
-                auth: reconnectAuth)
+                auth: reconnectAuth,
+                previousTokenVersion: nodeAuthState.tokenVersion)
             else { return .stop }
 
             var nextState = state
@@ -10816,6 +10886,40 @@ extension NodeAppModel {
 
     func _test_shouldRequestStoredOperatorAdminScope(gatewayID: String) -> Bool {
         self.shouldRequestOperatorAdminScope(gatewayID: gatewayID, token: nil, password: nil)
+    }
+
+    static func _test_nodeDeviceAuthState(
+        gatewayID: String,
+        principal: CloudflareAccessPrincipal?,
+        profile: GatewayDeviceIdentityProfile,
+        fallbackAllowed: Bool,
+        bindingStore: GatewayAccessDeviceAuthBindingStore) -> (
+        allowStoredDeviceAuth: Bool,
+        tokenVersion: GatewayAccessDeviceAuthBindingStore.TokenVersion?)
+    {
+        self.nodeDeviceAuthState(
+            gatewayID: gatewayID,
+            principal: principal,
+            profile: profile,
+            fallbackAllowed: fallbackAllowed,
+            bindingStore: bindingStore)
+    }
+
+    static func _test_nodeOptionsAfterSuccessfulDeviceAuthHandshake(
+        _ options: GatewayConnectOptions,
+        principal: CloudflareAccessPrincipal?,
+        gatewayID: String,
+        profile: GatewayDeviceIdentityProfile,
+        previousTokenVersion: GatewayAccessDeviceAuthBindingStore.TokenVersion?,
+        bindingStore: GatewayAccessDeviceAuthBindingStore) -> GatewayConnectOptions
+    {
+        self.nodeOptionsAfterSuccessfulDeviceAuthHandshake(
+            options,
+            principal: principal,
+            gatewayID: gatewayID,
+            profile: profile,
+            previousTokenVersion: previousTokenVersion,
+            bindingStore: bindingStore)
     }
 
     func _test_completeSuccessfulGatewayAuthHandoff(

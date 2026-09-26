@@ -19,9 +19,12 @@ struct GatewayAccessDeviceAuthBindingTests {
         }
     }
 
-    private func bindingStore(memory: MemoryStore) -> GatewayAccessDeviceAuthBindingStore {
+    private func bindingStore(
+        memory: MemoryStore,
+        role expectedRole: String = "operator") -> GatewayAccessDeviceAuthBindingStore
+    {
         .init(persistence: memory.persistence, loadDeviceAuth: { role, gatewayID, profile in
-            guard role == "operator",
+            guard role == expectedRole,
                   gatewayID == self.gatewayID,
                   profile == .primary
             else { return nil }
@@ -45,13 +48,14 @@ struct GatewayAccessDeviceAuthBindingTests {
         return try CloudflareAccessPrincipal.verified(from: session)
     }
 
-    private func storedToken(_ token: String) -> GatewayAccessDeviceAuthBindingStore.StoredDeviceAuth {
+    private func storedToken(_ token: String, role: String = "operator") -> GatewayAccessDeviceAuthBindingStore
+    .StoredDeviceAuth {
         GatewayAccessDeviceAuthBindingStore.StoredDeviceAuth(
             deviceID: self.deviceID,
             entry: DeviceAuthEntry(
                 token: token,
-                role: "operator",
-                scopes: ["operator.admin"],
+                role: role,
+                scopes: role == "operator" ? ["operator.admin"] : [],
                 updatedAtMs: 100,
                 gatewayID: self.gatewayID))
     }
@@ -255,6 +259,90 @@ struct GatewayAccessDeviceAuthBindingTests {
             role: "operator",
             profile: .primary,
             fallbackAllowed: true))
+    }
+
+    @Test func `node reconnect never presents A token to B and binds only after Gateway rotation`() throws {
+        let tokens = try CloudflareAccessTestTokens()
+        let application = try CloudflareAccessTestTokens.application()
+        let ownerA = try principal(tokens: tokens, subject: "owner-A", application: application)
+        let memberB = try principal(tokens: tokens, subject: "member-B", application: application)
+        let memory = MemoryStore()
+        memory.deviceAuth = self.storedToken("gateway-node-A", role: "node")
+        let store = self.bindingStore(memory: memory, role: "node")
+        #expect(store.bindGatewayIssuedToken(
+            principal: ownerA,
+            gatewayID: self.gatewayID,
+            role: "node",
+            profile: .primary,
+            persistedRoles: ["node"]))
+
+        let a = NodeAppModel._test_nodeDeviceAuthState(
+            gatewayID: self.gatewayID,
+            principal: ownerA,
+            profile: .primary,
+            fallbackAllowed: true,
+            bindingStore: store)
+        let b = NodeAppModel._test_nodeDeviceAuthState(
+            gatewayID: self.gatewayID,
+            principal: memberB,
+            profile: .primary,
+            fallbackAllowed: true,
+            bindingStore: store)
+        #expect(a.allowStoredDeviceAuth)
+        #expect(!b.allowStoredDeviceAuth)
+
+        var options = GatewayConnectOptions(
+            role: "node",
+            scopes: [],
+            caps: [],
+            commands: [],
+            permissions: [:],
+            clientId: "ios",
+            clientMode: "node",
+            clientDisplayName: "Phone",
+            allowStoredDeviceAuth: b.allowStoredDeviceAuth)
+        options = NodeAppModel._test_nodeOptionsAfterSuccessfulDeviceAuthHandshake(
+            options,
+            principal: memberB,
+            gatewayID: self.gatewayID,
+            profile: .primary,
+            previousTokenVersion: b.tokenVersion,
+            bindingStore: store)
+        #expect(!options.allowStoredDeviceAuth)
+        #expect(!NodeAppModel._test_nodeDeviceAuthState(
+            gatewayID: self.gatewayID,
+            principal: memberB,
+            profile: .primary,
+            fallbackAllowed: true,
+            bindingStore: store).allowStoredDeviceAuth)
+
+        memory.deviceAuth = self.storedToken("gateway-node-B", role: "node")
+        options = NodeAppModel._test_nodeOptionsAfterSuccessfulDeviceAuthHandshake(
+            options,
+            principal: memberB,
+            gatewayID: self.gatewayID,
+            profile: .primary,
+            previousTokenVersion: b.tokenVersion,
+            bindingStore: store)
+        #expect(options.allowStoredDeviceAuth)
+        #expect(NodeAppModel._test_nodeDeviceAuthState(
+            gatewayID: self.gatewayID,
+            principal: memberB,
+            profile: .primary,
+            fallbackAllowed: true,
+            bindingStore: store).allowStoredDeviceAuth)
+        #expect(!NodeAppModel._test_nodeDeviceAuthState(
+            gatewayID: self.gatewayID,
+            principal: ownerA,
+            profile: .primary,
+            fallbackAllowed: true,
+            bindingStore: store).allowStoredDeviceAuth)
+        #expect(NodeAppModel._test_nodeDeviceAuthState(
+            gatewayID: self.gatewayID,
+            principal: nil,
+            profile: .primary,
+            fallbackAllowed: true,
+            bindingStore: store).allowStoredDeviceAuth)
     }
 
     @Test func `access webview removes stale scoped device auth for an unbound principal`() throws {
