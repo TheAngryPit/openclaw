@@ -87,7 +87,7 @@ With the `acpx` backend, use these ids as `/acp spawn <id>` or
 | `droid`      | Factory Droid CLI                              | Requires Factory/Droid auth or `FACTORY_API_KEY` in the harness environment.        |
 | `fast-agent` | fast-agent-mcp ACP adapter                     | Fetched on demand with `uvx`.                                                       |
 | `gemini`     | Gemini CLI ACP adapter                         | Requires Gemini CLI auth or API key setup.                                          |
-| `grok-build` | Grok Build CLI (`grok agent stdio`)            | Requires Grok Build installed and authenticated on the host.                       |
+| `grok-build` | Grok Build CLI (`grok agent stdio`)            | Requires Grok Build installed and authenticated on the host.                        |
 | `iflow`      | iFlow CLI                                      | Adapter availability and model control depend on the installed CLI.                 |
 | `kilocode`   | Kilo Code CLI                                  | Adapter availability and model control depend on the installed CLI.                 |
 | `kimi`       | Kimi/Moonshot CLI                              | Requires Kimi/Moonshot auth on the host.                                            |
