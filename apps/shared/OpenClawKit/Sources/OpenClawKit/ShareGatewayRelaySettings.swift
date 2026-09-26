@@ -32,10 +32,6 @@ public struct ShareGatewayRelayConfig: Codable, Sendable, Equatable {
 }
 
 public enum ShareGatewayRelaySettings {
-    private static var suiteName: String {
-        OpenClawAppGroup.identifier
-    }
-
     private static let relayConfigKey = "share.gatewayRelay.config.v1"
     // On iOS an App Group is also a Keychain access group. Reuse the existing
     // group so the host and extension share only this credential bundle.
@@ -44,7 +40,7 @@ public enum ShareGatewayRelaySettings {
     private static let lastEventKey = "share.gatewayRelay.event.v1"
 
     private static var defaults: UserDefaults {
-        UserDefaults(suiteName: self.suiteName) ?? .standard
+        UserDefaults(suiteName: OpenClawAppGroup.identifier) ?? .standard
     }
 
     private static var isAppExtension: Bool {
@@ -175,7 +171,7 @@ public enum ShareGatewayRelaySettings {
         guard let json = GenericPasswordKeychainStore.loadString(
             service: self.relayCredentialService,
             account: self.relayCredentialAccount,
-            accessGroup: self.suiteName),
+            accessGroup: OpenClawAppGroup.identifier),
             let data = json.data(using: .utf8),
             let credentials = try? JSONDecoder().decode(ShareGatewayRelayConfig.self, from: data)
         else { return nil }
@@ -187,23 +183,20 @@ public enum ShareGatewayRelaySettings {
             return self.deleteCredentials()
         }
         guard let data = try? JSONEncoder().encode(config),
-              let json = String(data: data, encoding: .utf8),
-              GenericPasswordKeychainStore.saveString(
-                  json,
-                  service: self.relayCredentialService,
-                  account: self.relayCredentialAccount,
-                  accessGroup: self.suiteName)
-        else {
-            return false
-        }
-        return true
+              let json = String(data: data, encoding: .utf8)
+        else { return false }
+        return GenericPasswordKeychainStore.saveString(
+            json,
+            service: self.relayCredentialService,
+            account: self.relayCredentialAccount,
+            accessGroup: OpenClawAppGroup.identifier)
     }
 
     private static func deleteCredentials() -> Bool {
         GenericPasswordKeychainStore.delete(
             service: self.relayCredentialService,
             account: self.relayCredentialAccount,
-            accessGroup: self.suiteName)
+            accessGroup: OpenClawAppGroup.identifier)
     }
 
     private static func credentials(
