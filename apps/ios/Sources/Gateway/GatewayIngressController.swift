@@ -286,10 +286,7 @@ final class GatewayIngressController {
         if self.foregroundIntent?.application.origin == origin {
             self.cancelSignIn()
         }
-        let route = self.route(stableID: stableID, origin: origin) ?? Route(
-            url: origin.url,
-            stableID: stableID,
-            tls: nil)
+        let route = Route(url: origin.url, stableID: stableID, tls: nil)
         let retirement = self.sessions.forget(origin)
         let operationID = UUID()
         self.showAttention(
