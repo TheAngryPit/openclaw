@@ -2,13 +2,17 @@ import { html, type TemplateResult } from "lit";
 import { renderHubTabs } from "../../components/hub-tabs.ts";
 import { icons } from "../../components/icons.ts";
 import { t } from "../../i18n/index.ts";
+import { registerSkillWorkshopEnglish } from "../../i18n/locales/en-skill-workshop.ts";
 import type { SkillWorkshopMode } from "../../lib/skill-workshop/index.ts";
 import type { SkillWorkshopState } from "./proposals.ts";
 import { renderSelfLearningToggle, type SkillWorkshopSelfLearning } from "./self-learning.ts";
 import { saveSkillWorkshopMode } from "./storage.ts";
 
+registerSkillWorkshopEnglish();
+
 type SkillWorkshopHeaderProps = {
   selfLearning: SkillWorkshopSelfLearning | null;
+  automationHref: string;
   onSelfLearningToggle: (enabled: boolean) => void;
   // The page owns what a section change resets, so the strip only reports it.
   onModeChange: (mode: SkillWorkshopMode) => void;
@@ -33,7 +37,7 @@ function sectionIcon(icon: TemplateResult) {
 
 export function renderSkillWorkshopHeaderControls(
   state: SkillWorkshopState,
-  { selfLearning, onSelfLearningToggle, onModeChange }: SkillWorkshopHeaderProps,
+  { selfLearning, automationHref, onSelfLearningToggle, onModeChange }: SkillWorkshopHeaderProps,
 ) {
   // A failed or unfinished list read would otherwise publish a stale or
   // zero count as if it were the current inventory.
@@ -43,11 +47,9 @@ export function renderSkillWorkshopHeaderControls(
   const pending = state.skillWorkshopProposals.filter(
     (proposal) => proposal.status === "pending",
   ).length;
-  const historyRecords = state.skillWorkshopProposals.length - pending;
 
   return html`
     <div class="sw-header-controls">
-      ${renderSelfLearningToggle(selfLearning, onSelfLearningToggle)}
       ${renderHubTabs({
         id: "skill-workshop-mode",
         active: state.skillWorkshopMode,
@@ -68,20 +70,13 @@ export function renderSkillWorkshopHeaderControls(
               <span>${t("skillWorkshop.sections.suggestions")}</span>
             `,
           },
-          {
-            value: "history",
-            count: countOf(historyRecords),
-            label: html`
-              ${sectionIcon(icons.rotateCcw)}
-              <span>${t("skillWorkshop.sections.history")}</span>
-            `,
-          },
         ],
         ariaLabel: t("skillWorkshop.sections.aria"),
         panelId: "skill-workshop-mode-panel",
         variant: "sub",
         onSelect: onModeChange,
       })}
+      ${renderSelfLearningToggle(selfLearning, onSelfLearningToggle, automationHref)}
     </div>
   `;
 }

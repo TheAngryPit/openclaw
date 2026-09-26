@@ -17,6 +17,7 @@ import {
   type FileAttachmentOutcome,
   isSkippedFileOutcome,
   renderFileAttachmentOutcome,
+  resolveFileExtractionOutcome,
   sanitizeMimeType,
 } from "./file-attachment-outcomes.js";
 import {
@@ -203,15 +204,15 @@ async function classifyFileAttachment(params: {
     return { outcome: { kind: "read-failure" }, filename, mimeType };
   }
   params.assertCurrent?.();
-  const text = extracted?.text?.trim() ?? "";
-  const extractedImages = extracted?.images ?? [];
-  if (text) {
-    return { outcome: { kind: "extracted", text, images: extractedImages }, filename, mimeType };
-  }
-  if (extractedImages.length > 0) {
-    return { outcome: { kind: "rendered-to-images", images: extractedImages }, filename, mimeType };
-  }
-  return { outcome: { kind: "no-extractable-text" }, filename, mimeType };
+  return {
+    outcome: resolveFileExtractionOutcome({
+      text: extracted?.text?.trim(),
+      images: extracted?.images,
+      metadata: extracted?.metadata,
+    }),
+    filename,
+    mimeType,
+  };
 }
 
 export async function extractFileContext(params: {
@@ -241,7 +242,7 @@ export async function extractFileContext(params: {
       limits,
       skipAttachmentIndexes,
       assertCurrent: params.assertCurrent,
-    });
+    }).finally(() => cache.releaseBuffer(attachment.index));
     params.assertCurrent?.();
     if (outcome.kind === "extracted" || outcome.kind === "rendered-to-images") {
       images.push(
@@ -300,33 +301,58 @@ export async function prepareFileContextFromMedia(params: {
   maxChars: number;
   assertCurrent: () => void;
 }) {
-  params.assertCurrent();
-  const ctx: MsgContext = {
-    media: [...params.media],
-    Provider: params.channelId,
-    AccountId: params.accountId,
-  };
-  const limits = resolveFileExtractionLimits(params.config);
+  return await renderInboundDocumentContext({
+    ctx: {
+      media: [...params.media],
+      Provider: params.channelId,
+      AccountId: params.accountId,
+    },
+    cfg: params.config,
+    workspaceDir: params.workspaceDir,
+    maxChars: params.maxChars,
+    assertCurrent: params.assertCurrent,
+  });
+}
+
+export type InboundDocumentContext = { text: string; images: ExtractedFileImage[] };
+
+/** Keep prompt expansion separate from inbound state so rejected steers can dispatch normally. */
+export async function renderInboundDocumentContext(params: {
+  ctx: MsgContext;
+  cfg: OpenClawConfig;
+  workspaceDir?: string;
+  maxChars?: number;
+  assertCurrent?: () => void;
+}): Promise<InboundDocumentContext> {
+  params.assertCurrent?.();
+  const { ctx, cfg } = params;
+  const limits = resolveFileExtractionLimits(cfg);
   const attachments = normalizeMediaAttachments(ctx);
   const cache = createMediaAttachmentCache(attachments, {
     localPathRoots: resolveMediaAttachmentLocalRoots({
-      cfg: params.config,
+      cfg,
       ctx,
       workspaceDir: params.workspaceDir,
     }),
-    ssrfPolicy: params.config.tools?.web?.fetch?.ssrfPolicy,
+    // The scoped root set is authoritative: merging sessionless defaults back in would restore
+    // the shared workspace/sandbox parents for sandboxed sessions.
+    includeDefaultLocalPathRoots: false,
+    ssrfPolicy: cfg.tools?.web?.fetch?.ssrfPolicy,
     workspaceDir: params.workspaceDir,
   });
   try {
     const context = await extractFileContext({
       attachments,
       cache,
-      cfg: params.config,
-      limits: { ...limits, maxChars: Math.min(limits.maxChars, params.maxChars) },
+      cfg,
+      limits:
+        params.maxChars === undefined
+          ? limits
+          : { ...limits, maxChars: Math.min(limits.maxChars, params.maxChars) },
       selfServePathsEnabled: false,
       assertCurrent: params.assertCurrent,
     });
-    params.assertCurrent();
+    params.assertCurrent?.();
     return {
       text: applyAttachmentMarkerBudget(context.blocks).join("\n\n"),
       images: context.images,

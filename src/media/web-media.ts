@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
+import { assertNoWindowsNetworkPath, safeFileURLToPath } from "@openclaw/fs-safe/advanced";
 import { maxBytesForKind, type MediaKind } from "@openclaw/media-core/constants";
 import { basenameFromAnyPath, extnameFromAnyPath } from "@openclaw/media-core/file-name";
 import {
@@ -23,11 +24,10 @@ import {
   executeSqliteQueryTakeFirstSync,
   getNodeSqliteKysely,
 } from "../infra/kysely-sync.js";
-import { assertNoWindowsNetworkPath, safeFileURLToPath } from "../infra/local-file-access.js";
 import type { PinnedDispatcherPolicy, SsrFPolicy } from "../infra/net/ssrf.js";
 import { isNotFoundPathError, isPathInside } from "../infra/path-guards.js";
 import { resolvePreferredOpenClawTmpDir } from "../infra/tmp-openclaw-dir.js";
-import { getActivePluginHttpRouteRegistry } from "../plugins/runtime.js";
+import { getPluginRegistryForContext } from "../plugins/runtime.js";
 import type { DB as OpenClawStateKyselyDatabase } from "../state/openclaw-state-db.generated.js";
 import {
   openOpenClawStateDatabase,
@@ -37,6 +37,9 @@ import { resolveUserPath } from "../utils.js";
 import { chunkItems } from "../utils/chunk-items.js";
 import { readOutboundMediaFile } from "./bounded-read-file.js";
 import { readRemoteMediaBuffer } from "./fetch.js";
+import { ImageOptimizationLimitError } from "./image-optimization-error.js";
+import { MAX_IMAGE_INPUT_PIXELS } from "./image-processor-config.js";
+import { createImageProcessorWithPixelLimits } from "./image-processor.js";
 import type { OutboundMediaReadFile } from "./load-options.js";
 import {
   assertLocalMediaAllowed,
@@ -49,8 +52,10 @@ import {
 import { MediaReferenceError, resolveInboundMediaReference } from "./media-reference.js";
 import {
   createImageProcessor,
+  isAnimatedWebpBuffer,
   readImageMetadataFromHeader,
   readImageProbeFromHeader,
+  type ImageMetadata,
 } from "./media-services.js";
 import { extractOriginalFilename, getMediaDir } from "./store.js";
 import { formatMediaSize } from "./store.shared.js";
@@ -123,7 +128,7 @@ async function resolveMediaStoreUriToPath(mediaUrl: string): Promise<string | nu
 }
 
 async function resolveHostedPluginMediaUrl(mediaUrl: string): Promise<string | null> {
-  const registry = getActivePluginHttpRouteRegistry();
+  const registry = getPluginRegistryForContext();
   for (const entry of registry?.hostedMediaResolvers ?? []) {
     try {
       const resolved = await entry.resolver(mediaUrl);
@@ -167,8 +172,6 @@ function resolveWebMediaOptions(params: {
 // without letting a tight channel cap buffer up to the 100MB document bound.
 const IMAGE_OPTIMIZE_HEADROOM_FACTOR = 4;
 
-const HEIC_MIME_RE = /^image\/hei[cf]$/i;
-const HEIC_EXT_RE = /\.(heic|heif)$/i;
 const WINDOWS_DRIVE_RE = /^[A-Za-z]:[\\/]/;
 const HOST_READ_ALLOWED_DOCUMENT_MIMES = new Set([
   "application/msword",
@@ -508,16 +511,6 @@ function formatCapReduce(label: string, cap: number, size: number): string {
   return `${label} could not be reduced below ${formatMediaSize(cap)} (got ${formatMediaSize(size)})`;
 }
 
-function isHeicSource(opts: { contentType?: string; fileName?: string }): boolean {
-  if (opts.contentType && HEIC_MIME_RE.test(opts.contentType.trim())) {
-    return true;
-  }
-  if (opts.fileName && HEIC_EXT_RE.test(opts.fileName.trim())) {
-    return true;
-  }
-  return false;
-}
-
 function assertHostReadMediaAllowed(params: {
   sniffedContentType?: string;
   contentType?: string;
@@ -641,10 +634,6 @@ function normalizeImageQualityPreference(value?: string): ImageQualityPreference
   }
 }
 
-function squareLongSideForPixelBudget(pixelBudget: number): number {
-  return Math.floor(Math.sqrt(pixelBudget));
-}
-
 function positiveInteger(value: number | undefined): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0
     ? Math.floor(value)
@@ -668,10 +657,9 @@ function effectiveImageQualityPreference(
 function maxSideForModel(model: ImageCompressionModelPolicy | undefined): number {
   const maxSide = positiveInteger(model?.maxSidePx);
   const maxPixels = positiveInteger(model?.maxPixels);
-  const hardLimits = [
-    maxSide,
-    maxPixels ? squareLongSideForPixelBudget(maxPixels) : undefined,
-  ].filter((value): value is number => value !== undefined);
+  const hardLimits = [maxSide, maxPixels ? Math.floor(Math.sqrt(maxPixels)) : undefined].filter(
+    (value): value is number => value !== undefined,
+  );
   if (hardLimits.length > 0) {
     return Math.min(...hardLimits);
   }
@@ -706,12 +694,11 @@ function sideForPreference(
   switch (preference) {
     case "efficient":
       return Math.min(preferredSide, maxSide, 1280);
-    case "balanced":
-      return Math.min(preferredSide, maxSide);
     case "high":
       return maxSide;
+    default:
+      return Math.min(preferredSide, maxSide);
   }
-  return Math.min(preferredSide, maxSide);
 }
 
 function imageMaxBytesForPolicy(policy?: ImageCompressionPolicy): number | undefined {
@@ -724,6 +711,7 @@ function imageMaxBytesForPolicy(policy?: ImageCompressionPolicy): number | undef
 function imageSatisfiesHardDimensionPolicy(
   buffer: Buffer,
   policy?: ImageCompressionPolicy,
+  metadata?: ImageMetadata,
 ): boolean {
   const models = policy?.models ?? [];
   const hardMaxSides = models
@@ -736,7 +724,7 @@ function imageSatisfiesHardDimensionPolicy(
     return true;
   }
 
-  const meta = readImageMetadataFromHeader(buffer);
+  const meta = metadata ?? readImageMetadataFromHeader(buffer);
   if (!meta) {
     return false;
   }
@@ -764,15 +752,15 @@ function resolvePreservableOriginalImageContentType(params: {
   buffer: Buffer;
   cap: number;
   contentType?: string;
-  fileName?: string;
   policy?: ImageCompressionPolicy;
 }): string | null {
   if (params.buffer.length > params.cap) {
     return null;
   }
   const declaredContentType = normalizeMimeType(params.contentType);
-  const actualContentType = detectPreservableImageMime(params.buffer);
-  if (!actualContentType) {
+  const probe = readImageProbeFromHeader(params.buffer);
+  const actualContentType = probe ? `image/${probe.format}` : undefined;
+  if (!probe || !isPreservableImageMime(actualContentType)) {
     return null;
   }
   const declaredPreservableContentType = isPreservableImageMime(declaredContentType)
@@ -784,36 +772,15 @@ function resolvePreservableOriginalImageContentType(params: {
   if (declaredContentType?.startsWith("image/") && !declaredPreservableContentType) {
     return null;
   }
-  const resolvedContentType = declaredPreservableContentType ?? actualContentType;
-  if (isHeicSource({ contentType: resolvedContentType, fileName: params.fileName })) {
-    return null;
-  }
-  const meta = readImageMetadataFromHeader(params.buffer);
-  if (!meta) {
-    return null;
-  }
   const preferredSide =
     resolveImageCompressionGrid(params.policy).sides[0] ?? DEFAULT_VISION_MAX_SIDE;
   if (
-    Math.max(meta.width, meta.height) > preferredSide ||
-    !imageSatisfiesHardDimensionPolicy(params.buffer, params.policy)
+    Math.max(probe.width, probe.height) > preferredSide ||
+    !imageSatisfiesHardDimensionPolicy(params.buffer, params.policy, probe)
   ) {
     return null;
   }
-  return resolvedContentType;
-}
-
-function detectPreservableImageMime(
-  buffer: Buffer,
-): "image/png" | "image/jpeg" | "image/webp" | null {
-  const format = readImageProbeFromHeader(buffer)?.format;
-  return format === "png"
-    ? "image/png"
-    : format === "jpeg"
-      ? "image/jpeg"
-      : format === "webp"
-        ? "image/webp"
-        : null;
+  return declaredPreservableContentType ?? actualContentType;
 }
 
 function isPreservableImageMime(
@@ -873,16 +840,12 @@ export function resolveImageCompressionGrid(policy?: ImageCompressionPolicy): {
         sides: buildDescendingLadder(side, [3072, 2576, 2048, 1800, 1536, 1280, 1024, 800]),
         qualities: [92, 85, 78, 70, 62, 52, 42],
       };
-    case "balanced":
+    default:
       return {
         sides: buildDescendingLadder(side, [...DEFAULT_JPEG_SIDES]),
         qualities: [...DEFAULT_JPEG_QUALITIES],
       };
   }
-  return {
-    sides: buildDescendingLadder(side, [...DEFAULT_JPEG_SIDES]),
-    qualities: [...DEFAULT_JPEG_QUALITIES],
-  };
 }
 
 function logOptimizedImage(params: { originalSize: number; optimized: OptimizedImage }): void {
@@ -907,10 +870,17 @@ async function optimizeImageWithFallback(params: {
   buffer: Buffer;
   cap: number;
   imageCompression?: ImageCompressionPolicy;
+  maxInputPixels?: number;
 }): Promise<OptimizedImage> {
   const { buffer, cap } = params;
   const grid = resolveImageCompressionGrid(params.imageCompression);
-  const optimized = await createImageProcessor().encode(buffer, {
+  // Generic callers keep the shared decode limit. An owner with a bounded downscale path may
+  // widen source admission explicitly, while every encoded result remains under the output cap.
+  const processor = createImageProcessorWithPixelLimits({
+    inputPixels: params.maxInputPixels ?? MAX_IMAGE_INPUT_PIXELS,
+    outputPixels: MAX_IMAGE_INPUT_PIXELS,
+  });
+  const optimized = await processor.encode(buffer, {
     format: "auto",
     maxBytes: cap,
     opaque: { format: "jpeg" },
@@ -944,28 +914,26 @@ export async function optimizeImageBufferForWebMedia(params: {
   fileName?: string;
   maxBytes?: number;
   imageCompression?: ImageCompressionPolicy;
+  maxInputPixels?: number;
 }): Promise<WebMediaResult> {
   const baseCap = params.maxBytes ?? maxBytesForKind("image");
   const cap = effectiveImageBytesCap(baseCap, params.imageCompression) ?? baseCap;
-  if (params.contentType === "image/gif") {
+  const isAnimatedWebp = isAnimatedWebpBuffer(params.buffer);
+  let originalContentType = isAnimatedWebp ? "image/webp" : (params.contentType ?? null);
+  if (originalContentType === "image/gif" || isAnimatedWebp) {
     if (params.buffer.length > cap) {
-      throw new Error(formatCapLimit("GIF", cap, params.buffer.length));
+      const format = isAnimatedWebp ? "Animated WebP" : "GIF";
+      throw new ImageOptimizationLimitError(formatCapLimit(format, cap, params.buffer.length), cap);
     }
     assertImageSatisfiesHardDimensionPolicy(params.buffer, params.imageCompression);
-    return {
+  } else {
+    originalContentType = resolvePreservableOriginalImageContentType({
       buffer: params.buffer,
+      cap,
       contentType: params.contentType,
-      kind: "image",
-      fileName: params.fileName,
-    };
+      policy: params.imageCompression,
+    });
   }
-  const originalContentType = resolvePreservableOriginalImageContentType({
-    buffer: params.buffer,
-    cap,
-    contentType: params.contentType,
-    fileName: params.fileName,
-    policy: params.imageCompression,
-  });
   if (originalContentType) {
     return {
       buffer: params.buffer,
@@ -978,10 +946,14 @@ export async function optimizeImageBufferForWebMedia(params: {
     buffer: params.buffer,
     cap,
     imageCompression: params.imageCompression,
+    ...(params.maxInputPixels === undefined ? {} : { maxInputPixels: params.maxInputPixels }),
   });
   logOptimizedImage({ originalSize: params.buffer.length, optimized });
   if (optimized.buffer.length > cap) {
-    throw new Error(formatCapReduce("Media", cap, optimized.buffer.length));
+    throw new ImageOptimizationLimitError(
+      formatCapReduce("Media", cap, optimized.buffer.length),
+      cap,
+    );
   }
   return {
     buffer: optimized.buffer,
@@ -1148,7 +1120,7 @@ async function loadWebMediaInternal(
       ? await resolveTrustedGeneratedHostReadHtml(mediaUrl)
       : undefined;
   if (hostReadDeclaredMime === "text/html" && !htmlTrust) {
-    throw new LocalMediaAccessError("path-not-allowed", HOST_READ_DECLARED_TEXT_ERROR);
+    throw new HostReadMediaTypeError(HOST_READ_DECLARED_TEXT_ERROR);
   }
 
   // Local path

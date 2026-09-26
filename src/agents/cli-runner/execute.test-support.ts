@@ -54,6 +54,9 @@ setCliRunnerExecuteTestDeps({
         // was requested; replay it through callbacks once to match production.
         const wrappedParams = {
           ...params,
+          ...(params.mode === "child" && params.resolveArgs
+            ? { argv: [...params.argv, ...params.resolveArgs()] }
+            : {}),
           onStdout: params.onStdout
             ? (chunk: string) => {
                 stdoutDelivered = true;
@@ -101,7 +104,6 @@ setCliRunnerExecuteTestDeps({
         activeRuns.get(runId)?.cancel(reason);
       }),
       cancelScope: vi.fn(),
-      getRecord: vi.fn(),
     };
   },
   enqueueSystemEvent: (
@@ -144,6 +146,7 @@ export function createManagedRun(
   pid = 1234,
 ): ManagedRunMock & Awaited<ReturnType<SupervisorSpawnFn>> {
   return {
+    activity: { resultSettled: true, lastOutputAtMs: Date.now() },
     runId: "run-supervisor",
     pid,
     startedAtMs: Date.now(),

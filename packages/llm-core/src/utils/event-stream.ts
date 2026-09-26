@@ -28,9 +28,19 @@ export function readAssistantThinkingAppend(
   return append?.before === previous && append.after === block.thinking ? append.delta : undefined;
 }
 
+// Completion belongs to the producer, independently of queued-event consumption.
+// Keep it outside the mutable stream surface: result() decorators may repair
+// messages and release consumer-owned state when explicitly awaited.
+const eventStreamCompletions = new WeakMap<object, Promise<unknown>>();
+
+/** Observe native producer settlement without invoking consumer result decorators. */
+export function getEventStreamCompletion(stream: object): Promise<unknown> | undefined {
+  return eventStreamCompletions.get(stream);
+}
+
 /** Generic async-iterable event stream with a separately awaited final result. */
 export class EventStream<T, R = T> implements AsyncIterable<T> {
-  private queue: (T | undefined)[] = [];
+  protected queue: (T | undefined)[] = [];
   private queueHead = 0;
   private waiting: ((value: IteratorResult<T>) => void)[] = [];
   protected done = false;
@@ -49,6 +59,7 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
       this.resolveFinalResult = resolve;
       this.rejectFinalResult = reject;
     });
+    eventStreamCompletions.set(this, this.finalResultPromise);
   }
 
   push(event: T): void {
@@ -137,6 +148,19 @@ export class AssistantMessageEventStream
   private activeThinkingBlocks?: Set<ThinkingContent>;
 
   override push(event: AssistantMessageEvent): void {
+    if (!this.done && event.type === "text_delta" && !event.partial) {
+      const previous = this.queue[this.queue.length - 1];
+      if (
+        previous?.type === "text_delta" &&
+        !previous.partial &&
+        previous.contentIndex === event.contentIndex
+      ) {
+        // Partialless deltas are appends. Only unread neighbors can merge;
+        // snapshots may replace text, and delivered events belong to the consumer.
+        this.queue[this.queue.length - 1] = { ...event, delta: previous.delta + event.delta };
+        return;
+      }
+    }
     if (event.type === "thinking_delta" || event.type === "thinking_end") {
       const block = event.partial.content[event.contentIndex];
       if (block?.type === "thinking") {

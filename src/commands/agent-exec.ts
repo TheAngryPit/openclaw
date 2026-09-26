@@ -53,6 +53,7 @@ type AgentExecCommandDeps = {
   /** Unlike the CLI collector's default [], an explicit [] disables configured fallbacks. */
   modelFallbacksOverride?: string[];
   isCurrent?: () => boolean;
+  assertSourceCurrent?: () => void;
   stdin?: AsyncIterable<unknown>;
   process?: EmbeddedStateSignalProcess;
   gatewayLockOptions?: GatewayLockOptions;
@@ -225,7 +226,6 @@ export async function agentExecCommand(
     isCurrent: deps.isCurrent,
   });
   let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-  let processScopeKey: string | undefined;
   let cleanupProcessScope: (() => Promise<void>) | undefined;
   let commandResult: AgentExecCommandResult;
   const runtimeCleanup = createAgentCleanupScope();
@@ -237,6 +237,10 @@ export async function agentExecCommand(
   let configIo: typeof import("../config/io.js") | undefined;
   let stopLocalAuditWriter: (() => Promise<void>) | undefined;
   let stateLock: EmbeddedStateLockHandle | null | undefined;
+  let temporaryDatabaseScope:
+    | import("../state/openclaw-state-db-async-lifecycle.js").OpenClawDatabaseMaintenanceScope
+    | undefined;
+  let abortSignal = signal;
   let signalBridge:
     | ReturnType<
         (typeof import("../infra/embedded-state-lock.js"))["createEmbeddedStateSignalBridge"]
@@ -354,7 +358,7 @@ export async function agentExecCommand(
     runtimePaths = await import("../config/paths.js");
     const storedAuthStateDir = runtimePaths.resolveStateDir();
     // Capture cleanup before a child can finish or lose its native owner.
-    processScopeKey =
+    const processScopeKey =
       deps.timeoutMs !== undefined || deps.maxToolCalls !== undefined
         ? `agent:${execAgentId}:agent-exec:${sessionId}`
         : undefined;
@@ -366,13 +370,21 @@ export async function agentExecCommand(
     }
     restoreEnvironment = setAgentExecEnvironment({ stateDir, cwd });
     runtimePaths.pinRuntimePaths();
+    if (temporaryStateDir) {
+      const { createOpenClawDatabaseMaintenanceScope } =
+        await import("../state/openclaw-state-db-async-lifecycle.js");
+      // Temporary runs own their resources without borrowing maintenance schema authority.
+      temporaryDatabaseScope = createOpenClawDatabaseMaintenanceScope();
+    }
     if (opts.stateDir) {
       const { acquireEmbeddedStateLock, createEmbeddedStateSignalBridge } =
         await import("../infra/embedded-state-lock.js");
       signalBridge = createEmbeddedStateSignalBridge(deps.process ?? process);
+      // Retained-state signals and caller cancellation both own the turn's lifetime.
+      abortSignal = AbortSignal.any([abortSignal, signalBridge.signal]);
       stateLock = await acquireEmbeddedStateLock({
         options: deps.gatewayLockOptions,
-        signal: signalBridge.signal,
+        signal: abortSignal,
         formatActiveGatewayRefusal: formatActiveGatewayExecRefusal,
       });
     }
@@ -383,19 +395,10 @@ export async function agentExecCommand(
     // env-substituted provider keys to disk where the run's own exec tool
     // could read them.
     snapshotIo.setRuntimeConfigSnapshot(runConfig);
-    if (isExecutionIdentityCollectionEnabled(runConfig)) {
-      try {
-        stopLocalAuditWriter = (await import("./agent-local-audit.js")).startAgentLocalAuditWriter({
-          stateDir,
-        });
-      } catch {
-        // Admission emits a bounded warning if the direct-process writer is unavailable.
-      }
-    }
     const [
       { withAuthProfileStoreAgentDir, withEnvOnlyAuthProfileStore },
       { withHostExecInheritedEnvOmitted },
-      { listKnownProviderAuthEnvVarNames },
+      { listKnownProviderAuthEnvVarNamesCore },
       runAgent,
     ] = await Promise.all([
       import("../agents/auth-profiles.js"),
@@ -413,7 +416,8 @@ export async function agentExecCommand(
       exit: (code, exitOpts) => runtime.exit(code, exitOpts),
     };
     const invoke = async () => {
-      signal.throwIfAborted();
+      abortSignal.throwIfAborted();
+      deps.assertSourceCurrent?.();
       if (deps.isCurrent?.() === false) {
         throw new Error("Agent execution scope is no longer active");
       }
@@ -436,7 +440,8 @@ export async function agentExecCommand(
           cleanupBundleMcpOnRunEnd: true,
           cleanupCliLiveSessionOnRunEnd: true,
           oneShotCliRun: true,
-          abortSignal: signalBridge ? AbortSignal.any([signal, signalBridge.signal]) : signal,
+          abortSignal,
+          assertSourceCurrent: deps.assertSourceCurrent,
           onModelFallbackExhausted: () => {
             fallbackExhausted = true;
           },
@@ -462,13 +467,25 @@ export async function agentExecCommand(
             storedAuthStateDir,
             runWithPluginInstallRoots,
           );
-    const result = await runtimeCleanup.run(() =>
-      toolBudget.run(() =>
+    const run = async () => {
+      if (isExecutionIdentityCollectionEnabled(runConfig)) {
+        try {
+          stopLocalAuditWriter = (
+            await import("./agent-local-audit.js")
+          ).startAgentLocalAuditWriter(runConfig, { stateDir });
+        } catch {
+          // Admission emits a bounded warning if the direct-process writer is unavailable.
+        }
+      }
+      return await toolBudget.run(() =>
         withHostExecInheritedEnvOmitted(
-          listKnownProviderAuthEnvVarNames({ env: process.env }),
+          listKnownProviderAuthEnvVarNamesCore({ env: process.env }),
           runWithAuthScope,
         ),
-      ),
+      );
+    };
+    const result = await runtimeCleanup.run(() =>
+      temporaryDatabaseScope ? temporaryDatabaseScope.run(run) : run(),
     );
     signal.throwIfAborted();
     if (!result) {
@@ -507,7 +524,15 @@ export async function agentExecCommand(
       cleanupError = error;
     }
   }
-  await stopLocalAuditWriter?.().catch(() => undefined);
+  const stopAudit = async () => await stopLocalAuditWriter?.();
+  await (temporaryDatabaseScope ? temporaryDatabaseScope.run(stopAudit) : stopAudit()).catch(
+    () => undefined,
+  );
+  if (!cleanupError) {
+    await temporaryDatabaseScope?.close().catch((error: unknown) => {
+      cleanupError = error;
+    });
+  }
   if (!cleanupError) {
     await stateLock?.release().catch((error: unknown) => {
       cleanupError = error;

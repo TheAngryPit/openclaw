@@ -7,7 +7,7 @@ import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import { readJsonFileWithFallback } from "openclaw/plugin-sdk/json-store";
+import { tryReadJson } from "@openclaw/fs-safe/json";
 import { isRecord as isConfigRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import {
   parse as parseToml,
@@ -84,11 +84,8 @@ async function resolveInstalledAcpPackageBinPath(
 ): Promise<string | undefined> {
   try {
     const packageJsonPath = requireFromHere.resolve(`${packageName}/package.json`);
-    const { value: manifest } = await readJsonFileWithFallback<PackageManifest>(
-      packageJsonPath,
-      {},
-    );
-    if (manifest.name !== packageName) {
+    const manifest = await tryReadJson<PackageManifest>(packageJsonPath);
+    if (manifest?.name !== packageName) {
       return undefined;
     }
     const binPath = resolvePackageBinPath(packageJsonPath, manifest, binName);
@@ -225,10 +222,6 @@ const DIAGNOSTIC_REDACTION_RULES: DiagnosticRedactionRuleSpec[] = [
   },
 ];
 
-function renderDiagnosticRedactionRuleSpecs(): string {
-  return JSON.stringify(DIAGNOSTIC_REDACTION_RULES);
-}
-
 function buildAdapterWrapperScript(params: {
   displayName: string;
   packageSpec: string;
@@ -296,7 +289,7 @@ function resolveStderrLogPath(args) {
   return fileURLToPath(new URL("./" + fileName, import.meta.url));
 }
 
-const diagnosticRedactionRules = ${renderDiagnosticRedactionRuleSpecs()}.map((rule) => [
+const diagnosticRedactionRules = ${JSON.stringify(DIAGNOSTIC_REDACTION_RULES)}.map((rule) => [
   new RegExp(rule.source, rule.flags),
   rule.replacement,
 ]);
@@ -717,31 +710,21 @@ async function prepareIsolatedCodexHome(params: {
   return codexHome;
 }
 
-async function makeGeneratedWrapperExecutableIfPossible(wrapperPath: string): Promise<void> {
+async function writeAdapterWrapper(
+  baseDir: string,
+  fileName: string,
+  script: string,
+): Promise<string> {
+  await fs.mkdir(baseDir, { recursive: true });
+  const wrapperPath = path.join(baseDir, fileName);
+  await fs.writeFile(wrapperPath, script, {
+    encoding: "utf8",
+  });
   try {
     await fs.chmod(wrapperPath, 0o755);
   } catch {
     // The wrapper is invoked via `node wrapper.mjs`; executable mode is only a convenience.
   }
-}
-
-async function writeCodexAcpWrapper(baseDir: string, installedBinPath?: string): Promise<string> {
-  await fs.mkdir(baseDir, { recursive: true });
-  const wrapperPath = path.join(baseDir, "codex-acp-wrapper.mjs");
-  await fs.writeFile(wrapperPath, buildCodexAcpWrapperScript(installedBinPath), {
-    encoding: "utf8",
-  });
-  await makeGeneratedWrapperExecutableIfPossible(wrapperPath);
-  return wrapperPath;
-}
-
-async function writeClaudeAcpWrapper(baseDir: string, installedBinPath?: string): Promise<string> {
-  await fs.mkdir(baseDir, { recursive: true });
-  const wrapperPath = path.join(baseDir, "claude-agent-acp-wrapper.mjs");
-  await fs.writeFile(wrapperPath, buildClaudeAcpWrapperScript(installedBinPath), {
-    encoding: "utf8",
-  });
-  await makeGeneratedWrapperExecutableIfPossible(wrapperPath);
   return wrapperPath;
 }
 
@@ -908,20 +891,6 @@ function resolveCodexAdapterLaunch(
   return { args: maintainedAdapterArgs };
 }
 
-function buildCodexAcpWrapperCommand(
-  wrapperPath: string,
-  configuredCommand?: AcpxAgentCommand,
-): string[] {
-  const launch = resolveCodexAdapterLaunch(configuredCommand);
-  if (launch) {
-    return buildWrapperCommand(wrapperPath, launch.args);
-  }
-  return buildWrapperCommand(wrapperPath, [
-    RUN_CONFIGURED_COMMAND_SENTINEL,
-    ...splitCommandParts(configuredCommand ?? []),
-  ]);
-}
-
 async function persistMigratedCodexMcpConfig(params: {
   codexHome: string;
   migratedConfig: Record<string, unknown> | undefined;
@@ -978,14 +947,28 @@ export async function prepareAcpxCodexAuthConfig(params: {
   const installedClaudeBinPath = await (
     params.resolveInstalledClaudeAcpBinPath ?? resolveInstalledClaudeAcpBinPath
   )();
-  const wrapperPath = await writeCodexAcpWrapper(codexBaseDir, installedCodexBinPath);
-  const claudeWrapperPath = await writeClaudeAcpWrapper(codexBaseDir, installedClaudeBinPath);
+  const wrapperPath = await writeAdapterWrapper(
+    codexBaseDir,
+    "codex-acp-wrapper.mjs",
+    buildCodexAcpWrapperScript(installedCodexBinPath),
+  );
+  const claudeWrapperPath = await writeAdapterWrapper(
+    codexBaseDir,
+    "claude-agent-acp-wrapper.mjs",
+    buildClaudeAcpWrapperScript(installedClaudeBinPath),
+  );
 
   return {
     ...params.pluginConfig,
     agents: {
       ...params.pluginConfig.agents,
-      codex: buildCodexAcpWrapperCommand(wrapperPath, configuredCodexCommand),
+      codex: buildWrapperCommand(
+        wrapperPath,
+        codexLaunch?.args ?? [
+          RUN_CONFIGURED_COMMAND_SENTINEL,
+          ...splitCommandParts(configuredCodexCommand ?? []),
+        ],
+      ),
       claude: buildClaudeAcpWrapperCommand(claudeWrapperPath, configuredClaudeCommand),
     },
   };

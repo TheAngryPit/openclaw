@@ -1,7 +1,23 @@
 import { vi } from "vitest";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { ApplicationContext, ApplicationGatewaySnapshot } from "../../app/context.ts";
+import type { SkillWorkshopRevisionAdmissionOutcome } from "../../app/skill-workshop-revision-admissions.ts";
+import type { SkillWorkshopProposal } from "../../lib/skill-workshop/index.ts";
 import { gatewayHelloForMethods } from "../../test-helpers/gateway-methods.ts";
+import type { SkillWorkshopState } from "./proposals.ts";
+
+export type SkillWorkshopPageTestElement = HTMLElement & {
+  context: ApplicationContext;
+  state?: SkillWorkshopState;
+  handleRevisionRequest: (
+    instructions: string,
+    proposal: SkillWorkshopProposal,
+    proposalAgentId: string,
+    expectedRevisionHash?: string,
+  ) => Promise<SkillWorkshopRevisionAdmissionOutcome>;
+  updateComplete: Promise<boolean>;
+  requestUpdate: () => void;
+};
 
 export function createRuntimeConfigStub(options?: {
   sourceConfig?: Record<string, unknown>;
@@ -70,6 +86,7 @@ export function createContext(
     },
     sessions: options?.sessions ?? { state: { result: null, loading: false } },
     runtimeConfig: options?.runtimeConfig ?? createRuntimeConfigStub(),
+    chatSubmissions: { retain: vi.fn() },
     navigate: vi.fn(),
   } as unknown as ApplicationContext;
 }

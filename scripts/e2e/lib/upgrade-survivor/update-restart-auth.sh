@@ -2,8 +2,32 @@
 
 install_update_restart_systemctl_shim() {
   local shim_dir="$npm_config_prefix/bin"
+  export XDG_RUNTIME_DIR="$shim_dir/runtime"
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+  local manager_env
+  manager_env="$(node <<'MANAGER_ENV'
+const keys = [
+  "CI", "OPENCLAW_NO_ONBOARD", "OPENCLAW_NO_PROMPT", "OPENCLAW_SKIP_PROVIDERS",
+  "OPENCLAW_SKIP_CHANNELS", "OPENCLAW_DISABLE_BONJOUR",
+  "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+];
+const captured = Object.fromEntries(keys.map((key) => [key, process.env[key] ?? null]));
+const registry = process.env.NPM_CONFIG_REGISTRY || process.env.npm_config_registry || null;
+for (const key of ["NPM_CONFIG_REGISTRY", "npm_config_registry", "BUN_CONFIG_REGISTRY"]) {
+  captured[key] = registry;
+}
+process.stdout.write(JSON.stringify(captured));
+MANAGER_ENV
+  )" || return "$?"
   mkdir -p "$shim_dir"
   cp "$(dirname "${BASH_SOURCE[0]}")/systemd-fixture.mjs" "$shim_dir/systemd-fixture.mjs"
+  node - "$shim_dir/systemd-fixture-runtime.json" \
+    "${OPENCLAW_UPGRADE_SURVIVOR_SYSTEMCTL_SHIM_PID_FILE:-$shim_dir/systemctl-shim.pid}" \
+    "${OPENCLAW_UPGRADE_SURVIVOR_SYSTEMCTL_SHIM_DAEMON_LOG:-$shim_dir/systemctl-shim-gateway.log}" <<'RUNTIME_PATHS'
+const fs = require("node:fs");
+const [file, pidFile, daemonLog] = process.argv.slice(2);
+fs.writeFileSync(file, JSON.stringify({ pidFile, daemonLog }), { mode: 0o600 });
+RUNTIME_PATHS
   cat >"$shim_dir/busctl" <<'BUSCTL'
 #!/usr/bin/env bash
 exec node "$(dirname "$0")/systemd-fixture.mjs" busctl "$@"
@@ -14,6 +38,7 @@ BUSCTL
     printf 'log_file=%q\n' "${OPENCLAW_UPGRADE_SURVIVOR_SYSTEMCTL_SHIM_LOG:-$shim_dir/systemctl-shim.log}"
     printf 'pid_file=%q\n' "${OPENCLAW_UPGRADE_SURVIVOR_SYSTEMCTL_SHIM_PID_FILE:-$shim_dir/systemctl-shim.pid}"
     printf 'daemon_log=%q\n' "${OPENCLAW_UPGRADE_SURVIVOR_SYSTEMCTL_SHIM_DAEMON_LOG:-$shim_dir/systemctl-shim-gateway.log}"
+    printf 'manager_env=%q\n' "$manager_env"
     cat <<'SHIM'
 supervisor_script="${pid_file}.supervisor.mjs"
 manager_script="$(dirname "$0")/systemd-fixture.mjs"
@@ -51,6 +76,12 @@ if [ "${#filtered[@]}" -gt 2 ] ||
   exit 1
 fi
 
+case "$command" in
+  stop | start | restart | enable | disable)
+    node "$manager_script" record-caller "${log_file}.callers" "$PPID" "$command"
+    ;;
+esac
+
 is_running() {
   [ -s "$pid_file" ] || return 1
   local pid stat_line stat_tail
@@ -86,6 +117,7 @@ unit_path() {
 start_gateway() {
   local exec_start
   exec_start="$(node "$manager_script" command)"
+  node "$manager_script" begin-start
   rm -f "$pid_file" "$supervisor_script"
   rm -f "${daemon_log}.exit.json"
   cat >"$supervisor_script" <<'SUPERVISOR'
@@ -102,6 +134,12 @@ const output = fs.openSync(daemonLog, "a");
 const childEnv = { ...process.env };
 delete childEnv.OPENCLAW_SYSTEMCTL_SHIM_EXEC_START;
 delete childEnv.OPENCLAW_SYSTEMCTL_SHIM_DAEMON_LOG;
+const managerEnv = JSON.parse(childEnv.OPENCLAW_SYSTEMCTL_SHIM_MANAGER_ENV);
+delete childEnv.OPENCLAW_SYSTEMCTL_SHIM_MANAGER_ENV;
+for (const [key, value] of Object.entries(managerEnv)) {
+  delete childEnv[key];
+  if (value !== null) childEnv[key] = value;
+}
 // systemd does not pass transient systemctl-caller update state into the service.
 for (const key of Object.keys(childEnv)) {
   if (key.startsWith("OPENCLAW_UPDATE_")) {
@@ -114,13 +152,26 @@ const restartWindowMs = 60_000;
 const restartBurst = 5;
 const stopTimeoutMs = 30_000;
 const starts = [];
+let totalStarts = 0;
 let firstExit;
 let child;
 let activeGroupPid;
 let drainingGroupPid;
 let stopping = false;
 
+const publishRuntime = (pid, supervisorPid = process.pid) => {
+  const file = `${daemonLog}.runtime.json`;
+  // Both manager adapters observe the ExecStart child, not this synthetic manager.
+  fs.writeFileSync(`${file}.pending`, JSON.stringify({
+    pid, supervisorPid, groupPid: activeGroupPid ?? 0,
+    restarts: totalStarts - 1, entered: Number(process.hrtime.bigint() / 1000n),
+  }));
+  fs.renameSync(`${file}.pending`, file);
+};
+
 const finish = () => {
+  // Retire normal-exit custody before these numeric process identities can be reused.
+  publishRuntime(0, 0);
   try {
     fs.closeSync(output);
   } catch {}
@@ -161,7 +212,7 @@ const drainProcessGroup = (pid, onStopped) => {
   signalProcessGroup(pid, "SIGTERM");
   const forceKill = setTimeout(() => {
     signalProcessGroup(pid, "SIGKILL");
-    complete();
+    // Signal delivery is not settlement; the existing observer must confirm exit.
   }, stopTimeoutMs);
   const finishWhenStopped = () => {
     if (completed) return;
@@ -201,17 +252,20 @@ const start = () => {
     return finish();
   }
   starts.push(now);
+  totalStarts++;
   child = spawn("bash", ["-c", command], {
     detached: true,
     env: childEnv,
     stdio: ["ignore", output, output],
   });
   activeGroupPid = child.pid;
+  publishRuntime(child.pid ?? 0);
   const childGroupPid = activeGroupPid;
   child.on("error", (error) => {
     fs.writeSync(output, `[systemctl-shim] gateway spawn failed: ${String(error)}\n`);
   });
   child.once("close", (code, signal) => {
+    publishRuntime(0);
     const observed = { code, signal, at: new Date().toISOString() };
     firstExit ??= observed;
     try {
@@ -239,6 +293,7 @@ SUPERVISOR
   # leaves Node in that terminal session and can strand its detached gateway.
   OPENCLAW_SYSTEMCTL_SHIM_EXEC_START="$exec_start" \
     OPENCLAW_SYSTEMCTL_SHIM_DAEMON_LOG="$daemon_log" \
+    OPENCLAW_SYSTEMCTL_SHIM_MANAGER_ENV="$manager_env" \
     node --input-type=module - "$supervisor_script" "$pid_file" "${daemon_log}.bootstrap.log" <<'START_SUPERVISOR'
 import fs from "node:fs";
 import { spawn } from "node:child_process";
@@ -282,8 +337,9 @@ case "$command" in
   status)
     [ "$system_scope" = 0 ] || exit 1
     [ -z "$unit_name" ] && exit 0
-    [ "$unit_name" = openclaw-gateway.service ] && is_running && exit 0
-    exit 3
+    [ "$unit_name" = openclaw-gateway.service ] || exit 3
+    node "$manager_script" is-active
+    exit "$?"
     ;;
   stop)
     [ "$system_scope" = 0 ] && [ "$unit_name" = openclaw-gateway.service ] || exit 1
@@ -304,8 +360,8 @@ case "$command" in
     ;;
   is-active)
     [ "$system_scope" = 0 ] && [ "$unit_name" = openclaw-gateway.service ] || exit 1
-    is_running && exit 0
-    exit 3
+    node "$manager_script" is-active
+    exit "$?"
     ;;
   show)
     if [ "$system_scope" = "1" ]; then
@@ -326,31 +382,26 @@ case "$command" in
       exit 0
     fi
     [ "$unit_name" = openclaw-gateway.service ] || exit 1
-    # The published 2026.8.1 reader omits LoadState; current maintenance requires it.
-    # Keep both exact query contracts and reject unimplemented manager properties.
-    [ "${property/Id,LoadState,/Id,}" = 'Id,ActiveState,SubState,Result,NRestarts,StartLimitBurst,MainPID,ExecMainStatus,ExecMainCode,KillMode,TasksCurrent,MemoryCurrent' ] || {
-      echo "systemctl shim unsupported user-scope show: $*" >&2
-      exit 1
-    }
+    # Published readers omit LoadState or ControlGroup; retain their exact queries.
+    runtime_properties='Id,ActiveState,SubState,Result,NRestarts,StartLimitBurst,MainPID,ExecMainStatus,ExecMainCode,KillMode,TasksCurrent,MemoryCurrent'
+    include_control_group=0
+    case "$property" in
+      "$runtime_properties" | "${runtime_properties/Id,/Id,LoadState,}") ;;
+      "${runtime_properties/Id,/Id,LoadState,},ControlGroup") include_control_group=1 ;;
+      *)
+        echo "systemctl shim unsupported user-scope show: $*" >&2
+        exit 1
+        ;;
+    esac
     if [[ "$property" == Id,LoadState,* ]]; then
       load_state="$(node "$manager_script" load-state)"
       printf 'Id=%s\nLoadState=%s\n' "$unit_name" "$load_state"
     fi
-    if is_running; then
-      printf 'ActiveState=active\nSubState=running\nMainPID=%s\n' "$(cat "$pid_file")"
-    else
-      printf 'ActiveState=inactive\nSubState=dead\nMainPID=0\n'
+    node "$manager_script" runtime
+    # The emulated manager has no native unit cgroup to attest.
+    if [ "$include_control_group" = 1 ]; then
+      printf 'ControlGroup=\n'
     fi
-    # Missing observations stay unknown, including bootstrap failures.
-    node - "${daemon_log}.exit.json" <<'EXIT_STATUS'
-const fs = require("node:fs");
-try {
-  const { last } = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
-  if (Number.isInteger(last.code) && last.code >= 0 && last.code <= 255) {
-    process.stdout.write(`ExecMainStatus=${last.code}\nExecMainCode=exited\n`);
-  }
-} catch {}
-EXIT_STATUS
     exit 0
     ;;
   *)
@@ -500,9 +551,10 @@ run_update_restart_probe_gateway() {
   ready_epoch="$(node -e "process.stdout.write(String(Date.now()))")" || return "$?"
   start_seconds=$(((ready_epoch - start_epoch + 999) / 1000))
   if [ "$start_seconds" -gt "$budget" ]; then
-    echo "gateway startup exceeded survivor budget: ${start_seconds}s > ${budget}s" >&2
-    openclaw_e2e_print_log "$log_file" >&2
-    return 1
+    if ! node scripts/lib/check-limits.mts scripts/e2e/lib/upgrade-survivor/update-restart-auth.sh "Upgrade service startup budget" "gateway startup exceeded survivor budget: ${start_seconds}s > ${budget}s"; then
+      openclaw_e2e_print_log "$log_file" >&2
+      return 1
+    fi
   fi
 }
 

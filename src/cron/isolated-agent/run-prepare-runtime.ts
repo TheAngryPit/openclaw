@@ -18,6 +18,7 @@ import { logWarn } from "./run.runtime.js";
 import type { RunCronAgentTurnResult } from "./run.types.js";
 
 export type RunCronAgentTurnParams = {
+  admissionSource?: import("../../agents/admitted-run-context.js").AdmittedRunContext["admissionSource"];
   cfg: OpenClawConfig;
   deps: CliDeps;
   job: CronStoredJob;
@@ -47,25 +48,6 @@ export function resolveCronAgentTurnMessage(input: RunCronAgentTurnParams): stri
 export type WithRunSession = (
   result: Omit<RunCronAgentTurnResult, "sessionId" | "sessionKey">,
 ) => RunCronAgentTurnResult;
-
-const CRON_EXECUTION_ROOT_RUNTIME_ERROR =
-  "collection review requires the embedded agent runtime; the configured CLI runtime cannot be rooted at the Workshop directory";
-
-export class CronExecutionRootRuntimeError extends Error {
-  constructor() {
-    super(CRON_EXECUTION_ROOT_RUNTIME_ERROR);
-    this.name = "CronExecutionRootRuntimeError";
-  }
-}
-
-export function assertCronExecutionRootRuntime(
-  executionRoot: string | undefined,
-  runtime: string,
-): void {
-  if (executionRoot && runtime !== "openclaw") {
-    throw new CronExecutionRootRuntimeError();
-  }
-}
 
 const sessionAccessorRuntimeLoader = createLazyImportLoader(
   () => import("../../config/sessions/session-accessor.js"),
@@ -102,6 +84,7 @@ function hasConfiguredAuthProfiles(cfg: OpenClawConfig): boolean {
  * persistence will write.
  */
 export async function resolveCronAuthSelection(params: {
+  agentId: string;
   cfg: OpenClawConfig;
   provider: string;
   modelId: string;
@@ -124,6 +107,7 @@ export async function resolveCronAuthSelection(params: {
   }
   const runtime = await loadCronAuthProfileRuntime();
   return await runtime.resolveSessionAuthSelection({
+    agentId: params.agentId,
     cfg: params.cfg,
     provider: params.provider,
     modelId: params.modelId,

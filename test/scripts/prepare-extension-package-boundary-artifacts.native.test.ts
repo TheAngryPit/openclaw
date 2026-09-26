@@ -46,6 +46,7 @@ function createPreparationFixture(mode: "package-boundary" | "all", signal: Abor
   write("src/nested.ts", "export const value = 1;");
   for (const file of [
     "scripts/prepare-extension-package-boundary-artifacts.mts",
+    "scripts/compile-extension-boundary.mts",
     "scripts/run-tsgo.mjs",
     "scripts/run-tsgo.mts",
     "scripts/tsx.mjs",
@@ -90,38 +91,53 @@ function createPreparationFixture(mode: "package-boundary" | "all", signal: Abor
   }
   const recordPath = path.join(root, ".artifacts/extension-package-boundary/plugin-sdk.json");
   const output = "packages/plugin-sdk/dist";
-  const step = async (label: string, args: string[], bin?: string) => {
+  const step = async (label: string, args: string[], bin?: string, env?: NodeJS.ProcessEnv) => {
     signal.throwIfAborted();
     // Expected compiler failures cancel only their own invocation, not later repair phases.
     const abortController = new AbortController();
     const abort = () => abortController.abort(signal.reason);
     signal.addEventListener("abort", abort, { once: true });
     try {
-      await fixture.track(runNodeStep(label, args, 30_000, { bin, abortController }));
+      await fixture.track(runNodeStep(label, args, 30_000, { bin, env, abortController }));
       signal.throwIfAborted();
     } finally {
       signal.removeEventListener("abort", abort);
     }
   };
-  const run = (declared = root) =>
-    step("native-fixture", [
-      path.join(declared, "scripts/prepare-extension-package-boundary-artifacts.mts"),
-      `--mode=${mode}`,
-    ]);
+  const run = (declared = root, pwd = declared) =>
+    step(
+      "native-fixture",
+      [
+        path.join(declared, "scripts/prepare-extension-package-boundary-artifacts.mts"),
+        `--mode=${mode}`,
+      ],
+      undefined,
+      { PWD: pwd },
+    );
   return { ancestor, root, native, write, plugins, recordPath, output, step, run };
 }
 
 describe("native declaration preparation", () => {
-  it.runIf(process.platform === "win32").for([
-    { name: "short entry", entry: true, workspace: false },
-    { name: "workspace junction", entry: false, workspace: true },
-    { name: "short entry and workspace junction", entry: true, workspace: true },
+  it.for([
+    { name: "Windows 8.3 short entry", entry: true, workspace: false },
+    { name: "Windows 8.3 workspace junction", entry: false, workspace: true },
+    { name: "Windows 8.3 short entry and workspace junction", entry: true, workspace: true },
+    { name: "POSIX PWD alias (package-boundary)", mode: "package-boundary" as const },
+    { name: "POSIX PWD alias (all)", mode: "all" as const },
   ])(
-    "publishes cold native output and reuses warm receipts through Windows 8.3 $name",
+    "publishes cold native output and reuses warm receipts through $name",
     { timeout: 30_000 },
-    ({ entry, workspace }, context) => {
-      const f = createPreparationFixture("package-boundary", context.signal);
+    ({ entry, workspace, mode }, context) => {
+      if (mode ? process.platform === "win32" : process.platform !== "win32") {
+        return context.skip("Checkout alias is specific to another platform");
+      }
+      const f = createPreparationFixture(mode ?? "package-boundary", context.signal);
       let declared = f.root;
+      if (mode) {
+        declared = path.join(f.ancestor, "declared-alias");
+        fs.symlinkSync(f.root, declared, "dir");
+        expect(fs.realpathSync.native(declared)).toBe(f.root);
+      }
       if (entry) {
         const short = resolveNativeFixtureShortPath(f.root);
         if (!short) {
@@ -144,29 +160,45 @@ describe("native declaration preparation", () => {
         expect(fs.realpathSync.native(link)).toBe(sdk);
       }
       return fixture.run(async () => {
-        const cold = await f.run(declared).catch((error: unknown) => error);
+        // Relative CLI entry paths use Node's physical cwd while Go can retain shell PWD.
+        const cold = await f
+          .run(mode ? f.root : declared, declared)
+          .catch((error: unknown) => error);
         const declaration = path.join(f.root, f.output, "src/nested.d.ts");
-        const metadata = path.join(f.root, f.output, ".tsbuildinfo");
+        const metadata = path.join(f.root, f.output, ".inputs.json");
         // Even the failing-before case must reach real native emit, not fail during setup.
         expect(fs.readFileSync(declaration, "utf8")).toContain("value = 1");
-        const receipt: { fileNames: string[]; fileInfos: unknown[] } = JSON.parse(
-          fs.readFileSync(metadata, "utf8"),
-        );
-        expect(receipt.fileInfos.length).toBeGreaterThan(0);
-        expect(receipt.fileNames.some((file) => file.endsWith("/src/nested.ts"))).toBe(true);
+        const receipt: { inputs: string[] } = JSON.parse(fs.readFileSync(metadata, "utf8"));
+        expect(receipt.inputs).toContain("src/nested.ts");
         expect(cold).toBeUndefined();
-        const record = readArtifactRecord(f.recordPath);
-        expect(record?.inputs).toContain("src/nested.ts");
-        expect(record?.outputs[`${f.output}/src/nested.d.ts`]).toBeDefined();
-        const artifacts = [f.recordPath, declaration, metadata].map((file) => ({
-          file,
-          bytes: fs.readFileSync(file),
-          mtimeMs: fs.statSync(file).mtimeMs,
-        }));
-        await f.run(declared);
-        for (const artifact of artifacts) {
-          expect(fs.readFileSync(artifact.file)).toEqual(artifact.bytes);
-          expect(fs.statSync(artifact.file).mtimeMs).toBe(artifact.mtimeMs);
+        expect(readArtifactRecord(f.recordPath)?.inputs).toContain("src/nested.ts");
+        const owners = [
+          {
+            recordPath: f.recordPath,
+            output: f.output,
+            files: [".inputs.json", "src/nested.d.ts", "src/plugin-sdk/core.d.ts"],
+          },
+          ...f.plugins.map(([id, pluginEntry]) => ({
+            recordPath: path.join(f.root, `.artifacts/extension-package-boundary/${id}.json`),
+            output: `.artifacts/extension-package-boundary/plugins/${id}`,
+            files: [".inputs.json", `${pluginEntry}.d.ts`],
+          })),
+        ];
+        const artifacts = owners.flatMap((owner) => {
+          const outputs = owner.files.map((file) => `${owner.output}/${file}`);
+          expect(Object.keys(readArtifactRecord(owner.recordPath)!.outputs).toSorted()).toEqual(
+            outputs.toSorted(),
+          );
+          return [owner.recordPath, ...outputs.map((file) => path.join(f.root, file))].map(
+            (file) => ({ file, bytes: fs.readFileSync(file), mtimeMs: fs.statSync(file).mtimeMs }),
+          );
+        });
+        for (const spelling of [declared, f.root]) {
+          await f.run(mode ? f.root : spelling, spelling);
+          for (const artifact of artifacts) {
+            expect(fs.readFileSync(artifact.file)).toEqual(artifact.bytes);
+            expect(fs.statSync(artifact.file).mtimeMs).toBe(artifact.mtimeMs);
+          }
         }
       });
     },
@@ -204,7 +236,7 @@ describe("native declaration preparation", () => {
   );
 
   it.for(["package-boundary", "all"] as const)(
-    "prunes only obsolete native declarations after success and repairs a failed partial emit (%s)",
+    "preserves outputs on compile failure and prunes obsolete declarations after repair (%s)",
     { timeout: 30_000 },
     (mode, { signal }) =>
       fixture.run(async () => {
@@ -246,7 +278,8 @@ describe("native declaration preparation", () => {
         await expect(run()).rejects.toThrow("failed with exit code 1");
         signal.throwIfAborted();
         expect(fs.existsSync(recordPath)).toBe(false);
-        expect(fs.existsSync(path.join(root, output, "src/renamed.d.ts"))).toBe(true);
+        expect(fs.existsSync(path.join(root, output, "src/renamed.d.ts"))).toBe(false);
+        expect(fs.existsSync(path.join(root, output, ".inputs.json"))).toBe(false);
         expect(fs.existsSync(path.join(root, output, "src/nested.d.ts"))).toBe(true);
         write("src/renamed.ts", "export const value = 2;");
         await run();
@@ -287,28 +320,17 @@ describe("native declaration preparation", () => {
         const trigger = path.join(f.root, ".artifacts/mutate-after-native");
         const source = path.join(f.root, input);
         const original = fs.readFileSync(source, "utf8");
-        const launcher = path.join(f.root, "node_modules/.bin/tsgo");
-        fs.unlinkSync(launcher);
-        f.write(
-          "node_modules/.bin/tsgo",
-          `#!/usr/bin/env node
-import fs from "node:fs";
-import { spawnSync } from "node:child_process";
-const result = spawnSync(${JSON.stringify(f.native)}, process.argv.slice(2), { stdio: "inherit" });
-if (result.status !== 0) process.exit(result.status ?? 1);
-if (fs.existsSync(${JSON.stringify(trigger)})) fs.appendFileSync(${JSON.stringify(source)}, "\\n");
-`,
+        const worker = path.join(f.root, "scripts/compile-extension-boundary.mts");
+        fs.appendFileSync(
+          worker,
+          `\nif (fs.existsSync(${JSON.stringify(trigger)})) fs.appendFileSync(${JSON.stringify(source)}, "\\n");\n`,
         );
-        fs.chmodSync(launcher, 0o755);
-        if (process.platform === "win32") {
-          f.write("node_modules/.bin/tsgo.cmd", '@node "%~dp0tsgo" %*\r\n');
-        }
         await f.run();
         expect(readArtifactRecord(f.recordPath)).toBeDefined();
         f.write(`${f.output}/orphan.d.ts`, "export interface Orphan {}\n");
         f.write(".artifacts/mutate-after-native", "armed");
 
-        // The fixture launcher mutates only after the real native emitter exits
+        // The fixture worker mutates only after the real native emitter exits
         // successfully; its unchanged membership must still fail the seal fence.
         await expect(f.run()).rejects.toThrow("failed with exit code 1");
         expect(fs.readFileSync(source, "utf8")).toBe(`${original}\n`);
@@ -323,7 +345,7 @@ if (fs.existsSync(${JSON.stringify(trigger)})) fs.appendFileSync(${JSON.stringif
   );
 
   it.for(["SDK", "plugin batch"] as const)(
-    "rejects ancestor inputs without publishing or pruning the %s after native success",
+    "isolates the %s from ancestor types and rejects ancestor-only dependencies without pruning",
     { timeout: 30_000 },
     (owner, { signal }) =>
       fixture.run(async () => {
@@ -339,6 +361,8 @@ if (fs.existsSync(${JSON.stringify(trigger)})) fs.appendFileSync(${JSON.stringif
             : `extensions/${pluginId}/tsconfig.json`;
         const rootDir = owner === "SDK" ? "." : `extensions/${pluginId}`;
         const emitted = owner === "SDK" ? "src/plugin-sdk/core.d.ts" : `${entry}.d.ts`;
+        const output =
+          owner === "SDK" ? f.output : `.artifacts/extension-package-boundary/plugins/${pluginId}`;
         f.write(
           input,
           'import type { Marker } from "synthetic-wrapper";\nexport type { Marker };\nexport const inferredOrigin = declarationOrigin;\n',
@@ -379,8 +403,28 @@ if (fs.existsSync(${JSON.stringify(trigger)})) fs.appendFileSync(${JSON.stringif
           'inferredOrigin: "ancestor"',
         );
 
-        // Raw native success is not publication authority. Every member of the
-        // contaminated batch must seal before any old declaration can be pruned.
+        await f.run();
+        expect(fs.readFileSync(path.join(f.root, output, emitted), "utf8")).toContain(
+          'inferredOrigin: "local"',
+        );
+        for (const unit of units) {
+          expect(
+            readArtifactRecord(
+              path.join(f.root, `.artifacts/extension-package-boundary/${unit.id}.json`),
+            ),
+          ).toBeDefined();
+          expect(fs.existsSync(path.join(f.root, unit.output, "orphan.d.ts"))).toBe(false);
+          f.write(`${unit.output}/orphan.d.ts`, "export interface Orphan {}\n");
+        }
+        fs.rmSync(
+          path.join(
+            f.root,
+            "node_modules/.pnpm/core/node_modules/@types/synthetic-core/index.d.ts",
+          ),
+        );
+
+        // A missing local type cannot fall through to the ancestor installation.
+        // Every batch member must seal before any obsolete declaration is pruned.
         await expect(f.run()).rejects.toThrow("failed with exit code 1");
         for (const unit of units) {
           expect(

@@ -1,5 +1,6 @@
 // Wizard session helpers track onboarding session ids and state.
 import { randomUUID } from "node:crypto";
+import { coerceErrorMessage } from "@openclaw/normalization-core/error-coercion";
 import type {
   WizardNextResult as ProtocolWizardNextResult,
   WizardStep as ProtocolWizardStep,
@@ -10,6 +11,8 @@ import {
   WizardCancelledError,
   type WizardProgress,
   type WizardPrompter,
+  type WizardSelectParams,
+  type WizardMultiSelectParams,
 } from "./prompts.js";
 
 // WizardSession exposes interactive setup as a step/answer protocol for remote
@@ -79,7 +82,7 @@ function createWizardSessionPrompter(session: WizardSession): WizardPrompter {
     // Each emitted step receives an id so remote clients can answer the exact
     // pending prompt and stale answers can be rejected. Explicit browser
     // destinations bind to the very next step regardless of its input type.
-    const externalUrl = session.consumeExternalUrl();
+    const externalUrl = session.consumeExternalUrl(step.type === "note");
     return {
       ...step,
       ...(externalUrl ? { externalUrl } : {}),
@@ -123,8 +126,10 @@ function createWizardSessionPrompter(session: WizardSession): WizardPrompter {
       expiresInMinutes?: number;
       message?: string;
     }): Promise<void> {
+      const externalUrl = session.consumeExternalUrl(true);
       const fallbackMessage = [
         params.message ?? "Enter this one-time code on the provider's sign-in page.",
+        ...(externalUrl ? [externalUrl] : []),
         `Code: ${params.code}`,
         ...(params.expiresInMinutes ? [`Code expires in ${params.expiresInMinutes} minutes.`] : []),
         // Device-code phishing works by getting the victim to enter the attacker's
@@ -133,16 +138,13 @@ function createWizardSessionPrompter(session: WizardSession): WizardPrompter {
         // carry no expiry hint. Matches the Codex CLI prompt.
         DEVICE_CODE_PHISHING_WARNING,
       ].join("\n");
-      await prompt({
-        type: "note",
+      session.pushProgress(fallbackMessage, {
         title: params.title,
-        message: fallbackMessage,
         deviceCode: {
           code: params.code,
           ...(params.expiresInMinutes ? { expiresInMinutes: params.expiresInMinutes } : {}),
           ...(params.message ? { message: params.message } : {}),
         },
-        executor: "client",
       });
     },
 
@@ -155,11 +157,7 @@ function createWizardSessionPrompter(session: WizardSession): WizardPrompter {
       });
     },
 
-    async select<T>(params: {
-      message: string;
-      options: Array<{ value: T; label: string; hint?: string }>;
-      initialValue?: T;
-    }): Promise<T> {
+    async select<T>(params: WizardSelectParams<T>): Promise<T> {
       const res = await prompt({
         type: "select",
         message: params.message,
@@ -174,11 +172,7 @@ function createWizardSessionPrompter(session: WizardSession): WizardPrompter {
       return res as T;
     },
 
-    async multiselect<T>(params: {
-      message: string;
-      options: Array<{ value: T; label: string; hint?: string }>;
-      initialValues?: T[];
-    }): Promise<T[]> {
+    async multiselect<T>(params: WizardMultiSelectParams<T>): Promise<T[]> {
       const res = await prompt({
         type: "multiselect",
         message: params.message,
@@ -206,15 +200,7 @@ function createWizardSessionPrompter(session: WizardSession): WizardPrompter {
         params.validate,
         params.signal,
       );
-      const value =
-        res === null || res === undefined
-          ? ""
-          : typeof res === "string"
-            ? res
-            : typeof res === "number" || typeof res === "boolean" || typeof res === "bigint"
-              ? String(res)
-              : "";
-      return value;
+      return normalizeTextAnswer(res) ?? "";
     },
 
     async confirm(params: Parameters<WizardPrompter["confirm"]>[0]): Promise<boolean> {
@@ -265,8 +251,12 @@ export class WizardSession {
   private stepDeferred: Deferred<WizardStep | null> | null = null;
   private cancellationLocked = false;
   private inputClosedError: Error | undefined;
+  private preparationCancellationLocked = false;
+  private expiryPending = false;
   private settled = false;
   private pendingExternalUrl: string | undefined;
+  private devicePresentation: Pick<WizardStep, "title" | "deviceCode" | "message"> = {};
+  private externalUrlImmediate: ReturnType<typeof setImmediate> | undefined;
   private answerDeferred = new Map<
     string,
     {
@@ -292,7 +282,10 @@ export class WizardSession {
   ) {
     const prompter = createWizardSessionPrompter(this);
     if (options?.timeoutMs !== undefined) {
-      this.expiryTimer = setTimeout(() => this.cancel(), options.timeoutMs);
+      this.expiryTimer = setTimeout(() => {
+        this.expiryPending = true;
+        this.cancel();
+      }, options.timeoutMs);
       this.expiryTimer.unref?.();
     }
     this.runnerPromise = this.run(prompter);
@@ -396,13 +389,19 @@ export class WizardSession {
   }
 
   cancel(): boolean {
-    if (this.status !== "running" || this.cancellationLocked || this.inputClosedError) {
+    if (
+      this.status !== "running" ||
+      this.cancellationLocked ||
+      this.inputClosedError ||
+      this.preparationCancellationLocked
+    ) {
       return false;
     }
     this.status = "cancelled";
     this.error = "cancelled";
     this.abortController.abort(new WizardCancelledError());
     this.rejectPendingAnswers();
+    this.consumeExternalUrl();
     this.progressSteps = [];
     this.deliveredProgressStepIds.clear();
     this.resolveStep(null);
@@ -415,7 +414,8 @@ export class WizardSession {
       return;
     }
     this.inputClosedError ??= error;
-    if (!this.cancellationLocked) {
+    this.consumeExternalUrl();
+    if (!this.cancellationLocked && !this.preparationCancellationLocked) {
       this.abortController.abort(this.inputClosedError);
     }
     this.rejectPendingAnswers(this.inputClosedError);
@@ -424,7 +424,38 @@ export class WizardSession {
   /** The underlying mutation crossed its durable commit point and must finish. */
   lockCancellation() {
     this.signal.throwIfAborted();
+    if (!this.cancellationLocked) {
+      this.finishPreparation();
+    }
     this.cancellationLocked = true;
+  }
+
+  /** A retained write callback cannot outlive the runner that owns setup. */
+  assertPersistentEffectCurrent(): void {
+    this.signal.throwIfAborted();
+    if (this.status !== "running" || this.settled) {
+      throw new Error("Setup session is no longer active");
+    }
+  }
+
+  /** Protect preparation until the next client checkpoint or final commit. */
+  lockCancellationForPreparation() {
+    this.signal.throwIfAborted();
+    this.preparationCancellationLocked = true;
+  }
+
+  /** Resume cancellation after preparation, before more input or verification. */
+  finishPreparation() {
+    this.preparationCancellationLocked = false;
+    if (this.inputClosedError && !this.cancellationLocked) {
+      this.abortController.abort(this.inputClosedError);
+      throw this.inputClosedError;
+    }
+    // Expiry during an artifact commit remains due at the next safe checkpoint.
+    if (this.expiryPending) {
+      this.cancel();
+      this.signal.throwIfAborted();
+    }
   }
 
   get signal(): AbortSignal {
@@ -436,15 +467,28 @@ export class WizardSession {
     this.resolveStep(step);
   }
 
-  pushProgress(message: string) {
+  pushProgress(message: string, presentation?: Pick<WizardStep, "title" | "deviceCode">) {
     if (this.status !== "running") {
       return;
     }
+    clearImmediate(this.externalUrlImmediate);
+    this.externalUrlImmediate = undefined;
+    if (presentation) {
+      this.devicePresentation = { ...presentation, message };
+      // Keep the code as the first unread event, ahead of later polling updates.
+      this.progressSteps = [];
+    }
     const step: WizardStep = {
+      ...this.devicePresentation,
       id: randomUUID(),
       type: "progress",
-      message,
+      // Snapshot clients can miss the first event and render only this text.
+      message:
+        !presentation && this.devicePresentation.message
+          ? `${this.devicePresentation.message}\n\n${message}`
+          : message,
       executor: "gateway",
+      ...(this.pendingExternalUrl ? { externalUrl: this.pendingExternalUrl } : {}),
     };
     if (this.stepDeferred) {
       this.rememberDeliveredProgressStep(step.id);
@@ -472,12 +516,26 @@ export class WizardSession {
   }
 
   queueExternalUrl(url: string) {
+    if (this.status !== "running" || this.inputClosedError) {
+      return;
+    }
+    clearImmediate(this.externalUrlImmediate);
     this.pendingExternalUrl = url;
+    // Let same-turn prompts consume the URL first; callback waits have no next prompt.
+    // Publish progress afterward so browser sign-in never needs an extra answer.
+    this.externalUrlImmediate = setImmediate(() => {
+      this.pushProgress("Complete sign-in in your browser.");
+    });
   }
 
-  consumeExternalUrl(): string | undefined {
+  consumeExternalUrl(retain = false): string | undefined {
+    clearImmediate(this.externalUrlImmediate);
+    this.externalUrlImmediate = undefined;
     const url = this.pendingExternalUrl;
-    this.pendingExternalUrl = undefined;
+    if (!retain) {
+      this.pendingExternalUrl = undefined;
+      this.devicePresentation = {};
+    }
     return url;
   }
 
@@ -499,10 +557,11 @@ export class WizardSession {
         this.error = error.message;
       } else {
         this.status = "error";
-        this.error = String(error);
+        this.error = coerceErrorMessage(error);
       }
     } finally {
       this.settled = true;
+      this.consumeExternalUrl();
       if (this.expiryTimer) {
         clearTimeout(this.expiryTimer);
       }
@@ -529,10 +588,18 @@ export class WizardSession {
     if (this.status !== "running") {
       throw new Error("wizard: session not running");
     }
+    const clientCheckpoint =
+      wizardStepAwaitsInput(step) || (step.type === "note" && step.executor === "client");
     if (this.inputClosedError) {
+      if (clientCheckpoint) {
+        this.finishPreparation();
+      }
       throw this.inputClosedError;
     }
     signal?.throwIfAborted();
+    if (clientCheckpoint) {
+      this.finishPreparation();
+    }
     const deferred = createDeferredCore<unknown>();
     this.answerDeferred.set(step.id, { deferred, text: step.type === "text", validate });
     const abort = () => {

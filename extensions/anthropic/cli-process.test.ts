@@ -100,6 +100,11 @@ function attachLiveSession(context: CliBackendExecuteContext) {
   context.liveSession = {
     fingerprint: "synthetic-process-policy",
     current: () => current,
+    restart: async () => {
+      const previous = current;
+      previous?.close("restart");
+      await previous?.waitForExit();
+    },
     register: (handle) => {
       current = handle;
       sessions.add(handle);
@@ -214,10 +219,10 @@ describe("Claude subprocess diagnostics through the direct CLI transport", () =>
     },
   );
 
-  it.each(["success", "success with stderr"])("keeps %s quiet", async (prompt) => {
+  it("keeps successful turns with stderr quiet", async () => {
     const context = await contextForChild(PROTOCOL_CHILD);
     const stderr = vi.spyOn(process.stderr, "write");
-    const events = await collect({ ...context, prompt });
+    const events = await collect({ ...context, prompt: "success with stderr" });
     expect(events).toContainEqual(expect.objectContaining({ type: "result", result: "ok" }));
     expect(stderr).not.toHaveBeenCalled();
   });

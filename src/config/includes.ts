@@ -68,9 +68,25 @@ export function resolveConfigIncludeWritePath(params: {
   return canonicalPath;
 }
 
-// ============================================================================
-// Types
-// ============================================================================
+/**
+ * Whether an include target canonically resolves inside the config directory.
+ * Write eligibility must use the canonical form: a symlink beneath the config
+ * directory can point at an external OPENCLAW_INCLUDE_ROOTS file that reads
+ * accept but the guarded include writer rejects.
+ */
+export function isInternalIncludeWriteTarget(params: {
+  configPath: string;
+  includePath: string;
+}): boolean {
+  const resolvedPath = path.normalize(path.resolve(params.includePath));
+  const configDir = path.normalize(path.dirname(path.resolve(params.configPath)));
+  if (!isPathInside(configDir, resolvedPath)) {
+    return false;
+  }
+  const canonicalPath = path.normalize(resolvePathViaExistingAncestorSync(resolvedPath));
+  const canonicalDir = path.normalize(resolvePathViaExistingAncestorSync(configDir));
+  return isPathInside(canonicalDir, canonicalPath);
+}
 
 export type IncludeResolver = {
   readFile: (path: string) => string;
@@ -86,6 +102,8 @@ export type ConfigIncludeOwnership = {
   path: readonly string[];
   kind: "single" | "multiple";
   hasSiblingOverrides: boolean;
+  /** Whether the authored include sits at or below an actual array entry; absent means false. */
+  hasArrayAncestor?: boolean;
   targetPath?: string;
   targetPaths?: readonly string[];
 };
@@ -121,10 +139,6 @@ type ResolveConfigIncludesOptions = {
   allowedRoots?: ReadonlyArray<string>;
 };
 
-// ============================================================================
-// Errors
-// ============================================================================
-
 export class ConfigIncludeError extends Error {
   constructor(
     message: string,
@@ -134,6 +148,11 @@ export class ConfigIncludeError extends Error {
     super(message);
     this.name = "ConfigIncludeError";
   }
+}
+
+/** File access failed; the included configuration has not been validated. */
+export class ConfigIncludeReadError extends ConfigIncludeError {
+  override name = "ConfigIncludeReadError";
 }
 
 export class CircularIncludeError extends ConfigIncludeError {
@@ -146,18 +165,10 @@ export class CircularIncludeError extends ConfigIncludeError {
   }
 }
 
-// ============================================================================
-// Utilities
-// ============================================================================
-
 /** Deep merge: arrays concatenate, objects merge recursively, primitives: source wins */
 function deepMerge(target: unknown, source: unknown): unknown {
   return mergeDeepValues(target, source, { arrays: "concat", undefinedValues: "replace" });
 }
-
-// ============================================================================
-// Include Resolver Class
-// ============================================================================
 
 class IncludeProcessor {
   private visited = new Set<string>();
@@ -176,9 +187,9 @@ class IncludeProcessor {
     return this.boundary.configRoot.rootDir;
   }
 
-  process(obj: unknown, logicalPath: readonly string[] = []): unknown {
+  process(obj: unknown, logicalPath: readonly string[] = [], hasArrayAncestor = false): unknown {
     if (Array.isArray(obj)) {
-      return obj.map((item, index) => this.process(item, [...logicalPath, String(index)]));
+      return obj.map((item, index) => this.process(item, [...logicalPath, String(index)], true));
     }
 
     if (!isPlainObject(obj)) {
@@ -186,15 +197,16 @@ class IncludeProcessor {
     }
 
     if (!(INCLUDE_KEY in obj)) {
-      return this.processObject(obj, logicalPath);
+      return this.processObject(obj, logicalPath, hasArrayAncestor);
     }
 
-    return this.processInclude(obj, logicalPath);
+    return this.processInclude(obj, logicalPath, hasArrayAncestor);
   }
 
   private processObject(
     obj: Record<string, unknown>,
     logicalPath: readonly string[],
+    hasArrayAncestor: boolean,
   ): Record<string, unknown> {
     const result: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj)) {
@@ -205,25 +217,30 @@ class IncludeProcessor {
       ) {
         continue;
       }
-      result[key] = this.process(value, [...logicalPath, key]);
+      result[key] = this.process(value, [...logicalPath, key], hasArrayAncestor);
     }
     return result;
   }
 
-  private processInclude(obj: Record<string, unknown>, logicalPath: readonly string[]): unknown {
+  private processInclude(
+    obj: Record<string, unknown>,
+    logicalPath: readonly string[],
+    hasArrayAncestor: boolean,
+  ): unknown {
     const includeValue = obj[INCLUDE_KEY];
     const otherKeys = Object.keys(obj).filter(
       (key) =>
         key !== INCLUDE_KEY &&
         (logicalPath.length > 0 || !this.rootProjectionKeys || this.rootProjectionKeys.has(key)),
     );
-    const resolved = this.resolveInclude(includeValue, logicalPath);
+    const resolved = this.resolveInclude(includeValue, logicalPath, hasArrayAncestor);
     const included = resolved.value;
     this.resolver.onIncludeResolved?.({
       path: [...logicalPath],
       value: included,
       kind: Array.isArray(includeValue) ? "multiple" : "single",
       hasSiblingOverrides: otherKeys.length > 0,
+      hasArrayAncestor,
       ...(resolved.targetPath ? { targetPath: resolved.targetPath } : {}),
       ...(resolved.targetPaths ? { targetPaths: resolved.targetPaths } : {}),
     });
@@ -239,10 +256,9 @@ class IncludeProcessor {
       );
     }
 
-    // Merge included content with sibling keys
     const rest: Record<string, unknown> = {};
     for (const key of otherKeys) {
-      rest[key] = this.process(obj[key], [...logicalPath, key]);
+      rest[key] = this.process(obj[key], [...logicalPath, key], hasArrayAncestor);
     }
     return deepMerge(included, rest);
   }
@@ -250,9 +266,10 @@ class IncludeProcessor {
   private resolveInclude(
     value: unknown,
     logicalPath: readonly string[],
+    hasArrayAncestor: boolean,
   ): { value: unknown; targetPath?: string; targetPaths?: string[] } {
     if (typeof value === "string") {
-      return this.loadFile(value, logicalPath);
+      return this.loadFile(value, logicalPath, hasArrayAncestor);
     }
 
     if (Array.isArray(value)) {
@@ -263,7 +280,7 @@ class IncludeProcessor {
             String(item),
           );
         }
-        return this.loadFile(item, logicalPath);
+        return this.loadFile(item, logicalPath, hasArrayAncestor);
       });
       const merged = resolvedEntries.reduce<unknown>(
         (current, entry) => deepMerge(current, entry.value),
@@ -284,17 +301,33 @@ class IncludeProcessor {
   private loadFile(
     includePath: string,
     logicalPath: readonly string[],
+    hasArrayAncestor: boolean,
   ): { value: unknown; targetPath: string } {
     const { resolvedPath, root } = this.resolvePath(includePath);
 
-    this.checkCircular(resolvedPath);
-    this.checkDepth(includePath);
+    if (this.visited.has(resolvedPath)) {
+      throw new CircularIncludeError([...this.visited, resolvedPath]);
+    }
+    if (this.depth >= MAX_INCLUDE_DEPTH) {
+      throw new ConfigIncludeError(
+        `Maximum include depth (${MAX_INCLUDE_DEPTH}) exceeded at: ${includePath}`,
+        includePath,
+      );
+    }
 
     const raw = this.readFile(includePath, resolvedPath, root);
     const parsed = this.parseFile(includePath, resolvedPath, raw);
+    const nested = new IncludeProcessor(
+      resolvedPath,
+      this.resolver,
+      this.boundary,
+      this.rootProjectionKeys,
+    );
+    nested.visited = new Set([...this.visited, resolvedPath]);
+    nested.depth = this.depth + 1;
 
     return {
-      value: this.processNested(resolvedPath, parsed, logicalPath),
+      value: nested.process(parsed, logicalPath, hasArrayAncestor),
       targetPath: resolvedPath,
     };
   }
@@ -358,7 +391,7 @@ class IncludeProcessor {
         // File doesn't exist yet - lexical containment check above is sufficient.
         return { resolvedPath: normalized, root: lexicalMatch };
       }
-      throw new ConfigIncludeError(
+      throw new ConfigIncludeReadError(
         `Failed to resolve include file realpath: ${includePath} (resolved: ${normalized})`,
         includePath,
         err instanceof Error ? err : undefined,
@@ -381,21 +414,6 @@ class IncludeProcessor {
     return null;
   }
 
-  private checkCircular(resolvedPath: string): void {
-    if (this.visited.has(resolvedPath)) {
-      throw new CircularIncludeError([...this.visited, resolvedPath]);
-    }
-  }
-
-  private checkDepth(includePath: string): void {
-    if (this.depth >= MAX_INCLUDE_DEPTH) {
-      throw new ConfigIncludeError(
-        `Maximum include depth (${MAX_INCLUDE_DEPTH}) exceeded at: ${includePath}`,
-        includePath,
-      );
-    }
-  }
-
   private readFile(includePath: string, resolvedPath: string, root: IncludeRoot): string {
     try {
       if (this.resolver.readFileWithGuards) {
@@ -412,7 +430,7 @@ class IncludeProcessor {
       if (err instanceof ConfigIncludeError) {
         throw err;
       }
-      throw new ConfigIncludeError(
+      throw new ConfigIncludeReadError(
         `Failed to read include file: ${includePath} (resolved: ${resolvedPath})`,
         includePath,
         err instanceof Error ? err : undefined,
@@ -430,22 +448,6 @@ class IncludeProcessor {
         err instanceof Error ? err : undefined,
       );
     }
-  }
-
-  private processNested(
-    resolvedPath: string,
-    parsed: unknown,
-    logicalPath: readonly string[],
-  ): unknown {
-    const nested = new IncludeProcessor(
-      resolvedPath,
-      this.resolver,
-      this.boundary,
-      this.rootProjectionKeys,
-    );
-    nested.visited = new Set([...this.visited, resolvedPath]);
-    nested.depth = this.depth + 1;
-    return nested.process(parsed, logicalPath);
   }
 }
 
@@ -510,7 +512,7 @@ export function readConfigIncludeFileWithGuards(params: IncludeFileReadParams): 
         params.includePath,
       );
     }
-    throw new ConfigIncludeError(
+    throw new ConfigIncludeReadError(
       `Failed to read include file: ${params.includePath} (resolved: ${params.resolvedPath})`,
       params.includePath,
       opened.error instanceof Error ? opened.error : undefined,
@@ -526,26 +528,12 @@ export function readConfigIncludeFileWithGuards(params: IncludeFileReadParams): 
   }
 }
 
-// ============================================================================
-// Public API
-// ============================================================================
-
 const defaultResolver: IncludeResolver = {
   readFile: (p) => fs.readFileSync(p, "utf-8"),
   readFileWithGuards: ({ includePath, resolvedPath, rootRealDir }) =>
     readConfigIncludeFileWithGuards({ includePath, resolvedPath, rootRealDir }),
   parseJson: parseJsonWithJson5Fallback,
 };
-
-function resolveConfigIncludesWithinBoundary(
-  obj: unknown,
-  configPath: string,
-  resolver: IncludeResolver,
-  boundary: IncludeBoundary,
-  rootProjectionKeys?: ReadonlySet<string>,
-): unknown {
-  return new IncludeProcessor(configPath, resolver, boundary, rootProjectionKeys).process(obj);
-}
 
 /**
  * Creates a resolver that shares one immutable root snapshot across independent
@@ -557,7 +545,7 @@ export function createConfigIncludeResolutionSession(
 ): (obj: unknown, basePath: string, resolver?: IncludeResolver) => unknown {
   const boundary = createConfigIncludeBoundary(configPath, allowedRoots);
   return (obj, basePath, resolver = defaultResolver) =>
-    resolveConfigIncludesWithinBoundary(obj, basePath, resolver, boundary);
+    new IncludeProcessor(basePath, resolver, boundary).process(obj);
 }
 
 /**
@@ -570,7 +558,7 @@ export function resolveConfigIncludes(
   options: ResolveConfigIncludesOptions = {},
 ): unknown {
   const boundary = createConfigIncludeBoundary(configPath, options.allowedRoots ?? []);
-  return resolveConfigIncludesWithinBoundary(obj, configPath, resolver, boundary);
+  return new IncludeProcessor(configPath, resolver, boundary).process(obj);
 }
 
 /**
@@ -586,5 +574,5 @@ export function resolveConfigIncludesForTopLevelKey(
   options: ResolveConfigIncludesOptions = {},
 ): unknown {
   const boundary = createConfigIncludeBoundary(configPath, options.allowedRoots ?? []);
-  return resolveConfigIncludesWithinBoundary(obj, configPath, resolver, boundary, new Set([key]));
+  return new IncludeProcessor(configPath, resolver, boundary, new Set([key])).process(obj);
 }

@@ -56,6 +56,7 @@ export async function prepareEmbeddedAttemptBootstrap(params: {
       config: attempt.config,
       sessionKey: attempt.sessionKey,
       sessionId: attempt.sessionId,
+      bootstrapUserProfileId: attempt.bootstrapUserProfileId,
       chatType: attempt.chatType,
       agentId: params.setup.sessionAgentId,
       warn: bootstrapWarn,
@@ -140,17 +141,19 @@ export async function prepareEmbeddedAttemptBootstrap(params: {
     },
   });
   params.setup.prepStages.mark("bootstrap-context");
-  const remappedContextFiles = remapInjectedContextFilesToWorkspace({
-    files: resolvedContextFiles,
-    sourceWorkspaceDir: bootstrapWorkspaceDir,
-    targetWorkspaceDir: bootstrapPromptWorkspaceDir,
-  });
-  const contextFiles = bootstrapRouting.includeBootstrapInSystemContext
-    ? remappedContextFiles
-    : remappedContextFiles.filter((file) => !/(^|[\\/])BOOTSTRAP\.md$/iu.test(file.path.trim()));
+  const injectedContextFiles = bootstrapRouting.includeBootstrapInSystemContext
+    ? resolvedContextFiles
+    : resolvedContextFiles.filter((file) => !/(^|[\\/])BOOTSTRAP\.md$/iu.test(file.path.trim()));
+  // Injection accounting keys on the source path the bootstrap file was loaded
+  // from, so it runs before the remap rewrites paths onto the prompt workspace.
   const bootstrapInjectionStats = buildBootstrapInjectionStats({
     bootstrapFiles: hookAdjustedBootstrapFiles,
-    injectedFiles: contextFiles,
+    injectedFiles: injectedContextFiles,
+  });
+  const contextFiles = remapInjectedContextFilesToWorkspace({
+    files: injectedContextFiles,
+    sourceWorkspaceDir: bootstrapWorkspaceDir,
+    targetWorkspaceDir: bootstrapPromptWorkspaceDir,
   });
   // Stats retain input order. Reports include suppressed BOOTSTRAP rows; budgets do not.
   const bootstrapBudgetFiles = bootstrapRouting.includeBootstrapInSystemContext

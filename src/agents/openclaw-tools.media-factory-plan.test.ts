@@ -142,6 +142,34 @@ function createComfyPlugin(
   });
 }
 
+function createComfyConfig(config: Record<string, unknown> = {}): OpenClawConfig {
+  return {
+    plugins: {
+      entries: {
+        comfy: {
+          config: {
+            mode: "local",
+            workflow: { "1": { inputs: {} } },
+            promptNodeId: "1",
+            ...config,
+          },
+        },
+      },
+    },
+  };
+}
+
+function createComfyConfigSignals(mode: "local" | "cloud") {
+  return [
+    {
+      rootPath: "plugins.entries.comfy.config",
+      mode: { path: "mode", ...(mode === "local" ? { default: "local" } : {}), allowed: [mode] },
+      requiredAny: ["workflow", "workflowPath"],
+      required: mode === "cloud" ? ["promptNodeId", "apiKey"] : ["promptNodeId"],
+    },
+  ];
+}
+
 function legacyModelProviderConfig(provider: Record<string, unknown>): OpenClawConfig {
   return {
     models: {
@@ -480,24 +508,6 @@ describe("optional media tool factory planning", () => {
     });
   });
 
-  it("skips tools that the resolved denylist blocks", () => {
-    const config: OpenClawConfig = {};
-    installSnapshot(config, createImageAndPdfPlugins());
-
-    expect(
-      resolveOptionalMediaToolFactoryPlan({
-        config,
-        authStore: createAuthStore(["image-owner", "anthropic"]),
-        toolDenylist: ["image_generate", "pdf"],
-      }),
-    ).toEqual({
-      imageGenerate: false,
-      videoGenerate: false,
-      musicGenerate: false,
-      pdf: false,
-    });
-  });
-
   it("applies global tool policy before optional media factories run", () => {
     const config: OpenClawConfig = { tools: { deny: ["pdf"] } };
     installSnapshot(config, [
@@ -639,6 +649,29 @@ describe("optional media tool factory planning", () => {
     });
   });
 
+  it("rechecks workspace capability activation after the selected slot changes", () => {
+    const config: OpenClawConfig = {};
+    installSnapshot(config, [
+      {
+        ...createPlugin({
+          id: "workspace-image",
+          origin: "workspace",
+          contracts: { imageGenerationProviders: ["workspace-image"] },
+        }),
+        kind: "context-engine",
+      },
+    ]);
+    const authStore = createAuthStore(["workspace-image"]);
+    const available = () =>
+      resolveOptionalMediaToolFactoryPlan({ config, authStore }).imageGenerate;
+
+    expect(available()).toBe(false);
+    config.plugins = { slots: { contextEngine: "workspace-image" } };
+    expect(available()).toBe(true);
+    config.plugins = {};
+    expect(available()).toBe(false);
+  });
+
   it("keeps manifest-declared image provider auth aliases on the factory path", async () => {
     const config: OpenClawConfig = {};
     const plugins = [
@@ -686,31 +719,8 @@ describe("optional media tool factory planning", () => {
   });
 
   it("keeps manifest-declared config-only generation providers on the factory path", () => {
-    const config: OpenClawConfig = {
-      plugins: {
-        entries: {
-          comfy: {
-            config: {
-              mode: "local",
-              workflow: { "1": { inputs: {} } },
-              promptNodeId: "1",
-            },
-          },
-        },
-      },
-    };
-    const configSignals = [
-      {
-        rootPath: "plugins.entries.comfy.config",
-        mode: {
-          path: "mode",
-          default: "local",
-          allowed: ["local"],
-        },
-        requiredAny: ["workflow", "workflowPath"],
-        required: ["promptNodeId"],
-      },
-    ];
+    const config = createComfyConfig();
+    const configSignals = createComfyConfigSignals("local");
     installSnapshot(config, [createComfyPlugin(configSignals)]);
 
     const plan = resolveOptionalMediaToolFactoryPlan({
@@ -723,32 +733,9 @@ describe("optional media tool factory planning", () => {
   });
 
   it("does not expose manifest-backed generation providers when plugins are globally disabled", async () => {
-    const config: OpenClawConfig = {
-      plugins: {
-        enabled: false,
-        entries: {
-          comfy: {
-            config: {
-              mode: "local",
-              workflow: { "1": { inputs: {} } },
-              promptNodeId: "1",
-            },
-          },
-        },
-      },
-    };
-    const configSignals = [
-      {
-        rootPath: "plugins.entries.comfy.config",
-        mode: {
-          path: "mode",
-          default: "local",
-          allowed: ["local"],
-        },
-        requiredAny: ["workflow", "workflowPath"],
-        required: ["promptNodeId"],
-      },
-    ];
+    const config = createComfyConfig();
+    config.plugins = { ...config.plugins, enabled: false };
+    const configSignals = createComfyConfigSignals("local");
     installSnapshot(config, [createComfyPlugin(configSignals)]);
 
     expect(
@@ -777,31 +764,11 @@ describe("optional media tool factory planning", () => {
   it("does not count unresolved SecretRef config signals as configured", async () => {
     vi.stubEnv("COMFY_TEST_API_KEY", "");
     const workspaceDir = process.cwd();
-    const config: OpenClawConfig = {
-      plugins: {
-        entries: {
-          comfy: {
-            config: {
-              mode: "cloud",
-              apiKey: { source: "env", provider: "default", id: "COMFY_TEST_API_KEY" },
-              workflow: { "1": { inputs: {} } },
-              promptNodeId: "1",
-            },
-          },
-        },
-      },
-    };
-    const configSignals = [
-      {
-        rootPath: "plugins.entries.comfy.config",
-        mode: {
-          path: "mode",
-          allowed: ["cloud"],
-        },
-        requiredAny: ["workflow", "workflowPath"],
-        required: ["promptNodeId", "apiKey"],
-      },
-    ];
+    const config = createComfyConfig({
+      mode: "cloud",
+      apiKey: { source: "env", provider: "default", id: "COMFY_TEST_API_KEY" },
+    });
+    const configSignals = createComfyConfigSignals("cloud");
     installSnapshot(config, [createComfyPlugin(configSignals)], workspaceDir);
 
     expect(
@@ -830,40 +797,16 @@ describe("optional media tool factory planning", () => {
   });
 
   it("counts configured non-env SecretRef config signals without resolving secrets", () => {
-    const config: OpenClawConfig = {
-      plugins: {
-        entries: {
-          comfy: {
-            config: {
-              mode: "cloud",
-              apiKey: { source: "file", provider: "vault", id: "/comfy/api-key" },
-              workflow: { "1": { inputs: {} } },
-              promptNodeId: "1",
-            },
-          },
-        },
-      },
-      secrets: {
-        providers: {
-          vault: {
-            source: "file",
-            path: "/tmp/openclaw-secrets.json",
-            mode: "json",
-          },
-        },
+    const config = createComfyConfig({
+      mode: "cloud",
+      apiKey: { source: "file", provider: "vault", id: "/comfy/api-key" },
+    });
+    config.secrets = {
+      providers: {
+        vault: { source: "file", path: "/tmp/openclaw-secrets.json", mode: "json" },
       },
     };
-    const configSignals = [
-      {
-        rootPath: "plugins.entries.comfy.config",
-        mode: {
-          path: "mode",
-          allowed: ["cloud"],
-        },
-        requiredAny: ["workflow", "workflowPath"],
-        required: ["promptNodeId", "apiKey"],
-      },
-    ];
+    const configSignals = createComfyConfigSignals("cloud");
     installSnapshot(config, [createComfyPlugin(configSignals)]);
 
     const plan = resolveOptionalMediaToolFactoryPlan({

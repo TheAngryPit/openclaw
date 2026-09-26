@@ -48,7 +48,6 @@ export function createSkillWorkshopCollectionFixture() {
       "skills.proposals.evaluate",
       "skills.proposals.reject",
       "skills.proposals.requestRevision",
-      "skills.proposals.historyScan",
       "config.get",
     ],
     responses: {

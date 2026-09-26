@@ -14,7 +14,12 @@ const { createChildAdapterMock, createPtyAdapterMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("./adapters/child.js", () => ({
-  createChildAdapter: createChildAdapterMock,
+  createChildAdapter: async (
+    ...args: Parameters<typeof import("./adapters/child.js").createChildAdapter>
+  ) => ({
+    adapter: await createChildAdapterMock(...args),
+    ready: Promise.resolve(),
+  }),
 }));
 
 vi.mock("./adapters/pty.js", () => ({
@@ -46,7 +51,6 @@ describe("process supervisor scope extinction", () => {
 
     const supervisor = createProcessSupervisor();
     const run = await spawnChild(supervisor, {
-      sessionId: "ordinary-child",
       scopeKey: "scope:ordinary-child",
       argv: createSilentIdleArgv(),
     });
@@ -74,7 +78,6 @@ describe("process supervisor scope extinction", () => {
     const scopeKey = "scope:one-shot-late-join";
     const cleanup = supervisor.acquireScopeCleanup(scopeKey, { processTree: "required-all" });
     const run = await spawnChild(supervisor, {
-      sessionId: scopeKey,
       scopeKey,
       argv: createSilentIdleArgv(),
     });
@@ -113,8 +116,6 @@ describe("process supervisor scope extinction", () => {
       const run = await supervisor.spawn({
         mode: "child",
         argv: createSilentIdleArgv(),
-        backendId: "test",
-        sessionId: scopeKey,
         scopeKey,
         ...(mode === "external" ? { cleanupOwnership: "external" as const } : {}),
       });
@@ -139,7 +140,6 @@ describe("process supervisor scope extinction", () => {
     const scopeKey = "scope:graceful-one-shot";
     const cleanup = supervisor.acquireScopeCleanup(scopeKey, { processTree: "required-all" });
     const run = await spawnChild(supervisor, {
-      sessionId: scopeKey,
       scopeKey,
       argv: createSilentIdleArgv(),
     });
@@ -168,7 +168,6 @@ describe("process supervisor scope extinction", () => {
         processTree: "transport-only",
       });
       const pending = spawnChild(supervisor, {
-        sessionId: "timed-out-construction",
         scopeKey,
         argv: createSilentIdleArgv(),
         timeoutMs: 25,
@@ -213,7 +212,6 @@ describe("process supervisor scope extinction", () => {
 
     const supervisor = createProcessSupervisor();
     const run = await spawnChild(supervisor, {
-      sessionId: "s1",
       argv: createWriteStdoutArgv("ok"),
       timeoutMs: 1_000,
       stdinMode: "pipe-closed",
@@ -223,6 +221,7 @@ describe("process supervisor scope extinction", () => {
     extinction.resolve();
     await Promise.resolve();
     expect(adapter.disposeMock).not.toHaveBeenCalled();
+    expect(run.activity.resultSettled).toBe(false);
     adapter.emitStdout("ok");
     adapter.settle(0);
 
@@ -245,7 +244,6 @@ describe("process supervisor scope extinction", () => {
     createChildAdapterMock.mockResolvedValue(adapter);
     const supervisor = createProcessSupervisor();
     const run = await spawnChild(supervisor, {
-      sessionId: "root-result-before-extinction",
       scopeKey: "scope:root-result-before-extinction",
       argv: createSilentIdleArgv(),
     });
@@ -258,11 +256,7 @@ describe("process supervisor scope extinction", () => {
     expect(adapter.disposeMock).not.toHaveBeenCalled();
     supervisor.cancelScope("scope:root-result-before-extinction");
     expect(adapter.killMock).toHaveBeenCalledWith("SIGKILL");
-    expect(supervisor.getRecord(run.runId)).toMatchObject({
-      state: "exited",
-      terminationReason: "exit",
-      exitCode: 23,
-    });
+    expect(run.activity.resultSettled).toBe(true);
 
     if (failure) {
       extinction.reject(new Error("cleanup identity lost"));
@@ -294,13 +288,11 @@ describe("process supervisor scope extinction", () => {
       const sharedId = reuseRunId ? { runId: "same-agent-run" } : {};
       const firstPending = spawnChild(supervisor, {
         ...sharedId,
-        sessionId: "failed-owner",
         scopeKey: "scope:failed-drain",
         argv: createSilentIdleArgv(),
       });
       const siblingRun = await spawnChild(supervisor, {
         ...sharedId,
-        sessionId: "pending-owner",
         scopeKey: "scope:failed-drain",
         argv: createSilentIdleArgv(),
       });
@@ -314,7 +306,7 @@ describe("process supervisor scope extinction", () => {
       await firstRun.waitForExtinction?.();
       expect(first.disposeMock).toHaveBeenCalled();
       expect(sibling.killMock).toHaveBeenCalledWith("SIGTERM");
-      expect(supervisor.getRecord(siblingRun.runId)).toMatchObject({ pid: sibling.pid });
+      expect(siblingRun.pid).toBe(sibling.pid);
       sibling.settle(0);
       await Promise.all([firstRun.wait(), siblingRun.wait()]);
 
@@ -337,17 +329,16 @@ describe("process supervisor scope extinction", () => {
     const supervisor = createProcessSupervisor();
     const input = {
       runId: "same-agent-run",
-      sessionId: "overlapping-startups",
       argv: createSilentIdleArgv(),
     };
     const pending = spawnChild(supervisor, input);
     const replacement = await spawnChild(supervisor, input);
     try {
-      const snapshot = supervisor.getRecord(replacement.runId);
+      const snapshot = { ...replacement.activity };
       const rejected = expect(pending).rejects.toThrow("older startup failed");
       startup.reject(new Error("older startup failed"));
       await rejected;
-      expect(supervisor.getRecord(replacement.runId)).toEqual(snapshot);
+      expect(replacement.activity).toEqual(snapshot);
     } finally {
       sibling.settle(0);
       await replacement.wait();
@@ -367,9 +358,7 @@ describe("process supervisor scope extinction", () => {
       const run = await supervisor.spawn({
         mode: "pty",
         argv: createSilentIdleArgv(),
-        sessionId: scopeKey,
         scopeKey,
-        backendId: "test",
       });
       try {
         expect(createPtyAdapterMock).toHaveBeenCalledOnce();
@@ -399,9 +388,7 @@ describe("process supervisor scope extinction", () => {
       const run = await supervisor.spawn({
         mode: "child",
         argv: createSilentIdleArgv(),
-        sessionId: scopeKey,
         scopeKey,
-        backendId: "sandbox-transport",
         cleanupOwnership: "external",
       });
       external.settle(0);

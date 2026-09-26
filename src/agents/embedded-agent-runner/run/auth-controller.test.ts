@@ -15,7 +15,7 @@ import {
 import type { AuthProfileStore } from "../../auth-profiles.js";
 import { OAuthRefreshFailureError } from "../../auth-profiles/oauth-refresh-failure.js";
 import { resolveAuthProfileOrder } from "../../auth-profiles/order.js";
-import { ensureAuthProfileStore, saveAuthProfileStore } from "../../auth-profiles/store.js";
+import { ensureAuthProfileStore, saveAuthProfileStore } from "../../auth-profiles/store-runtime.js";
 import { FailoverError } from "../../failover-error.js";
 import type { RuntimeAuthState } from "./helpers.js";
 
@@ -617,7 +617,6 @@ describe("createEmbeddedRunAuthController", () => {
     const harness = createMutableAuthControllerHarness();
     mocks.getApiKeyForModelCore.mockRejectedValue(
       Object.assign(new Error("selected profile missing"), {
-        status: 401,
         code: "selected_auth_profile_unavailable",
       }),
     );
@@ -634,6 +633,8 @@ describe("createEmbeddedRunAuthController", () => {
     expect(error).toMatchObject({
       reason: "auth",
       code: "selected_auth_profile_unavailable",
+      status: undefined,
+      message: "selected profile missing",
       authProfileFailure: { allInCooldown: false },
     });
     expect(mocks.getApiKeyForModelCore.mock.calls.map(([params]) => params.profileId)).toEqual([

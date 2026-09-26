@@ -16,7 +16,12 @@ const { createChildAdapterMock, createPtyAdapterMock, getProcessSupervisorMock }
 );
 
 vi.mock("./adapters/child.js", () => ({
-  createChildAdapter: createChildAdapterMock,
+  createChildAdapter: async (
+    ...args: Parameters<typeof import("./adapters/child.js").createChildAdapter>
+  ) => ({
+    adapter: await createChildAdapterMock(...args),
+    ready: Promise.resolve(),
+  }),
 }));
 
 vi.mock("./adapters/pty.js", () => ({ createPtyAdapter: createPtyAdapterMock }));
@@ -96,13 +101,10 @@ describe("one-shot tool-generation process cleanup", () => {
         const externalRun = await supervisor.spawn({
           mode: "child",
           argv: createSilentIdleArgv(),
-          sessionId: scopeKey,
           scopeKey,
-          backendId: "sandbox-transport",
           cleanupOwnership: "external",
         });
         const hostRun = await spawnChild(supervisor, {
-          sessionId: scopeKey,
           scopeKey,
           argv: createSilentIdleArgv(),
         });
@@ -175,10 +177,10 @@ describe("one-shot tool-generation process cleanup", () => {
       ]);
       child.emitStdout("command ran once");
       child.settle(0);
-      await expect(run.promise).resolves.toMatchObject({
-        status: "completed",
-        aggregated: "command ran once",
-      });
+      const completed = vi.fn();
+      void run.promise.then(completed);
+      await vi.waitFor(() => expect(child.killMock).toHaveBeenCalledExactlyOnceWith("SIGTERM"));
+      expect(completed).not.toHaveBeenCalled();
       const closed = vi.fn();
       const closing = cleanup("completed");
       void closing.then(closed, closed);
@@ -186,6 +188,10 @@ describe("one-shot tool-generation process cleanup", () => {
       expect(closed).not.toHaveBeenCalled();
       expect(child.killMock).toHaveBeenCalledExactlyOnceWith("SIGTERM");
       extinction.resolve();
+      await expect(run.promise).resolves.toMatchObject({
+        status: "completed",
+        aggregated: "command ran once",
+      });
       await expect(closing).resolves.toBeUndefined();
     } finally {
       child.settle(0);

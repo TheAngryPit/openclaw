@@ -1,5 +1,12 @@
 import Foundation
+import OpenClawKit
 import WebKit
+
+enum DashboardBrowserResponseAction: Equatable {
+    case allow
+    case openExternal(URL)
+    case cancel
+}
 
 extension DashboardWindowController {
     static func isTrustedLinkSource(_ sourceURL: URL?, dashboardURL: URL) -> Bool {
@@ -61,9 +68,7 @@ extension DashboardWindowController {
         }
         guard !isMainFrame,
               isTrustedDashboardSource,
-              host?.isEmpty == false,
-              url.user == nil,
-              url.password == nil
+              host?.isEmpty == false
         else {
             return false
         }
@@ -79,6 +84,17 @@ extension DashboardWindowController {
         }
         guard let scheme = url.scheme?.lowercased() else { return false }
         return scheme == "about" || scheme == "blob" || scheme == "data" || self.isHTTPURL(url)
+    }
+
+    static func browserResponseAction(
+        for url: URL?,
+        canShowMIMEType: Bool,
+        isMainFrame: Bool,
+        userActivated: Bool) -> DashboardBrowserResponseAction
+    {
+        if canShowMIMEType { return .allow }
+        if isMainFrame, userActivated, let url, self.isHTTPURL(url) { return .openExternal(url) }
+        return .cancel
     }
 
     static func shouldAllowIdentityNavigation(
@@ -105,6 +121,18 @@ extension DashboardWindowController {
         navigationType == .linkActivated && buttonNumber > 0 && self.isExternalURL(url)
     }
 
+    static func shouldHandleAppLinkNavigation(
+        _ url: URL,
+        navigationType: WKNavigationType,
+        buttonNumber: Int,
+        sourceURL: URL?,
+        sourceIsMainFrame: Bool,
+        dashboardURL: URL) -> Bool
+    {
+        sourceIsMainFrame && self.isTrustedLinkSource(sourceURL, dashboardURL: dashboardURL) &&
+            navigationType == .linkActivated && buttonNumber > 0 && DeepLinkParser.parse(url) != nil
+    }
+
     static func targetlessNavigationAction(
         for url: URL,
         navigationType: WKNavigationType,
@@ -129,9 +157,9 @@ extension DashboardWindowController {
         return .cancel
     }
 
-    static func newWindowAction(for url: URL?, sourceIsLinkBrowser: Bool) -> DashboardNewWindowAction {
+    static func newWindowAction(for url: URL?, sourceIsNativeReadingTab: Bool) -> DashboardNewWindowAction {
         guard let url, self.isHTTPURL(url) else { return .ignore }
-        return sourceIsLinkBrowser ? .openTab(url) : .openExternal(url)
+        return sourceIsNativeReadingTab ? .openTab(url) : .openExternal(url)
     }
 
     private static func sameOrigin(_ lhs: URL, _ rhs: URL) -> Bool {

@@ -19,10 +19,24 @@ RUN apt-get update \
 RUN corepack enable
 RUN npm install -g tsx@4.23.12 --no-fund --no-audit
 
-COPY scripts/prepublish-plugin-registry-artifact.mjs /opt/openclaw-e2e/scripts/
+# Mounted survivor helpers resolve compiler tooling independently of installed packages.
+COPY package.json /tmp/openclaw-e2e-package.json
+RUN <<'INSTALL_TYPESCRIPT'
+set -eu
+typescript_version="$(node -p 'require("/tmp/openclaw-e2e-package.json").devDependencies.typescript')"
+npm install --prefix /opt/openclaw-e2e "typescript@$typescript_version" \
+  --no-save --package-lock=false --no-fund --no-audit
+ln -s /opt/openclaw-e2e/node_modules /node_modules
+rm /tmp/openclaw-e2e-package.json
+INSTALL_TYPESCRIPT
+
+COPY --chmod=0644 scripts/prepublish-plugin-registry-artifact.mjs /opt/openclaw-e2e/scripts/
 COPY --chmod=0755 scripts/e2e/lib/prepublish-plugin-registry.sh /opt/openclaw-e2e/scripts/e2e/lib/
 COPY scripts/e2e/lib/plugins/npm-registry-server.mjs /opt/openclaw-e2e/scripts/e2e/lib/plugins/
 COPY scripts/lib/bounded-response.mjs /opt/openclaw-e2e/scripts/lib/
+
+# COPY --chmod can also set modes on newly created parent directories.
+RUN find /opt/openclaw-e2e -type d -exec chmod 0755 {} +
 
 RUN useradd --create-home --shell /bin/bash appuser \
  && mkdir -p /app \
@@ -48,7 +62,8 @@ CMD ["bash"]
 
 FROM ${OPENCLAW_NODE_ALPINE_IMAGE} AS musl
 
-RUN apk add --no-cache bash
+# Native dependencies without musl prebuilds must compile during real npm installs.
+RUN apk add --no-cache bash g++ make python3
 COPY --from=e2e-runner /opt/openclaw-e2e /opt/openclaw-e2e
 COPY scripts/docker/verify-fs-safe-native.mjs /tmp/verify-fs-safe-native.mjs
 
@@ -112,6 +127,8 @@ INSTALL_DEPS
 
 FROM bare AS functional
 
+ARG OPENCLAW_FS_SAFE_NATIVE_CONTRACT=required
+
 # The app under test enters through the named BuildKit context, not by copying
 # checkout sources into the image.
 COPY --from=openclaw_package --chown=appuser:appuser openclaw-current.tgz /tmp/openclaw-current.tgz
@@ -126,7 +143,8 @@ RUN tar -xzf /tmp/openclaw-current.tgz -C /app --strip-components=1 \
  && ln -sfn /app /app/node_modules/openclaw \
  && mkdir -p "$HOME/.local/bin" \
  && ln -sf /app/openclaw.mjs "$HOME/.local/bin/openclaw" \
- && node /tmp/verify-fs-safe-native.mjs --package-root /app --mode require \
+ && OPENCLAW_FS_SAFE_NATIVE_CONTRACT="$OPENCLAW_FS_SAFE_NATIVE_CONTRACT" \
+      node /tmp/verify-fs-safe-native.mjs --package-root /app --mode require \
  && rm -f /tmp/openclaw-current.tgz
 
 CMD ["bash"]

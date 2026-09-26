@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { replaceFileAtomicSync } from "@openclaw/fs-safe/atomic";
 import { expectDefined } from "@openclaw/normalization-core";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { resolveStateDir } from "../config/paths.js";
@@ -9,9 +10,19 @@ import type {
   DiagnosticMemoryPressureEvent,
   DiagnosticMemoryUsage,
 } from "../infra/diagnostic-events.js";
-import { isMissingPathError } from "../infra/errors.js";
+import {
+  collectErrorGraphCandidates,
+  formatErrorMessage,
+  isMissingPathError,
+} from "../infra/errors.js";
 import { registerFatalErrorHook } from "../infra/fatal-error-hooks.js";
-import { replaceFileAtomicSync } from "../infra/replace-file.js";
+import { readMemoryUsage } from "./diagnostic-memory-bundle.js";
+import {
+  assignOptionalFields,
+  readObject,
+  readOptionalPositiveInteger,
+  readRequiredNumber,
+} from "./diagnostic-stability-readers.js";
 import {
   getDiagnosticStabilitySnapshot,
   MAX_DIAGNOSTIC_STABILITY_LIMIT,
@@ -30,6 +41,8 @@ const BUNDLE_PREFIX = "openclaw-stability-";
 const BUNDLE_SUFFIX = ".json";
 const REDACTED_HOSTNAME = "<redacted-hostname>";
 const MAX_SAFE_ERROR_MESSAGE_LENGTH = 500;
+const MAX_SHUTDOWN_ERRORS = 32;
+const MAX_SAFE_ERROR_STACK_LENGTH = 8_000;
 
 type DiagnosticHeapSpaceSummary = {
   spaceName: string;
@@ -83,6 +96,10 @@ type DiagnosticMemoryPressureBundleEvidence = {
 
 type DiagnosticStabilityBundleEvidence = {
   memoryPressure?: DiagnosticMemoryPressureBundleEvidence;
+  shutdown?: {
+    step: string;
+    errors: Array<NonNullable<DiagnosticStabilityBundle["error"]>>;
+  };
 };
 
 export type DiagnosticStabilityBundle = {
@@ -103,6 +120,7 @@ export type DiagnosticStabilityBundle = {
     name?: string;
     code?: string;
     message?: string;
+    stack?: string;
   };
   evidence?: DiagnosticStabilityBundleEvidence;
   snapshot: DiagnosticStabilitySnapshot;
@@ -123,6 +141,7 @@ type WriteDiagnosticStabilityBundleOptions = {
   stateDir?: string;
   retention?: number;
   evidence?: DiagnosticStabilityBundleEvidence;
+  shutdownStep?: string;
 };
 
 type DiagnosticStabilityBundleLocationOptions = {
@@ -199,14 +218,43 @@ function readSafeErrorMetadata(error: unknown): DiagnosticStabilityBundle["error
   const name = readErrorName(error);
   const code = readErrorCode(error);
   const message = readErrorMessage(error);
-  if (!name && !code && !message) {
+  const stack =
+    error && typeof error === "object" && "stack" in error && typeof error.stack === "string"
+      ? truncateUtf16Safe(
+          redactSensitiveText(error.stack, { mode: "tools" }),
+          MAX_SAFE_ERROR_STACK_LENGTH,
+        )
+      : undefined;
+  if (!name && !code && !message && !stack) {
     return undefined;
   }
   return {
     ...(name ? { name } : {}),
     ...(code ? { code } : {}),
     ...(message ? { message } : {}),
+    ...(stack ? { stack } : {}),
   };
+}
+
+function readShutdownError(error: unknown) {
+  const normalized =
+    error && typeof error === "object" ? error : { message: formatErrorMessage(error) };
+  return readSafeErrorMetadata(normalized) ?? {};
+}
+
+function collectShutdownErrors(error: unknown) {
+  let remaining = MAX_SHUTDOWN_ERRORS - 1;
+  const candidates = collectErrorGraphCandidates(error, (current) => {
+    const nested: unknown[] = [
+      current.cause,
+      ...(Array.isArray(current.errors) ? current.errors.slice(0, remaining) : []),
+    ]
+      .filter((value) => value !== undefined)
+      .slice(0, remaining);
+    remaining -= nested.length;
+    return nested;
+  });
+  return (candidates.length ? candidates : [error]).map(readShutdownError);
 }
 
 function resolveDiagnosticStabilityBundleDir(
@@ -228,28 +276,6 @@ function buildBundlePath(dir: string, now: Date, reason: string): string {
 
 function isBundleFile(name: string): boolean {
   return name.startsWith(BUNDLE_PREFIX) && name.endsWith(BUNDLE_SUFFIX);
-}
-
-function readObject(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error(`Invalid stability bundle: ${label} must be an object`);
-  }
-  return value as Record<string, unknown>;
-}
-
-function readRequiredNumber(value: unknown, label: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new Error(`Invalid stability bundle: ${label} must be a finite number`);
-  }
-  return value;
-}
-
-function readOptionalPositiveInteger(value: unknown, label: string): number | undefined {
-  if (value === undefined) {
-    return undefined;
-  }
-  const parsed = readRequiredNumber(value, label);
-  return parsed >= 0 ? Math.floor(parsed) : undefined;
 }
 
 function readTimestampMs(value: unknown, label: string): number {
@@ -296,33 +322,6 @@ function readOptionalCodeString(value: unknown, label: string): string | undefin
   }
   const code = readRequiredString(value, label);
   return SAFE_REASON_CODE.test(code) ? code : undefined;
-}
-
-function assignOptionalFields<T extends object>(
-  target: T,
-  source: Record<string, unknown>,
-  label: string,
-  fields: readonly (keyof T & string)[],
-  read: (value: unknown, label: string) => string | number | undefined,
-): void {
-  // The fixed order preserves serialized fields and the first failing validation label.
-  for (const key of fields) {
-    const parsed = read(source[key], `${label}.${key}`);
-    if (parsed !== undefined) {
-      (target as Record<string, unknown>)[key] = parsed;
-    }
-  }
-}
-
-function readMemoryUsage(value: unknown, label: string): DiagnosticMemoryUsage {
-  const memory = readObject(value, label);
-  return {
-    rssBytes: readRequiredNumber(memory.rssBytes, `${label}.rssBytes`),
-    heapTotalBytes: readRequiredNumber(memory.heapTotalBytes, `${label}.heapTotalBytes`),
-    heapUsedBytes: readRequiredNumber(memory.heapUsedBytes, `${label}.heapUsedBytes`),
-    externalBytes: readRequiredNumber(memory.externalBytes, `${label}.externalBytes`),
-    arrayBuffersBytes: readRequiredNumber(memory.arrayBuffersBytes, `${label}.arrayBuffersBytes`),
-  };
 }
 
 function readHeapStatistics(value: unknown): DiagnosticHeapStatisticsSummary | undefined {
@@ -533,7 +532,20 @@ function readBundleEvidence(value: unknown): DiagnosticStabilityBundleEvidence |
   }
   const source = readObject(value, "evidence");
   const memoryPressure = readMemoryPressureEvidence(source.memoryPressure);
-  return memoryPressure ? { memoryPressure } : undefined;
+  let shutdown: DiagnosticStabilityBundleEvidence["shutdown"];
+  if (source.shutdown !== undefined) {
+    const shutdownSource = readObject(source.shutdown, "evidence.shutdown");
+    if (!Array.isArray(shutdownSource.errors)) {
+      throw new Error("Invalid stability bundle: evidence.shutdown.errors must be an array");
+    }
+    shutdown = {
+      step: readCodeString(shutdownSource.step, "evidence.shutdown.step"),
+      errors: shutdownSource.errors.slice(0, MAX_SHUTDOWN_ERRORS).map(readShutdownError),
+    };
+  }
+  return memoryPressure || shutdown
+    ? { ...(memoryPressure ? { memoryPressure } : {}), ...(shutdown ? { shutdown } : {}) }
+    : undefined;
 }
 
 function readNumberMap(value: unknown, label: string): Record<string, number> {
@@ -916,6 +928,15 @@ export function writeDiagnosticStabilityBundleSync(
 
     const reason = normalizeReason(options.reason);
     const error = options.error ? readSafeErrorMetadata(options.error) : undefined;
+    const evidence = options.shutdownStep
+      ? {
+          ...options.evidence,
+          shutdown: {
+            step: readCodeString(options.shutdownStep, "shutdownStep"),
+            errors: collectShutdownErrors(options.error),
+          },
+        }
+      : options.evidence;
     const bundle: DiagnosticStabilityBundle = {
       version: DIAGNOSTIC_STABILITY_BUNDLE_VERSION,
       generatedAt: now.toISOString(),
@@ -931,7 +952,7 @@ export function writeDiagnosticStabilityBundleSync(
         hostname: REDACTED_HOSTNAME,
       },
       ...(error ? { error } : {}),
-      ...(options.evidence ? { evidence: options.evidence } : {}),
+      ...(evidence ? { evidence } : {}),
       snapshot,
     };
 

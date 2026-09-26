@@ -24,8 +24,8 @@ import {
   coerceSecretRef,
   isNonSecretApiKeyMarker,
 } from "openclaw/plugin-sdk/provider-auth";
-import { createProviderApiKeyAuthMethod } from "openclaw/plugin-sdk/provider-auth-api-key";
 import { runLiveProviderCatalog } from "openclaw/plugin-sdk/provider-catalog-live-runtime";
+import { createProviderApiKeyAuthMethod } from "openclaw/plugin-sdk/provider-entry";
 import type {
   ModelDefinitionConfig,
   ModelProviderConfig,
@@ -1024,7 +1024,7 @@ export default definePluginEntry({
             config: ctx.config ?? {},
             env: process.env,
             value: providerConfig.apiKey,
-            path: `models.providers.${ctx.provider}.apiKey`,
+            path: `models.providers[${JSON.stringify(ctx.provider)}].apiKey`,
             unresolvedReasonStyle: "detailed",
           });
           if (resolved.unresolvedRefReason) {

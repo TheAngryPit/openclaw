@@ -1,17 +1,14 @@
 import type {
   SkillWorkshopActionBusy,
   SkillWorkshopActionNotice,
-  SkillWorkshopAppliedDiffMode,
   SkillWorkshopInstalledSkill,
   SkillWorkshopInstalledSelection,
   SkillWorkshopMode,
   SkillWorkshopProposal,
   SkillWorkshopProposalDecision,
-  SkillWorkshopStatusFilter,
 } from "../../lib/skill-workshop/index.ts";
 import type { SkillWorkshopAccess } from "./access.ts";
 import type { SkillWorkshopSelfLearning } from "./self-learning.ts";
-import type { SkillWorkshopHistoryScanState } from "./state.ts";
 
 export type SkillWorkshopProps = {
   access: SkillWorkshopAccess;
@@ -23,10 +20,7 @@ export type SkillWorkshopProps = {
   installedSelection: SkillWorkshopInstalledSelection;
   onSelectInstalled: (name: string) => void;
   onRetryInstalled: () => void;
-  onShowHistory: (skillKey: string) => void;
   selectedKey: string | null;
-  appliedDiffMode: SkillWorkshopAppliedDiffMode;
-  statusFilter: SkillWorkshopStatusFilter;
   query: string;
   filePreviewKey: string | null;
   filePreviewQuery: string;
@@ -40,16 +34,12 @@ export type SkillWorkshopProps = {
   assistantName: string;
   workshopAgentName: string;
   selfLearning: SkillWorkshopSelfLearning | null;
-  historyScan: SkillWorkshopHistoryScanState;
-  counts: Record<SkillWorkshopStatusFilter, number>;
-  onStatusFilterChange: (status: SkillWorkshopStatusFilter) => void;
   onRetry: () => void;
   onQueryChange: (query: string) => void;
   onFilePreviewQueryChange: (query: string) => void;
   onQueueWidthChange: (width: number) => void;
   onModeChange: (mode: SkillWorkshopMode) => void;
   onSelect: (key: string) => void;
-  onAppliedDiffModeChange: (mode: SkillWorkshopAppliedDiffMode) => void;
   onPrev: () => void;
   onNext: () => void;
   onApply: (decision: SkillWorkshopProposalDecision) => void;
@@ -62,5 +52,4 @@ export type SkillWorkshopProps = {
   onPreviewFile: (key: string, path: string) => void;
   onClosePreview: () => void;
   onSelfLearningToggle: (enabled: boolean) => void;
-  onHistoryScan: () => void;
 };

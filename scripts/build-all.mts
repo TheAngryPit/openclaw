@@ -1,22 +1,25 @@
 #!/usr/bin/env node
 // Builds OpenClaw packages and plugin SDK artifacts with cache-aware orchestration.
 
-import { spawnSync, type SpawnSyncOptions } from "node:child_process";
+import type { SpawnSyncOptions } from "node:child_process";
 import { performance } from "node:perf_hooks";
 import prettyMilliseconds from "pretty-ms";
+import { resolveNodeRuntimeExecutable } from "../src/infra/node-runtime-executable.ts";
 import {
   finalizeBuildStepCache,
   resolveBuildStepCacheState,
   restoreBuildStepCacheOutputs,
   type BuildCacheStep,
 } from "./lib/build-artifact-cache.mts";
-import { resolveBuildIdentityEnvironment } from "./lib/build-identity.mts";
+import { readCurrentGitCommit, resolveBuildIdentityEnvironment } from "./lib/build-identity.mts";
 import { isDirectRunUrl } from "./lib/direct-run.mjs";
 import {
   distArtifactEntryArgs,
   withDistArtifactOwnership,
 } from "./lib/dist-artifact-ownership.mts";
 import { runManagedCommand } from "./lib/managed-child-process.mts";
+import type { MemoryLimitParams } from "./lib/process-memory.mts";
+import { preflightInstalledSourceArtifacts } from "./lib/source-update-artifact-preflight.mts";
 import {
   TSDOWN_PACKAGE_CONFIG_GROUP,
   TSDOWN_UNIFIED_CONFIG_GROUP,
@@ -32,10 +35,9 @@ import {
   TSDOWN_DECLARATION_TOOL_INPUTS,
   TSDOWN_PACKAGES_CACHE_INPUT,
   resolveTsdownBuildPlan,
-  type MemoryLimitParams,
 } from "./tsdown-build.mts";
 
-const nodeBin = process.execPath;
+const nodeBin = resolveNodeRuntimeExecutable() ?? process.execPath;
 
 export type BuildAllStep = BuildCacheStep &
   (
@@ -133,7 +135,7 @@ export const BUILD_ALL_STEPS: BuildAllStep[] = [
     kind: "pnpm",
     pnpmArgs: ["plugins:assets:copy"],
   },
-  nodeStep("runtime-postbuild", ["scripts/runtime-postbuild.mjs"]),
+  tsxStep("runtime-postbuild", "scripts/runtime-postbuild.mts"),
   tsxStep("build-stamp", "scripts/build-stamp.mts"),
   tsxStep("runtime-postbuild-stamp", "scripts/runtime-postbuild-stamp.mts"),
   {
@@ -369,14 +371,6 @@ export function resolveBuildAllSteps(
     });
 }
 
-function readCurrentGitCommit() {
-  const result = spawnSync("git", ["rev-parse", "HEAD"], {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-  });
-  return result.status === 0 ? result.stdout.trim() : null;
-}
-
 /** Pin one source identity for every child process that contributes to this build. */
 export function resolveBuildAllEnvironment(
   env: NodeJS.ProcessEnv = process.env,
@@ -393,6 +387,9 @@ export function resolveBuildAllEnvironment(
   // Updates need runtime artifacts; explicit declaration/package builds still win.
   if (buildEnv.OPENCLAW_UPDATE_IN_PROGRESS === "1") {
     buildEnv[RUN_NODE_SKIP_DTS_BUILD_ENV] ??= "1";
+    // Published updaters can still pass the serving checkout's source root.
+    // Rebind before plugin asset hooks resolve SDK aliases in this candidate.
+    buildEnv.OPENCLAW_DEV_SOURCE_ROOT = process.cwd();
   }
   return buildEnv;
 }
@@ -532,6 +529,7 @@ export async function runBuildAllSteps(
     steps?: BuildAllStep[];
   } = {},
 ) {
+  await preflightInstalledSourceArtifacts(params.env ?? process.env);
   const { env: buildEnv, heapShortfall } = resolveBuildAllTsdownPlan(
     profile,
     resolveBuildAllEnvironment(params.env),
@@ -554,7 +552,8 @@ export async function runBuildAllSteps(
           args:
             script === "scripts/tsdown-build.mts" ||
             script === "scripts/write-unified-entry-dts.ts" ||
-            script === "scripts/write-plugin-sdk-entry-dts.ts"
+            script === "scripts/write-plugin-sdk-entry-dts.ts" ||
+            script === "scripts/runtime-postbuild.mts"
               ? distArtifactEntryArgs(script, invocation.args.slice(3))
               : invocation.args,
           ...invocation.options,
