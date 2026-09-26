@@ -1038,16 +1038,16 @@ extension GatewayEndpointStore {
         // Core rejects two configured inputs without an explicit mode.
         guard !(configuredToken.configured && configuredPassword.configured) else { return nil }
 
-        // Core treats gateway.remote.token as a token candidate for local connections too.
-        if hasConfiguredRemoteToken { return "token" }
-
         let ambientToken = hasAmbientCandidate("OPENCLAW_GATEWAY_TOKEN", launchdSnapshot?.token)
         let ambientPassword = hasAmbientCandidate("OPENCLAW_GATEWAY_PASSWORD", launchdSnapshot?.password)
         // During startup, a concrete opposite-side fallback suppresses typed-ref materialization.
-        let hasToken = ambientToken || (configuredToken.configured && !(configuredToken.isSecretRef && ambientPassword))
+        let hasToken = ambientToken || hasConfiguredRemoteToken ||
+            (configuredToken.configured && !(configuredToken.isSecretRef && ambientPassword))
         let hasPassword = ambientPassword ||
             (configuredPassword.configured && !(configuredPassword.isSecretRef && ambientToken))
-        // resolveGatewayAuth infers password before token once active refs are materialized.
+        // Startup does not treat gateway.remote.token as a competing local token
+        // fallback when deciding whether to materialize gateway.auth.password.
+        // Once resolved, Core infers password before token.
         if hasPassword { return "password" }
         return hasToken ? "token" : nil
     }
