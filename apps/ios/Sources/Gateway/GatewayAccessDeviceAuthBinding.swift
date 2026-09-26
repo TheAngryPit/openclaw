@@ -30,8 +30,8 @@ struct GatewayAccessDeviceAuthBindingStore {
         static var keychain: Self {
             let service = "\(Bundle.main.bundleIdentifier ?? "ai.openclaw.ios").gateway-access-device-auth"
             return Self(
-                load: { KeychainStore.loadString(service: service, account: $0) },
-                save: { KeychainStore.saveString($1, service: service, account: $0) })
+                load: { GenericPasswordKeychainStore.loadString(service: service, account: $0) },
+                save: { GenericPasswordKeychainStore.saveString($1, service: service, account: $0) })
         }
     }
 
