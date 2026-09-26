@@ -11,7 +11,7 @@ struct CLIInstallerSelectionTests {
             #expect(selected == .ready(location: external.path, version: "2026.9.2"))
 
             // Startup performs discovery followed by managed inspection before deciding ownership.
-            let inspected = await CLIInstaller.managedStatus()
+            let inspected = await CLIInstaller.managedStatus(managedExecutable: managed.path)
             #expect(inspected == .ready(location: managed.path, version: "2026.9.1"))
             #expect(AppDefaults.standard.string(forKey: cliValidatedExecutableKey) == external.path)
             #expect(AppDefaults.standard.string(forKey: cliValidatedVersionKey) == "2026.9.2")
@@ -24,7 +24,8 @@ struct CLIInstallerSelectionTests {
             AppDefaults.standard.removeObject(forKey: cliValidatedExecutableKey)
             AppDefaults.standard.removeObject(forKey: cliValidatedVersionKey)
 
-            #expect(await CLIInstaller.managedStatus() == .ready(location: managed.path, version: "2026.9.1"))
+            #expect(await CLIInstaller.managedStatus(managedExecutable: managed.path) ==
+                .ready(location: managed.path, version: "2026.9.1"))
             #expect(AppDefaults.standard.string(forKey: cliValidatedExecutableKey) == nil)
             #expect(AppDefaults.standard.string(forKey: cliValidatedVersionKey) == nil)
         }
@@ -37,6 +38,7 @@ struct CLIInstallerSelectionTests {
             let outcome = await CLIInstaller.updateManaged(
                 targetVersion: targetVersion,
                 restartGateway: false,
+                managedExecutable: managed.path,
                 statusHandler: { _ in })
 
             if succeeds {
@@ -61,8 +63,8 @@ struct CLIInstallerSelectionTests {
         let root = try makeTempDirForTests().resolvingSymlinksInPath()
         defer { try? FileManager.default.removeItem(at: root) }
         let external = root.appendingPathComponent("external/bin/openclaw")
+        let managed = root.appendingPathComponent("managed/bin/openclaw")
         try await TestIsolation.withIsolatedState(
-            env: ["CFFIXED_USER_HOME": root.path],
             defaults: [
                 cliValidatedExecutableKey: external.path,
                 cliValidatedVersionKey: "2026.9.2",
@@ -70,10 +72,7 @@ struct CLIInstallerSelectionTests {
                 "openclaw.gatewayProjectRootPath": root.path,
             ])
         {
-            // The native CI launcher owns OS isolation; never write an operator's managed tree.
-            try #require(FileManager().homeDirectoryForCurrentUser.resolvingSymlinksInPath() == root)
-            let managed = URL(fileURLWithPath: CLIInstaller.managedExecutableLocation())
-            try #require(managed.path.hasPrefix(root.path + "/"))
+            // Keep Foundation's process home fixed and use explicit temporary fixture paths.
             for (executable, version) in [(external, "2026.9.2"), (managed, "2026.9.1")] {
                 try makeExecutableForTests(at: executable)
                 try """
