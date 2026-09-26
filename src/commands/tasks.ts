@@ -1,6 +1,3 @@
-// Human-facing background task commands.
-// Handles task listing/show/cancel/notify/audit plus registry maintenance for tasks, flows, and sessions.
-
 import { timestampMsToIsoString } from "@openclaw/normalization-core/number-coercion";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { truncateWithMarker } from "@openclaw/normalization-core/utf16-slice";
@@ -12,7 +9,7 @@ import { formatLookupMiss } from "../cli/error-format.js";
 import { formatCliJsonFailure, rethrowExpectedCliError } from "../cli/failure-output.js";
 import { getRuntimeConfig } from "../config/config.js";
 import { type RuntimeEnv, writeRuntimeJson } from "../runtime.js";
-import { getTaskById, updateTaskNotifyPolicyById } from "../tasks/runtime-internal.js";
+import { updateTaskNotifyPolicyById } from "../tasks/runtime-internal.js";
 import { cancelDetachedTaskRunById } from "../tasks/task-executor.js";
 import { listTaskFlowAuditFindings } from "../tasks/task-flow-registry.audit.js";
 import {
@@ -85,10 +82,6 @@ function formatTaskTimestamp(value: number | undefined): string {
   return timestampMsToIsoString(value) ?? "n/a";
 }
 
-async function loadTaskCancelConfig() {
-  return getRuntimeConfig();
-}
-
 type GatewayTaskCancelSummary = {
   id?: string;
   taskId?: string;
@@ -106,15 +99,13 @@ type GatewayTaskCancelResult = {
 async function tryCancelGatewayOwnedTaskViaGateway(
   task: TaskRecord,
 ): Promise<GatewayTaskCancelResult | null> {
-  if (task.runtime === "cli") {
-    return null;
-  }
   try {
     const { callGateway } = await import("../gateway/call.js");
     return await callGateway<GatewayTaskCancelResult>({
       method: "tasks.cancel",
       params: { taskId: task.taskId },
-      timeoutMs: 5_000,
+      // Ordinary agent cancellation waits for its real execution to settle.
+      timeoutMs: task.runtime === "cli" ? 15_000 : 5_000,
     });
   } catch (error) {
     if (task.runtime === "cron") {
@@ -128,10 +119,6 @@ async function tryCancelGatewayOwnedTaskViaGateway(
       task,
     };
   }
-}
-
-function configureTaskMaintenanceFromConfig(): void {
-  configureTaskRegistryMaintenance();
 }
 
 function truncate(value: string, maxChars: number) {
@@ -252,22 +239,17 @@ function toSystemAuditFindings(params: {
   });
 }
 
-/** Lists background tasks with optional runtime/status filters. */
 export async function tasksListCommand(
   opts: { json?: boolean; runtime?: string; status?: string },
   runtime: RuntimeEnv,
 ) {
   const runtimeFilter = parseCliEnumFilter(opts.runtime, "--runtime", TASK_RUNTIMES);
   const statusFilter = parseCliEnumFilter(opts.status, "--status", TASK_STATUS_FILTERS);
-  const tasks = reconcileInspectableTasks().filter((task) => {
-    if (runtimeFilter && task.runtime !== runtimeFilter) {
-      return false;
-    }
-    if (statusFilter && !matchesTaskStatusFilter(task, statusFilter)) {
-      return false;
-    }
-    return true;
-  });
+  const tasks = reconcileInspectableTasks().filter(
+    (task) =>
+      (!runtimeFilter || task.runtime === runtimeFilter) &&
+      (!statusFilter || matchesTaskStatusFilter(task, statusFilter)),
+  );
 
   if (opts.json) {
     writeRuntimeJson(runtime, {
@@ -299,7 +281,6 @@ export async function tasksListCommand(
   }
 }
 
-/** Shows one task record by id or lookup token. */
 export async function tasksShowCommand(
   opts: { json?: boolean; lookup: string },
   runtime: RuntimeEnv,
@@ -351,7 +332,6 @@ export async function tasksShowCommand(
   }
 }
 
-/** Updates a task's notification policy. */
 export async function tasksNotifyCommand(
   opts: { lookup: string; notify: TaskNotifyPolicy },
   runtime: RuntimeEnv,
@@ -376,7 +356,6 @@ export async function tasksNotifyCommand(
   );
 }
 
-/** Cancels a detached task run by lookup token. */
 export async function tasksCancelCommand(opts: { lookup: string }, runtime: RuntimeEnv) {
   const task = reconcileTaskLookupToken(opts.lookup);
   if (!task) {
@@ -384,34 +363,12 @@ export async function tasksCancelCommand(opts: { lookup: string }, runtime: Runt
     runtime.exit(1);
     return;
   }
-  const gatewayResult = await tryCancelGatewayOwnedTaskViaGateway(task);
-  if (gatewayResult) {
-    if (!gatewayResult.found) {
-      runtime.error(
-        sanitizeTerminalText(gatewayResult.reason ?? formatTaskLookupMiss(opts.lookup)),
-      );
-      runtime.exit(1);
-      return;
-    }
-    if (!gatewayResult.cancelled) {
-      runtime.error(
-        sanitizeTerminalText(gatewayResult.reason ?? `Could not cancel task: ${opts.lookup}`),
-      );
-      runtime.exit(1);
-      return;
-    }
-    const updated = gatewayResult.task;
-    runtime.log(
-      sanitizeTerminalText(
-        `Cancelled ${updated?.taskId ?? updated?.id ?? task.taskId} (${updated?.runtime ?? task.runtime})${updated?.runId ? ` run ${updated.runId}` : ""}.`,
-      ),
-    );
-    return;
-  }
-  const result = await cancelDetachedTaskRunById({
-    cfg: await loadTaskCancelConfig(),
-    taskId: task.taskId,
-  });
+  const result: GatewayTaskCancelResult =
+    (await tryCancelGatewayOwnedTaskViaGateway(task)) ??
+    (await cancelDetachedTaskRunById({
+      cfg: getRuntimeConfig(),
+      taskId: task.taskId,
+    }));
   if (!result.found) {
     runtime.error(sanitizeTerminalText(result.reason ?? formatTaskLookupMiss(opts.lookup)));
     runtime.exit(1);
@@ -422,10 +379,10 @@ export async function tasksCancelCommand(opts: { lookup: string }, runtime: Runt
     runtime.exit(1);
     return;
   }
-  const updated = getTaskById(task.taskId);
+  const updated = result.task;
   runtime.log(
     sanitizeTerminalText(
-      `Cancelled ${updated?.taskId ?? task.taskId} (${updated?.runtime ?? task.runtime})${updated?.runId ? ` run ${updated.runId}` : ""}.`,
+      `Cancelled ${updated?.taskId ?? updated?.id ?? task.taskId} (${updated?.runtime ?? task.runtime})${updated?.runId ? ` run ${updated.runId}` : ""}.`,
     ),
   );
 }
@@ -499,7 +456,6 @@ export async function tasksDismissCommand(opts: { lookups: string[] }, runtime: 
   await runTaskRecoveryCommand("dismiss", opts.lookups, runtime);
 }
 
-/** Prints or serializes combined task/task-flow audit findings. */
 export async function tasksAuditCommand(
   opts: {
     json?: boolean;
@@ -513,11 +469,9 @@ export async function tasksAuditCommand(
     opts.severity,
     "--severity",
     TASK_SYSTEM_AUDIT_SEVERITIES,
-  ) as TaskSystemAuditSeverity | undefined;
-  const codeFilter = parseCliEnumFilter(opts.code, "--code", TASK_SYSTEM_AUDIT_CODES) as
-    | TaskSystemAuditCode
-    | undefined;
-  configureTaskMaintenanceFromConfig();
+  );
+  const codeFilter = parseCliEnumFilter(opts.code, "--code", TASK_SYSTEM_AUDIT_CODES);
+  configureTaskRegistryMaintenance();
   const auditResult = toSystemAuditFindings({
     severityFilter,
     codeFilter,
@@ -568,12 +522,11 @@ export async function tasksAuditCommand(
   }
 }
 
-/** Previews or applies task, task-flow, and backing session-registry maintenance. */
 export async function tasksMaintenanceCommand(
   opts: { json?: boolean; apply?: boolean },
   runtime: RuntimeEnv,
 ) {
-  configureTaskMaintenanceFromConfig();
+  configureTaskRegistryMaintenance();
   assertTaskFlowRegistryMaintenanceReady();
   const auditBefore = getInspectableTaskAuditSummary();
   const flowAuditBefore = getInspectableTaskFlowAuditSummary();

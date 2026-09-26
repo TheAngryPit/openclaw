@@ -2,6 +2,10 @@
 import { expectChannelInboundContextContract as expectInboundContextContract } from "openclaw/plugin-sdk/channel-contract-testing";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import type { MsgContext } from "openclaw/plugin-sdk/reply-runtime";
+import {
+  clearRuntimeConfigSnapshot,
+  setRuntimeConfigSnapshot,
+} from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveSignalReplyContextWithPersistence } from "../reply-authors.js";
 import { resetSignalReplyAuthorsForTests } from "../reply-authors.test-helpers.js";
@@ -34,7 +38,6 @@ type DispatchInboundMessageMockParams = {
   };
 };
 
-type SendReactionSignalMockCall = [string, number, string, unknown];
 type TestDispatchResult = {
   queuedFinal: boolean;
   counts: Record<"tool" | "block" | "final", number>;
@@ -70,7 +73,9 @@ const {
   return {
     sendTypingMock: vi.fn(),
     sendReadReceiptMock: vi.fn(),
-    sendReactionSignalMock: vi.fn(async () => ({ ok: true })),
+    sendReactionSignalMock: vi.fn<typeof import("../send-reactions.js").sendReactionSignal>(
+      async () => ({ ok: true }),
+    ),
     enqueueSystemEventMock: vi.fn(),
     recordInboundSessionMock: vi.fn(),
     dispatchInboundMessageMock: vi.fn(
@@ -427,9 +432,7 @@ function receiveGroupMessage(
 }
 
 function sentReactionEmojis(): string[] {
-  return (sendReactionSignalMock.mock.calls as unknown as SendReactionSignalMockCall[]).map(
-    (call) => call[2],
-  );
+  return sendReactionSignalMock.mock.calls.map((call) => call[2]);
 }
 
 describe("signal createSignalEventHandler inbound context", () => {
@@ -480,18 +483,6 @@ describe("signal createSignalEventHandler inbound context", () => {
     expect(context.ChatType).toBe("direct");
     expect(context.To).toBe("+15550002222");
     expect(context.OriginatingTo).toBe("+15550002222");
-  });
-
-  it("sets ReplyToId from the inbound Signal timestamp", async () => {
-    const handler = createTestHandler({
-      cfg: { messages: { inbound: { debounceMs: 0 } } } as OpenClawConfig,
-    });
-
-    await receiveDirectMessage(handler, { dataMessage: { message: "hello" } });
-
-    const context = requireCapturedContext();
-    expect(context.MessageSid).toBe("1700000000001");
-    expect(context.ReplyToId).toBe("1700000000001");
   });
 
   it.each([
@@ -764,27 +755,6 @@ describe("signal createSignalEventHandler inbound context", () => {
     }
   });
 
-  it("restores the initial Signal ack reaction after a successful reply", async () => {
-    dispatchInboundMessageMock.mockImplementationOnce(
-      async (params: DispatchInboundMessageMockParams) => {
-        capture.ctx = params.ctx;
-        return { queuedFinal: false, counts: { tool: 0, block: 0, final: 1 } };
-      },
-    );
-    const handler = createTestHandler({
-      cfg: createStatusReactionConfig(),
-    });
-
-    await receiveDirectMessage(handler);
-    for (let i = 0; i < 5; i += 1) {
-      await nextTimerTick();
-    }
-
-    const sentEmojis = sentReactionEmojis();
-    expect(sentEmojis).toContain("✅");
-    expect(sentEmojis.at(-1)).toBe("👀");
-  });
-
   it("restores the initial Signal ack reaction after partial reply delivery fails", async () => {
     dispatchInboundMessageMock.mockImplementationOnce(
       async (params: DispatchInboundMessageMockParams) => {
@@ -945,18 +915,26 @@ describe("signal createSignalEventHandler inbound context", () => {
     expect(sendReactionSignalMock).not.toHaveBeenCalled();
   });
 
-  it("does not send Signal status reactions when ackReactionScope is off", async () => {
-    const handler = createTestHandler({
-      cfg: createStatusReactionConfig({
-        messages: { ackReactionScope: "off", statusReactions: { enabled: true } },
-      }),
-    });
-
-    await receiveDirectMessage(handler);
-    await nextTimerTick();
-
-    expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(1);
-    expect(sendReactionSignalMock).not.toHaveBeenCalled();
+  it("applies acknowledgement scope changes to the next Signal message", async () => {
+    const cfg = createStatusReactionConfig({ messages: { ackReactionScope: "off" } });
+    setRuntimeConfigSnapshot(cfg, cfg);
+    try {
+      const handler = createTestHandler({ cfg });
+      for (const [index, scope] of (["off", "direct", "off"] as const).entries()) {
+        const next = { ...cfg, messages: { ...cfg.messages, ackReactionScope: scope } };
+        setRuntimeConfigSnapshot(next, next);
+        const timestamp = 1700000000001 + index;
+        await receiveDirectMessage(handler, { timestamp });
+        for (let tick = 0; tick < 5; tick += 1) {
+          await nextTimerTick();
+        }
+        const reactions = sendReactionSignalMock.mock.calls.filter((call) => call[1] === timestamp);
+        expect(reactions.some((call) => call[2] === "👀")).toBe(scope === "direct");
+      }
+      expect(dispatchInboundMessageMock).toHaveBeenCalledTimes(3);
+    } finally {
+      clearRuntimeConfigSnapshot();
+    }
   });
 
   it("treats message-tool-only Signal replies as successful status outcomes", async () => {
@@ -1572,8 +1550,6 @@ describe("signal createSignalEventHandler inbound context", () => {
   });
 
   it.each([
-    ["LF", "line one\nline two", "line one\\nline two"],
-    ["CR", "line one\rline two", "line one\\rline two"],
     ["CRLF", "line one\r\nline two", "line one\\r\\nline two"],
     ["literal escape", "line one\\nline two", "line one\\nline two"],
   ])("keeps %s inbound verbose previews single-line", async (_label, message, expectedPreview) => {

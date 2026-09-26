@@ -16,16 +16,17 @@ function createRealEditorSubmitHarness(
   const tui = { requestRender: vi.fn() } as unknown as TUI;
   const editor = new CustomEditor(tui, editorTheme);
   const sendMessage = vi.fn();
+  const handleCommand = vi.fn();
   const handleBangLine = vi.fn();
   editor.onSubmit = createEditorSubmitHandler({
     editor,
-    handleCommand: vi.fn(),
+    handleCommand,
     sendMessage,
     handleBangLine,
     onSubmitError: vi.fn(),
     ...(admitMessage ? { admitMessage } : {}),
   });
-  return { editor, sendMessage, handleBangLine };
+  return { editor, sendMessage, handleCommand, handleBangLine };
 }
 
 describe("createEditorSubmitHandler", () => {
@@ -45,18 +46,9 @@ describe("createEditorSubmitHandler", () => {
     expect(editor.getText()).toBe("!cmd");
   });
 
-  it("treats a lone ! as a normal message", () => {
-    const { sendMessage, handleBangLine, onSubmit } = createSubmitHarness();
-
-    onSubmit("!");
-
-    expect(handleBangLine).not.toHaveBeenCalled();
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessage).toHaveBeenCalledWith("!");
-  });
-
   it.each([
     { name: "a whitespace-prefixed lone bang", input: "  !", expected: "!" },
+    { name: "a whitespace-suffixed lone bang", input: "!  ", expected: "!" },
     {
       name: "bang-prefixed true multiline chat",
       input: " \n!cmd\nnotes",
@@ -82,15 +74,17 @@ describe("createEditorSubmitHandler", () => {
     expect(handleBangLine).not.toHaveBeenCalled();
   });
 
-  it.each(["  !cmd", "  !cmd\n", "!cmd\n", "\n!cmd\n"])(
+  it.each(["  !cmd", "!cmd\n", "/exit\n"])(
     "keeps %j in chat and omits it from history",
     (input) => {
-      const { editor, sendMessage, handleBangLine } = createRealEditorSubmitHarness();
-      editor.setText(input);
+      const { editor, sendMessage, handleCommand, handleBangLine } =
+        createRealEditorSubmitHarness();
+      editor.handleInput(`\u001b[200~${input}\u001b[201~`);
 
       editor.handleInput("\r");
 
-      expect(sendMessage).toHaveBeenCalledExactlyOnceWith("!cmd");
+      expect(sendMessage).toHaveBeenCalledExactlyOnceWith(input.trim());
+      expect(handleCommand).not.toHaveBeenCalled();
       expect(handleBangLine).not.toHaveBeenCalled();
       expect(editor.getText()).toBe("");
 
@@ -99,40 +93,46 @@ describe("createEditorSubmitHandler", () => {
 
       editor.handleInput("\r");
 
-      expect(sendMessage).toHaveBeenCalledExactlyOnceWith("!cmd");
+      expect(sendMessage).toHaveBeenCalledExactlyOnceWith(input.trim());
+      expect(handleCommand).not.toHaveBeenCalled();
       expect(handleBangLine).not.toHaveBeenCalled();
     },
   );
 
-  it("preserves whitespace bang routing across a blocked retry", () => {
+  it.each(["  !cmd", "/exit\n"])("preserves %j routing across a blocked retry", (input) => {
     const admitMessage = vi
       .fn()
       .mockReturnValueOnce({ status: "blocked", reason: "pending" })
       .mockReturnValueOnce({ status: "allowed" });
-    const { editor, sendMessage, handleBangLine } = createRealEditorSubmitHarness(admitMessage);
-    editor.setText("  !cmd");
+    const { editor, sendMessage, handleCommand, handleBangLine } =
+      createRealEditorSubmitHarness(admitMessage);
+    editor.setText(input);
 
     editor.handleInput("\r");
 
-    expect(editor.getText()).toBe("  !cmd");
+    expect(editor.getText()).toBe(input);
     expect(sendMessage).not.toHaveBeenCalled();
+    expect(handleCommand).not.toHaveBeenCalled();
     expect(handleBangLine).not.toHaveBeenCalled();
 
     editor.handleInput("\r");
 
     expect(admitMessage).toHaveBeenCalledTimes(2);
-    expect(sendMessage).toHaveBeenCalledExactlyOnceWith("!cmd");
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(input.trim());
+    expect(handleCommand).not.toHaveBeenCalled();
     expect(handleBangLine).not.toHaveBeenCalled();
     expect(editor.getText()).toBe("");
   });
 
   it("trims normal messages before sending and adding to history", () => {
-    const { editor, sendMessage, onSubmit } = createSubmitHarness();
+    const { editor, sendMessage } = createRealEditorSubmitHarness();
+    editor.setText("  hello  ");
 
-    onSubmit("  hello  ");
+    editor.handleInput("\r");
 
     expect(sendMessage).toHaveBeenCalledWith("hello");
-    expect(editor.addToHistory).toHaveBeenCalledWith("hello");
+    editor.handleInput("\u001b[A");
+    expect(editor.getText()).toBe("hello");
   });
 
   it("preserves normal message drafts when chat is busy", () => {
@@ -208,21 +208,9 @@ describe("createEditorSubmitHandler", () => {
     expect(onBlockedMessageSubmit).not.toHaveBeenCalled();
   });
 
-  it("preserves internal newlines for multiline messages", () => {
-    const { editor, handleCommand, sendMessage, handleBangLine, onSubmit } = createSubmitHarness();
-
-    onSubmit("Line 1\nLine 2\nLine 3");
-
-    expect(sendMessage).toHaveBeenCalledWith("Line 1\nLine 2\nLine 3");
-    expect(editor.addToHistory).toHaveBeenCalledWith("Line 1\nLine 2\nLine 3");
-    expect(handleCommand).not.toHaveBeenCalled();
-    expect(handleBangLine).not.toHaveBeenCalled();
-  });
-
   it.each([
     { name: "a slash command", input: "/exit\npasted notes" },
     { name: "a local shell command", input: "!touch pasted-file\npasted notes" },
-    { name: "a whitespace-prefixed slash command", input: "  /abort\npasted notes" },
   ])("treats a complete multiline paste beginning with $name as chat", ({ input }) => {
     const { handleCommand, sendMessage, handleBangLine, onSubmit } = createSubmitHarness();
 

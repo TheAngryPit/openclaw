@@ -20,10 +20,10 @@ import {
   runEmbeddedAgentMock,
   runWithModelFallbackMock,
 } from "./isolated-agent/run.test-harness.js";
+import { readCronRunHistoryPageForTests } from "./run-history.test-support.js";
 import { CronService, type CronEvent } from "./service.js";
 import { createNoopLogger } from "./service.test-harness.js";
 import { cronStoreKey } from "./store/key.js";
-import { readCronTaskRunHistoryPage } from "./task-run-history.js";
 
 vi.doUnmock("./isolated-agent/model-preflight.runtime.js");
 
@@ -128,7 +128,7 @@ async function runPersistedDiagnosticCase(params: {
         const finished = events.find(
           (event) => event.action === "finished" && event.jobId === job.id,
         );
-        const history = readCronTaskRunHistoryPage({
+        const history = readCronRunHistoryPageForTests({
           storeKey: cronStoreKey(storePath),
           jobId: job.id,
           limit: 1,
@@ -139,6 +139,7 @@ async function runPersistedDiagnosticCase(params: {
           finished: finished!,
           history: history!,
           lastError: cron.getJob(job.id)?.state.lastError,
+          lastErrorReason: cron.getJob(job.id)?.state.lastErrorReason,
         };
       } finally {
         cron.stop();
@@ -227,8 +228,7 @@ describe("cron execution diagnostics", { concurrent: false }, () => {
   });
 
   it("persists provider failures without internal class names", async () => {
-    const message =
-      "The selected model was not found by the provider. Check the model id or choose a different model.";
+    const message = "Saved selection requires an update.";
     const modelRef = { provider: "openai", model: "not-a-real-model" };
     resolveConfiguredModelRefMock.mockReturnValue(modelRef);
     resolveAllowedModelRefMock.mockReturnValue({ ref: modelRef });
@@ -237,11 +237,10 @@ describe("cron execution diagnostics", { concurrent: false }, () => {
         reason: "model_not_found",
         provider: modelRef.provider,
         model: modelRef.model,
-        code: "MODEL_NOT_FOUND",
       }),
     );
 
-    const { finished, history, lastError } = await runPersistedDiagnosticCase({
+    const { finished, history, lastError, lastErrorReason } = await runPersistedDiagnosticCase({
       cfg: configFor(modelRef),
       modelRef,
       name: "missing provider model",
@@ -252,12 +251,13 @@ describe("cron execution diagnostics", { concurrent: false }, () => {
         status: "error",
         provider: modelRef.provider,
         model: modelRef.model,
-        error: `${message} | MODEL_NOT_FOUND`,
+        error: message,
         diagnostics: { summary: message },
       });
       expect(outcome.error).not.toContain("FailoverError");
     }
-    expect(lastError).toBe(`${message} | MODEL_NOT_FOUND`);
+    expect(lastError).toBe(message);
+    expect(lastErrorReason).toBe("model_not_found");
     expect(history.errorReason).toBe("model_not_found");
   });
 

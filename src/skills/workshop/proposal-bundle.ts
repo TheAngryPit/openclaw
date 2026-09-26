@@ -1,3 +1,4 @@
+import { isUtf8 } from "node:buffer";
 import path from "node:path";
 import { sha256Hex } from "../../infra/crypto-digest.js";
 import { hasErrnoCode } from "../../infra/errno.js";
@@ -69,13 +70,19 @@ export async function buildSkillProposalEvaluationBundles(params: {
   };
 }
 
-export async function readSkillProposalTargetTreeSha256(skillDir: string): Promise<string> {
-  return hashSkillTree(await readSkillTreeFiles(skillDir));
+export async function readSkillProposalTargetTreeSha256(
+  skillDir: string,
+  options: { includeRootMetadata?: boolean } = {},
+): Promise<string> {
+  return hashSkillTree(await readSkillTreeFiles(skillDir, options.includeRootMetadata));
 }
 
-async function readSkillTreeFiles(skillDir: string): Promise<PluginHookSkillBundleFile[]> {
+async function readSkillTreeFiles(
+  skillDir: string,
+  includeRootMetadata = false,
+): Promise<PluginHookSkillBundleFile[]> {
   const include = (entry: WalkDirectoryEntry) =>
-    entry.depth > 1 || !EXCLUDED_ROOT_DIRS.has(entry.name);
+    includeRootMetadata || entry.depth > 1 || !EXCLUDED_ROOT_DIRS.has(entry.name);
   const scanned = await walkDirectory(skillDir, {
     // Inspect one extra level so deeper content cannot silently disappear from the hash.
     maxDepth: MAX_EVALUATION_PATH_DEPTH + 1,
@@ -128,12 +135,11 @@ async function readSkillTreeFiles(skillDir: string): Promise<PluginHookSkillBund
 }
 
 function fileFromBuffer(relativePath: string, content: Buffer): PluginHookSkillBundleFile {
-  const utf8 = content.toString("utf8");
-  const isUtf8 = !utf8.includes("\0") && Buffer.from(utf8, "utf8").equals(content);
+  const encoding = !content.includes(0) && isUtf8(content) ? "utf8" : "base64";
   return {
     path: relativePath,
-    content: isUtf8 ? utf8 : content.toString("base64"),
-    encoding: isUtf8 ? "utf8" : "base64",
+    content: content.toString(encoding),
+    encoding,
     sha256: sha256Hex(content),
     sizeBytes: content.byteLength,
   };

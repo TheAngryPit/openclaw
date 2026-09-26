@@ -1,9 +1,3 @@
-/**
- * Session cleanup command.
- *
- * It can delegate cleanup to a live gateway or run local store maintenance,
- * with dry-run tables that explain every planned pruning action.
- */
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { visibleWidth } from "../../packages/terminal-core/src/ansi.js";
 import { sanitizeTerminalText } from "../../packages/terminal-core/src/safe-text.js";
@@ -55,22 +49,14 @@ function formatCleanupActionCell(
   if (action === "keep") {
     return theme.muted(action);
   }
-  if (action === "archive-dashboard") {
-    return theme.warn(action);
-  }
-  if (action === "archive-cap") {
-    return theme.warn(action);
-  }
-  if (action === "prune-missing") {
-    return theme.error(action);
-  }
-  if (action === "prune-model-run") {
-    return theme.warn(action);
-  }
-  if (action === "prune-stale") {
-    return theme.warn(action);
-  }
-  if (action === "retire-dm-scope") {
+  if (
+    action === "archive-dashboard" ||
+    action === "archive-cap" ||
+    action === "archive-age" ||
+    action === "prune-model-run" ||
+    action === "prune-stale" ||
+    action === "retire-dm-scope"
+  ) {
     return theme.warn(action);
   }
   if (action === "cap-overflow") {
@@ -79,31 +65,15 @@ function formatCleanupActionCell(
   return theme.error(action);
 }
 
-function buildActionRows(params: {
-  beforeStore: Parameters<typeof toSessionDisplayRows>[0];
-  missingKeys: Set<string>;
-  modelRunPrunedKeys: Set<string>;
-  archivedKeys?: Set<string>;
-  capArchivedKeys?: Set<string>;
-  staleKeys: Set<string>;
-  cappedKeys: Set<string>;
-  dmScopeRetiredKeys: Set<string>;
-}): SessionCleanupActionRow[] {
+function buildActionRows(
+  params: Awaited<ReturnType<typeof runSessionsCleanup>>["previewResults"][number],
+): SessionCleanupActionRow[] {
   // Recompute row actions from the preview sets so dry-run output uses the same
   // action labels as the cleanup engine without mutating the preview store.
   return toSessionDisplayRows(params.beforeStore).map((row) =>
     Object.assign({}, row, {
       label: params.beforeStore[row.key]?.label,
-      action: resolveSessionCleanupAction({
-        key: row.key,
-        missingKeys: params.missingKeys,
-        modelRunPrunedKeys: params.modelRunPrunedKeys,
-        archivedKeys: params.archivedKeys,
-        capArchivedKeys: params.capArchivedKeys,
-        staleKeys: params.staleKeys,
-        cappedKeys: params.cappedKeys,
-        dmScopeRetiredKeys: params.dmScopeRetiredKeys,
-      }),
+      action: resolveSessionCleanupAction({ ...params, key: row.key }),
     }),
   );
 }
@@ -121,7 +91,8 @@ function buildLabelSummaries(actionRows: SessionCleanupActionRow[]): SessionClea
     if (
       actionRow.action === "keep" ||
       actionRow.action === "archive-dashboard" ||
-      actionRow.action === "archive-cap"
+      actionRow.action === "archive-cap" ||
+      actionRow.action === "archive-age"
     ) {
       summary.kept += 1;
     } else {
@@ -184,7 +155,7 @@ function renderStoreDryRunPlan(params: {
   params.runtime.log(`Would prune missing transcripts: ${params.summary.missing}`);
   params.runtime.log(`Would retire stale direct DM sessions: ${params.summary.dmScopeRetired}`);
   params.runtime.log(`Would prune stale model-run probes: ${params.summary.modelRunPruned}`);
-  params.runtime.log(`Would archive inactive dashboard sessions: ${params.summary.archived ?? 0}`);
+  params.runtime.log(`Would archive inactive sessions: ${params.summary.archived ?? 0}`);
   params.runtime.log(`Would archive cap overflow: ${params.summary.capArchived ?? 0}`);
   params.runtime.log(`Would prune stale: ${params.summary.pruned}`);
   params.runtime.log(`Would cap overflow: ${params.summary.capped}`);
@@ -232,11 +203,7 @@ function renderAppliedSummaries(params: {
   runtime: RuntimeEnv;
   locallyOwned: boolean;
 }) {
-  for (let i = 0; i < params.summaries.length; i += 1) {
-    const summary = params.summaries[i];
-    if (!summary) {
-      continue;
-    }
+  for (const [i, summary] of params.summaries.entries()) {
     if (i > 0) {
       params.runtime.log("");
     }

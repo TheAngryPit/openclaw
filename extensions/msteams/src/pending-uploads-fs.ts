@@ -1,4 +1,3 @@
-// Msteams plugin module implements pending uploads fs behavior.
 import { createHash } from "node:crypto";
 import type { PluginStateKeyedStore } from "openclaw/plugin-sdk/plugin-state-runtime";
 import { getMSTeamsRuntime } from "./runtime.js";
@@ -22,17 +21,6 @@ const PENDING_UPLOAD_META_NAMESPACE = "pending-uploads";
 const PENDING_UPLOAD_CHUNKS_NAMESPACE = "pending-upload-chunks";
 const PENDING_UPLOAD_MUTATION_KEY = "pending-uploads";
 
-type PendingUploadFsRecord = {
-  id: string;
-  bufferBase64: string;
-  filename: string;
-  contentType?: string;
-  conversationId: string;
-  /** Activity ID of the original FileConsentCard, used to replace it after upload */
-  consentCardActivityId?: string;
-  createdAt: number;
-};
-
 type PendingUploadFs = {
   id: string;
   buffer: Buffer;
@@ -43,7 +31,7 @@ type PendingUploadFs = {
   createdAt: number;
 };
 
-type PendingUploadMetaRecord = Omit<PendingUploadFsRecord, "bufferBase64"> & {
+type PendingUploadMetaRecord = Omit<PendingUploadFs, "buffer"> & {
   chunkCount: number;
   byteLength: number;
 };
@@ -94,10 +82,7 @@ function buildChunkKey(id: string, index: number): string {
   return `${buildUploadKey(id)}:chunk:${String(index).padStart(4, "0")}`;
 }
 
-function recordToUpload(
-  record: PendingUploadFsRecord | PendingUploadMetaRecord,
-  buffer: Buffer,
-): PendingUploadFs {
+function recordToUpload(record: PendingUploadMetaRecord, buffer: Buffer): PendingUploadFs {
   return {
     id: record.id,
     buffer,
@@ -126,24 +111,19 @@ async function deleteUploadRows(
 }
 
 async function registerUploadRows(
-  record: PendingUploadFsRecord,
+  record: PendingUploadFs,
   metaStore: PluginStateKeyedStore<PendingUploadMetaRecord>,
   chunkStore: PluginStateKeyedStore<PendingUploadChunkRecord>,
   ttlMs: number,
-  overwrite: boolean,
 ): Promise<void> {
-  const buffer = Buffer.from(record.bufferBase64, "base64");
+  const buffer = Buffer.from(record.buffer);
   const chunkCount = Math.max(1, Math.ceil(buffer.byteLength / RAW_CHUNK_BYTES));
   if (chunkCount > MAX_CHUNKS_PER_UPLOAD) {
     throw new Error(
       `Microsoft Teams pending upload ${record.id} exceeds SQLite chunk limit (${chunkCount}/${MAX_CHUNKS_PER_UPLOAD})`,
     );
   }
-  if (overwrite) {
-    await deleteUploadRows(record.id, metaStore, chunkStore);
-  } else if (await metaStore.lookup(buildMetaKey(record.id))) {
-    return;
-  }
+  await deleteUploadRows(record.id, metaStore, chunkStore);
   await pruneUploadStore(metaStore, chunkStore, ttlMs, chunkCount);
   for (let index = 0; index < chunkCount; index += 1) {
     const chunk = buffer.subarray(index * RAW_CHUNK_BYTES, (index + 1) * RAW_CHUNK_BYTES);
@@ -187,9 +167,24 @@ async function readUploadRows(
   if (!meta) {
     return undefined;
   }
+  if (
+    !Number.isSafeInteger(meta.chunkCount) ||
+    meta.chunkCount < 1 ||
+    meta.chunkCount > MAX_CHUNKS_PER_UPLOAD
+  ) {
+    return undefined;
+  }
+  // Published Teams packages retain support for hosts with point reads only.
+  const records = await chunkStore.lookupMany?.(
+    Array.from({ length: meta.chunkCount }, (_, index) => buildChunkKey(id, index)),
+  );
   const chunks: Buffer[] = [];
   for (let index = 0; index < meta.chunkCount; index += 1) {
-    const chunk = await chunkStore.lookup(buildChunkKey(id, index));
+    const result = records?.[index];
+    if (result && !result.ok) {
+      throw result.error;
+    }
+    const chunk = records ? result?.value : await chunkStore.lookup(buildChunkKey(id, index));
     if (!chunk || chunk.id !== id || chunk.index !== index) {
       return undefined;
     }
@@ -261,7 +256,7 @@ export async function storePendingUploadFs(
     await registerUploadRows(
       {
         id: upload.id,
-        bufferBase64: upload.buffer.toString("base64"),
+        buffer: upload.buffer,
         filename: upload.filename,
         contentType: upload.contentType,
         conversationId: upload.conversationId,
@@ -271,7 +266,6 @@ export async function storePendingUploadFs(
       metaStore,
       chunkStore,
       ttlMs,
-      true,
     );
     await pruneUploadStore(metaStore, chunkStore, ttlMs);
   });

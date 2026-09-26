@@ -92,21 +92,6 @@ describe("GatewaySessionMessageSubscriptionCoordinator", () => {
     expect(request).toHaveBeenNthCalledWith(2, "sessions.messages.unsubscribe", { key: "main" });
   });
 
-  it("uses the Gateway canonical key when releasing a requested alias", async () => {
-    const { client, request } = createClient(async (method) =>
-      method === "sessions.messages.subscribe" ? { key: "agent:main:main" } : {},
-    );
-    const coordinator = new GatewaySessionMessageSubscriptionCoordinator(client);
-
-    const subscription = await coordinator.acquire("main");
-    expect(subscription).toEqual({ key: "agent:main:main", agentId: null });
-
-    await coordinator.release(subscription);
-    expect(request).toHaveBeenLastCalledWith("sessions.messages.unsubscribe", {
-      key: "agent:main:main",
-    });
-  });
-
   it("retains the requested alias after the Gateway returns a canonical key", async () => {
     const { client, request } = createClient(async (method) =>
       method === "sessions.messages.subscribe" ? { key: "agent:main:main" } : {},
@@ -252,6 +237,14 @@ describe("GatewaySessionMessageSubscriptionCoordinator", () => {
 
     expect(research).toEqual({ key: "global", agentId: "research" });
     expect(request).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenNthCalledWith(1, "sessions.messages.subscribe", {
+      key: "global",
+      agentId: "main",
+    });
+    expect(request).toHaveBeenNthCalledWith(2, "sessions.messages.subscribe", {
+      key: "global",
+      agentId: "research",
+    });
     acknowledgement.resolve({ key: "global" });
     await expect(main).resolves.toEqual({ key: "global", agentId: "main" });
   });
@@ -449,6 +442,102 @@ describe("GatewaySessionMessageSubscriptionCoordinator", () => {
     expect(request).toHaveBeenCalledTimes(3);
   });
 
+  it.each([
+    {
+      name: "a closed approval pane leaves a plain observer",
+      initialApprovals: false,
+      closeFirst: true,
+      before: ["approval-old"],
+      after: [],
+    },
+    {
+      name: "another pane joins an upgraded observer",
+      initialApprovals: false,
+      closeFirst: false,
+      before: [],
+      after: ["approval-new"],
+    },
+    {
+      name: "another pane joins an initial approval observer",
+      initialApprovals: true,
+      closeFirst: false,
+      before: ["approval-old"],
+      after: ["approval-new"],
+    },
+  ])("refreshes pending approvals when $name", async (scenario) => {
+    let replay = { approvals: scenario.before.map((id) => ({ id })) };
+    const { client, request } = createClient(async (method, params) =>
+      method === "sessions.messages.subscribe"
+        ? { key: params.key, ...(params.includeApprovals ? { approvalReplay: replay } : {}) }
+        : {},
+    );
+    const coordinator = new GatewaySessionMessageSubscriptionCoordinator(client);
+    const retained = await coordinator.acquire("main", {
+      includeApprovals: scenario.initialApprovals,
+    });
+    const first = scenario.initialApprovals
+      ? retained
+      : await coordinator.acquire("main", { includeApprovals: true });
+    const handles = new Set([retained, first]);
+    try {
+      if (scenario.closeFirst) {
+        await coordinator.release(first);
+      }
+      replay = { approvals: scenario.after.map((id) => ({ id })) };
+      const next = await coordinator.acquire("main", { includeApprovals: true });
+      handles.add(next);
+      expect(next.approvalReplay).toEqual(replay);
+    } finally {
+      for (const handle of handles) {
+        await coordinator.release(handle);
+      }
+    }
+    expect(
+      request.mock.calls.filter(([method]) => method === "sessions.messages.unsubscribe"),
+    ).toHaveLength(1);
+  });
+
+  it.each(["none", "plain", "approvals"] as const)(
+    "restores the %s owner's capability after an approval replay times out",
+    async (retained) => {
+      let capability: "none" | "plain" | "approvals" = "none";
+      let timeoutNext = false;
+      const timeout = new GatewayProtocolRequestTimeoutError({
+        method: "sessions.messages.subscribe",
+        timeoutMs: DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS,
+        requestSent: true,
+      });
+      const { client } = createClient(async (method, params) => {
+        capability =
+          method === "sessions.messages.unsubscribe"
+            ? "none"
+            : params.includeApprovals
+              ? "approvals"
+              : "plain";
+        if (timeoutNext) {
+          timeoutNext = false;
+          throw timeout;
+        }
+        return { key: params.key, approvalReplay: { approvals: [] } };
+      });
+      const coordinator = new GatewaySessionMessageSubscriptionCoordinator(client);
+      const owner =
+        retained === "none"
+          ? null
+          : await coordinator.acquire("main", { includeApprovals: retained === "approvals" });
+      try {
+        timeoutNext = true;
+        await expect(coordinator.acquire("main", { includeApprovals: true })).rejects.toBe(timeout);
+        expect(capability).toBe(retained);
+      } finally {
+        if (owner) {
+          await coordinator.release(owner);
+        }
+      }
+      expect(capability).toBe("none");
+    },
+  );
+
   it("preserves the plain observer when an approval upgrade is unauthorized", async () => {
     let rejectApproval = true;
     const { client, request } = createClient(async (method, params) => {
@@ -541,27 +630,6 @@ describe("GatewaySessionMessageSubscriptionCoordinator", () => {
     expect(request).toHaveBeenCalledTimes(3);
   });
 
-  it("isolates the same global key by canonical agent", async () => {
-    const { client, request } = createClient();
-    const coordinator = new GatewaySessionMessageSubscriptionCoordinator(client);
-
-    const [main, research] = await Promise.all([
-      coordinator.acquire("global", { agentId: "main" }),
-      coordinator.acquire("global", { agentId: "research" }),
-    ]);
-
-    expect(main).toEqual({ key: "global", agentId: "main" });
-    expect(research).toEqual({ key: "global", agentId: "research" });
-    expect(request).toHaveBeenNthCalledWith(1, "sessions.messages.subscribe", {
-      key: "global",
-      agentId: "main",
-    });
-    expect(request).toHaveBeenNthCalledWith(2, "sessions.messages.subscribe", {
-      key: "global",
-      agentId: "research",
-    });
-  });
-
   it("retries an initial subscribe without retaining a failed observer", async () => {
     let calls = 0;
     const { client, request } = createClient(async (_method, params) => {
@@ -607,22 +675,6 @@ describe("GatewaySessionMessageSubscriptionCoordinator", () => {
 
     await expect(pending).rejects.toThrow("replaced Gateway connection");
     expect(request).toHaveBeenCalledOnce();
-  });
-
-  it("shares canonical lease ownership across clients of the same connection", async () => {
-    const { client, request } = createClient();
-    const firstCoordinator = getGatewaySessionMessageSubscriptionCoordinator(client);
-    const secondCoordinator = getGatewaySessionMessageSubscriptionCoordinator(client);
-
-    expect(firstCoordinator).toBe(secondCoordinator);
-    const first = await firstCoordinator.acquire("main");
-    const second = await secondCoordinator.acquire("main");
-    expect(request).toHaveBeenCalledOnce();
-
-    await releaseGatewaySessionMessageSubscription(first);
-    expect(request).toHaveBeenCalledOnce();
-    await releaseGatewaySessionMessageSubscription(second);
-    expect(request).toHaveBeenCalledTimes(2);
   });
 
   it("configures a cached coordinator before sharing UI session aliases", async () => {

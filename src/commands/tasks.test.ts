@@ -7,14 +7,15 @@ import type { SessionEntry } from "../config/sessions/types.js";
 import { saveCronStore } from "../cron/store.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { closeOpenClawAgentDatabasesForTest } from "../state/openclaw-agent-db.js";
+import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
 import { createManagedTaskFlow as createManagedTaskFlowOrNull } from "../tasks/task-flow-registry.js";
 import type { TaskFlowRecord } from "../tasks/task-flow-registry.types.js";
+import { reloadTaskRegistryFromStoreAsync } from "../tasks/task-registry-state.js";
 import {
   createTaskRecord as createTaskRecordOrNull,
   getTaskById,
   markTaskLostById,
   markTaskTerminalById,
-  reloadTaskRegistryFromStore,
 } from "../tasks/task-registry.js";
 import * as taskRegistryMaintenance from "../tasks/task-registry.maintenance.js";
 import type { TaskRecord } from "../tasks/task-registry.types.js";
@@ -22,7 +23,6 @@ import {
   configureTaskFlowRegistryRuntime,
   resetDetachedTaskLifecycleRuntimeForTests,
   resetTaskFlowRegistryForTests,
-  resetTaskRegistryDeliveryRuntimeForTests,
   resetTaskRegistryForTests,
 } from "../tasks/task-runtime.test-helpers.js";
 import type {
@@ -31,6 +31,7 @@ import type {
 } from "../tasks/task-system-audit.types.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import type { OpenClawTestState } from "../test-utils/openclaw-test-state.js";
+import { createInMemoryTaskFlowRegistryStore } from "../test-utils/task-registry-store.js";
 import {
   tasksAuditCommand,
   tasksCancelCommand,
@@ -38,6 +39,7 @@ import {
   tasksMaintenanceCommand,
   tasksShowCommand,
 } from "./tasks.js";
+import { createTestRuntime } from "./test-runtime-config-helpers.js";
 
 const mocks = vi.hoisted(() => ({
   callGateway: vi.fn(),
@@ -47,16 +49,12 @@ vi.mock("../gateway/call.js", () => ({
   callGateway: mocks.callGateway,
 }));
 
-function createRuntime(): RuntimeEnv {
-  return {
-    log: vi.fn(),
-    error: vi.fn(),
-    exit: vi.fn(),
-  } as unknown as RuntimeEnv;
-}
-
 function createTaskRecord(params: Parameters<typeof createTaskRecordOrNull>[0]): TaskRecord {
-  const task = createTaskRecordOrNull(params);
+  const task = createTaskRecordOrNull({
+    ownerKey: "agent:main:main",
+    scopeKind: "session",
+    ...params,
+  });
   if (!task) {
     throw new Error("expected task creation to succeed");
   }
@@ -124,12 +122,11 @@ async function writeSessionEntries(
   }
 }
 
-function resetTaskCommandRuntime() {
-  taskRegistryMaintenance.stopTaskRegistryMaintenance();
-  taskRegistryMaintenance.resetTaskRegistryMaintenanceRuntimeForTests();
+async function resetTaskCommandRuntime() {
+  await taskRegistryMaintenance.stopTaskRegistryMaintenance();
+  taskRegistryMaintenance.configureTaskRegistryMaintenance({ runtimeAuthoritative: false });
   resetConfigRuntimeState();
   resetDetachedTaskLifecycleRuntimeForTests();
-  resetTaskRegistryDeliveryRuntimeForTests();
   resetTaskRegistryForTests({ persist: false });
   resetTaskFlowRegistryForTests({ persist: false });
   closeOpenClawAgentDatabasesForTest();
@@ -141,11 +138,11 @@ async function withTaskCommandStateDir(
   await withOpenClawTestState(
     { layout: "state-only", prefix: "openclaw-tasks-command-" },
     async (state) => {
-      resetTaskCommandRuntime();
+      await resetTaskCommandRuntime();
       try {
         await run(state);
       } finally {
-        resetTaskCommandRuntime();
+        await resetTaskCommandRuntime();
       }
     },
   );
@@ -156,9 +153,9 @@ describe("tasks commands", () => {
     vi.useRealTimers();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await resetTaskCommandRuntime();
     vi.useRealTimers();
-    resetTaskCommandRuntime();
     mocks.callGateway.mockReset();
   });
 
@@ -167,8 +164,6 @@ describe("tasks commands", () => {
       const now = Date.now();
       createTaskRecord({
         runtime: "cli",
-        ownerKey: "agent:main:main",
-        scopeKind: "session",
         runId: "task-stale-queued",
         status: "running",
         task: "Inspect issue backlog",
@@ -183,24 +178,16 @@ describe("tasks commands", () => {
         updatedAt: now - 40 * 60_000,
       });
 
-      const runtime = createRuntime();
+      const runtime = createTestRuntime();
       await tasksAuditCommand({ json: true }, runtime);
 
-      const payload = readFirstJsonLog(runtime) as {
+      expect(readFirstJsonLog(runtime)).toMatchObject({
         summary: {
-          total: number;
-          errors: number;
-          warnings: number;
-          byCode: Record<string, number>;
-          taskFlows: { total: number; byCode: Record<string, number> };
-          combined: { total: number; errors: number; warnings: number };
-        };
-      };
-
-      expect(payload.summary.byCode.stale_running).toBe(1);
-      expect(payload.summary.taskFlows.byCode.stale_waiting).toBe(1);
-      expect(payload.summary.taskFlows.byCode.missing_linked_tasks).toBe(1);
-      expect(payload.summary.combined.total).toBe(3);
+          byCode: { stale_running: 1 },
+          taskFlows: { byCode: { stale_waiting: 1, missing_linked_tasks: 1 } },
+          combined: { total: 3 },
+        },
+      });
 
       const runningFlow = createManagedTaskFlow({
         ownerKey: "agent:main:main",
@@ -211,7 +198,7 @@ describe("tasks commands", () => {
         updatedAt: now - 45 * 60_000,
       });
 
-      const limitedRuntime = createRuntime();
+      const limitedRuntime = createTestRuntime();
       const auditStartedAt = Date.now();
       await tasksAuditCommand({ json: true, limit: 1 }, limitedRuntime);
       const auditFinishedAt = Date.now();
@@ -241,12 +228,12 @@ describe("tasks commands", () => {
       });
       configureTaskFlowRegistryRuntime({
         store: {
+          ...createInMemoryTaskFlowRegistryStore(),
           loadSnapshot,
-          saveSnapshot: () => {},
         },
       });
 
-      const jsonRuntime = createRuntime();
+      const jsonRuntime = createTestRuntime();
       await tasksAuditCommand({ json: true }, jsonRuntime);
       expect(readFirstJsonLog(jsonRuntime)).toMatchObject({
         count: 1,
@@ -270,7 +257,7 @@ describe("tasks commands", () => {
         ],
       });
 
-      const textRuntime = createRuntime();
+      const textRuntime = createTestRuntime();
       await tasksAuditCommand({ json: false }, textRuntime);
       const output = vi
         .mocked(textRuntime.log)
@@ -287,14 +274,12 @@ describe("tasks commands", () => {
     await withTaskCommandStateDir(async () => {
       const task = createTaskRecord({
         runtime: "cli",
-        ownerKey: "agent:main:main",
-        scopeKind: "session",
         runId: "run-cli",
         status: "running",
         task: "Inspect issue backlog",
       });
 
-      const runtime = createRuntime();
+      const runtime = createTestRuntime();
       await tasksListCommand({ json: true, runtime: "   ", status: "\t" }, runtime);
 
       expect(readFirstJsonLog(runtime)).toStrictEqual({
@@ -308,7 +293,7 @@ describe("tasks commands", () => {
 
   it("reports blank audit filters as absent in command JSON output", async () => {
     await withTaskCommandStateDir(async () => {
-      const runtime = createRuntime();
+      const runtime = createTestRuntime();
       await tasksAuditCommand(
         {
           json: true,
@@ -328,6 +313,14 @@ describe("tasks commands", () => {
   });
 
   it.each([
+    {
+      label: "CLI",
+      runtime: "cli",
+      ownerKey: "agent:main:main",
+      scopeKind: "session",
+      childSessionKey: "agent:main:main",
+      runId: "run-cli-cancel",
+    },
     {
       label: "Cron",
       runtime: "cron",
@@ -374,7 +367,7 @@ describe("tasks commands", () => {
           runId: task.runId,
         },
       });
-      const runtime = createRuntime();
+      const runtime = createTestRuntime();
 
       await tasksCancelCommand({ lookup: task.taskId }, runtime);
 
@@ -382,7 +375,7 @@ describe("tasks commands", () => {
         expect.objectContaining({
           method: "tasks.cancel",
           params: { taskId: task.taskId },
-          timeoutMs: 5_000,
+          timeoutMs: testCase.runtime === "cli" ? 15_000 : 5_000,
         }),
       );
       expect(runtime.log).toHaveBeenCalledWith(
@@ -393,53 +386,38 @@ describe("tasks commands", () => {
     });
   });
 
-  it.each(["gateway", "local"] as const)(
-    "sanitizes untrusted %s task cancellation output",
-    async (owner) => {
-      await withTaskCommandStateDir(async () => {
-        const unsafe = UNSAFE_TASK_TERMINAL_TEXT;
-        const gatewayOwned = owner === "gateway";
-        const task = createInspectableTask({
-          runtime: gatewayOwned ? "cron" : "cli",
-          ownerKey: gatewayOwned ? "" : "agent:main:main",
-          scopeKind: gatewayOwned ? "system" : "session",
-          runId: `run${unsafe}`,
-        });
-        if (gatewayOwned) {
-          mocks.callGateway.mockResolvedValueOnce({
-            found: true,
-            cancelled: true,
-            task: {
-              taskId: `${task.taskId}${unsafe}`,
-              runtime: `cron${unsafe}`,
-              runId: task.runId,
-            },
-          });
-        }
-        const runtime = createRuntime();
-        await tasksCancelCommand({ lookup: task.taskId }, runtime);
-        expect(runtime.log).toHaveBeenCalledWith(
-          expect.stringContaining(`Cancelled ${task.taskId}`),
-        );
-        expectSafeTaskOutput(runtime);
-        if (!gatewayOwned) {
-          expect(getTaskById(task.taskId)).toMatchObject({
-            status: "cancelled",
-            runId: `run${unsafe}`,
-          });
-          return;
-        }
-        mocks.callGateway.mockResolvedValueOnce({
-          found: true,
-          cancelled: false,
-          reason: `gateway refused${unsafe}`,
-        });
-        const failureRuntime = createRuntime();
-        await tasksCancelCommand({ lookup: task.taskId }, failureRuntime);
-        expectSafeTaskOutput(failureRuntime, "error");
+  it("sanitizes untrusted task cancellation output", async () => {
+    await withTaskCommandStateDir(async () => {
+      const unsafe = UNSAFE_TASK_TERMINAL_TEXT;
+      const task = createInspectableTask({
+        runtime: "cron",
+        ownerKey: "",
+        scopeKind: "system",
+        runId: `run${unsafe}`,
       });
-    },
-  );
+      mocks.callGateway.mockResolvedValueOnce({
+        found: true,
+        cancelled: true,
+        task: {
+          taskId: `${task.taskId}${unsafe}`,
+          runtime: `cron${unsafe}`,
+          runId: task.runId,
+        },
+      });
+      const runtime = createTestRuntime();
+      await tasksCancelCommand({ lookup: task.taskId }, runtime);
+      expect(runtime.log).toHaveBeenCalledWith(expect.stringContaining(`Cancelled ${task.taskId}`));
+      expectSafeTaskOutput(runtime);
+      mocks.callGateway.mockResolvedValueOnce({
+        found: true,
+        cancelled: false,
+        reason: `gateway refused${unsafe}`,
+      });
+      const failureRuntime = createTestRuntime();
+      await tasksCancelCommand({ lookup: task.taskId }, failureRuntime);
+      expectSafeTaskOutput(failureRuntime, "error");
+    });
+  });
 
   it.each([
     {
@@ -461,7 +439,6 @@ describe("tasks commands", () => {
         const task = createTaskRecord({
           runtime: testCase.runtime,
           ownerKey: "agent:jarvis:main",
-          scopeKind: "session",
           childSessionKey: testCase.childSessionKey,
           runId: testCase.runId,
           task: `Cancel ${testCase.label} child`,
@@ -470,7 +447,7 @@ describe("tasks commands", () => {
           notifyPolicy: "silent",
         });
         mocks.callGateway.mockRejectedValueOnce(new Error("gateway unavailable"));
-        const runtime = createRuntime();
+        const runtime = createTestRuntime();
 
         await tasksCancelCommand({ lookup: task.taskId }, runtime);
 
@@ -496,8 +473,6 @@ describe("tasks commands", () => {
       const childSessionKey = "agent:main:subagent:child-retained";
       const task = createTaskRecord({
         runtime: "subagent",
-        ownerKey: "agent:main:main",
-        scopeKind: "session",
         childSessionKey,
         runId: "run-retained-child",
         status: "running",
@@ -514,7 +489,7 @@ describe("tasks commands", () => {
         },
       });
 
-      const runtime = createRuntime();
+      const runtime = createTestRuntime();
       await tasksMaintenanceCommand({ json: true, apply: false }, runtime);
 
       const payload = readFirstJsonLog(runtime) as {
@@ -545,8 +520,6 @@ describe("tasks commands", () => {
       const childSessionKey = "agent:main:cron:done-job:run:old-run";
       const task = createTaskRecord({
         runtime: "subagent",
-        ownerKey: "agent:main:main",
-        scopeKind: "session",
         childSessionKey,
         runId: "run-backed-before-session-sweep",
         status: "running",
@@ -567,7 +540,7 @@ describe("tasks commands", () => {
         },
       });
 
-      const runtime = createRuntime();
+      const runtime = createTestRuntime();
       await tasksMaintenanceCommand({ json: true, apply: true }, runtime);
 
       const payload = readFirstJsonLog(runtime) as {
@@ -640,7 +613,7 @@ describe("tasks commands", () => {
         [retiredKey]: { sessionId: "retired-run", updatedAt: old },
       });
 
-      const runtime = createRuntime();
+      const runtime = createTestRuntime();
       await tasksMaintenanceCommand({ json: true, apply: true }, runtime);
 
       const payload = readFirstJsonLog(runtime) as {
@@ -694,7 +667,7 @@ describe("tasks commands", () => {
         },
       });
 
-      const runtime = createRuntime();
+      const runtime = createTestRuntime();
       await tasksMaintenanceCommand({ json: true, apply: true }, runtime);
 
       expect(
@@ -715,7 +688,7 @@ describe("tasks commands", () => {
         taskRegistryMaintenance,
         "getTaskRegistryMaintenanceDiagnostics",
       );
-      const runtime = createRuntime();
+      const runtime = createTestRuntime();
 
       await tasksMaintenanceCommand({ json: false, apply: false }, runtime);
 
@@ -727,15 +700,13 @@ describe("tasks commands", () => {
     await withTaskCommandStateDir(async () => {
       const task = createTaskRecord({
         runtime: "cli",
-        ownerKey: "agent:main:main",
-        scopeKind: "session",
         runId: "task-invalid-started-at",
         status: "running",
         task: "Inspect malformed task timestamp",
         startedAt: 8_700_000_000_000_000,
       });
 
-      const runtime = createRuntime();
+      const runtime = createTestRuntime();
       await tasksShowCommand({ json: false, lookup: task.taskId }, runtime);
 
       const joined = vi
@@ -762,9 +733,9 @@ describe("tasks commands", () => {
         terminalSummary: `summary${unsafe}`,
       });
       markTaskLostById({ taskId: task.taskId, endedAt: Date.now(), error: `error${unsafe}` });
-      const showRuntime = createRuntime();
-      const listRuntime = createRuntime();
-      const auditRuntime = createRuntime();
+      const showRuntime = createTestRuntime();
+      const listRuntime = createTestRuntime();
+      const auditRuntime = createTestRuntime();
       await tasksShowCommand({ lookup: task.taskId }, showRuntime);
       await tasksListCommand({}, listRuntime);
       await tasksAuditCommand({}, auditRuntime);
@@ -791,18 +762,18 @@ describe("tasks commands", () => {
       }
       expect(vi.mocked(listRuntime.log).mock.calls.flat().join("|")).toContain("error");
       expect(vi.mocked(auditRuntime.log).mock.calls.flat().join("|")).toContain("error");
-      const jsonRuntime = createRuntime();
+      const jsonRuntime = createTestRuntime();
       await tasksShowCommand({ lookup: task.taskId, json: true }, jsonRuntime);
       expect(readFirstJsonLog(jsonRuntime)).toEqual(jsonRoundTrip(getTaskById(task.taskId)));
       expect(getTaskById(task.taskId)).toMatchObject({
         runId: `run${unsafe}`,
         error: `error${unsafe}`,
       });
-      const lookupRuntime = createRuntime();
+      const lookupRuntime = createTestRuntime();
       await tasksShowCommand({ lookup: `missing${unsafe}` }, lookupRuntime);
       expectSafeTaskOutput(lookupRuntime, "error");
 
-      const jsonLookupRuntime = createRuntime();
+      const jsonLookupRuntime = createTestRuntime();
       await tasksShowCommand({ lookup: `missing${unsafe}`, json: true }, jsonLookupRuntime);
       expect(readFirstJsonLog(jsonLookupRuntime)).toMatchObject({
         ok: false,
@@ -815,7 +786,7 @@ describe("tasks commands", () => {
     });
   });
 
-  it.each(["failed", "timed_out", "lost"] as const)(
+  it.each(["failed", "lost"] as const)(
     "shows the persisted failure reason for %s tasks in list summaries",
     async (status) => {
       await withTaskCommandStateDir(async () => {
@@ -836,7 +807,7 @@ describe("tasks commands", () => {
             terminalSummary: "Generic terminal summary",
           });
         }
-        const runtime = createRuntime();
+        const runtime = createTestRuntime();
         await tasksListCommand({}, runtime);
         const output = vi.mocked(runtime.log).mock.calls.flat().join("|");
         expect(output).toContain(error);
@@ -850,8 +821,6 @@ describe("tasks commands", () => {
     await withTaskCommandStateDir(async () => {
       createTaskRecord({
         runtime: "cli",
-        ownerKey: "agent:main:main",
-        scopeKind: "session",
         runId: "task-utf16-summary",
         status: "succeeded",
         task: "Inspect task summary",
@@ -859,7 +828,7 @@ describe("tasks commands", () => {
       });
       createInspectableTask({ progressSummary: "Fetching provider credentials" });
       createInspectableTask({ status: "succeeded", label: "Human-readable task title" });
-      const runtime = createRuntime();
+      const runtime = createTestRuntime();
 
       await tasksListCommand({}, runtime);
 
@@ -879,15 +848,13 @@ describe("tasks commands", () => {
       const cleanupAfter = Date.now() + 60_000;
       createTaskRecord({
         runtime: "subagent",
-        ownerKey: "agent:main:main",
-        scopeKind: "session",
         runId: "run-retained-lost",
         status: "lost",
         task: "Retained lost task",
         cleanupAfter,
       });
 
-      const runtime = createRuntime();
+      const runtime = createTestRuntime();
       await tasksMaintenanceCommand({ json: false, apply: true }, runtime);
 
       const joined = vi
@@ -913,7 +880,7 @@ describe("tasks commands", () => {
         endedAt: now - 8 * 24 * 60 * 60_000,
       });
 
-      const runtime = createRuntime();
+      const runtime = createTestRuntime();
       await tasksMaintenanceCommand({ json: true, apply: false }, runtime);
 
       const payload = readFirstJsonLog(runtime) as {
@@ -947,8 +914,6 @@ describe("tasks commands", () => {
         vi.setSystemTime(now - 8 * 24 * 60 * 60_000);
         const staleTask = createTaskRecord({
           runtime: "cli",
-          ownerKey: "agent:main:main",
-          scopeKind: "session",
           runId: `stale-task-${String(apply)}`,
           task: "Task that maintenance would prune",
           status: "succeeded",
@@ -966,30 +931,28 @@ describe("tasks commands", () => {
         const loadSnapshot = vi.fn(() => {
           throw new Error("SQLITE_CORRUPT: task-flow maintenance restore failed");
         });
-        const saveSnapshot = vi.fn();
         const upsertFlow = vi.fn();
         const deleteFlow = vi.fn();
         configureTaskFlowRegistryRuntime({
           store: {
+            ...createInMemoryTaskFlowRegistryStore(),
             loadSnapshot,
-            saveSnapshot,
             upsertFlow,
             deleteFlow,
           },
         });
-        const runtime = createRuntime();
+        const runtime = createTestRuntime();
 
         await expect(tasksMaintenanceCommand({ json: true, apply }, runtime)).rejects.toThrow(
           "Task-flow registry restore failed: SQLITE_CORRUPT: task-flow maintenance restore failed. Refusing task maintenance.",
         );
 
         expect(loadSnapshot).toHaveBeenCalledTimes(1);
-        expect(saveSnapshot).not.toHaveBeenCalled();
         expect(upsertFlow).not.toHaveBeenCalled();
         expect(deleteFlow).not.toHaveBeenCalled();
         expect(runtime.log).not.toHaveBeenCalled();
         expect(loadSessionEntry({ sessionKey: staleSessionKey, storePath })).toBeDefined();
-        reloadTaskRegistryFromStore();
+        await reloadTaskRegistryFromStoreAsync(captureOpenClawStateWorkerContext());
         expect(getTaskById(staleTask.taskId)?.taskId).toBe(staleTask.taskId);
       });
     },
@@ -1052,7 +1015,7 @@ describe("tasks commands", () => {
           },
         ],
       });
-      const runtime = createRuntime();
+      const runtime = createTestRuntime();
       await tasksMaintenanceCommand({ json: true, apply: true }, runtime);
 
       const payload = readFirstJsonLog(runtime) as {

@@ -8,9 +8,13 @@ import {
   replaceTranscriptEventsSync,
   resolveSessionTranscriptDatabasePath,
   upsertSessionEntryCore,
+  validatePreparedAssistantAppendSync,
   type TranscriptEvent,
 } from "./session-accessor.js";
-import { resolveTranscriptMessageAppendParent } from "./session-accessor.sqlite-transcript-parent.js";
+import {
+  isTranscriptEntryOnActivePathInTransaction,
+  resolveTranscriptMessageAppendParent,
+} from "./session-accessor.sqlite-transcript-parent.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
@@ -40,7 +44,8 @@ function message(id: string, parentId: string | null): TranscriptEvent {
 }
 
 describe("SQLite transcript append ancestry", () => {
-  it.each([8, 512])("bounds statement executions across %i ancestors", async (count) => {
+  it("bounds statement executions across 512 ancestors", async () => {
+    const count = 512;
     const events = Array.from({ length: count }, (_, index) =>
       message(`entry-${index}`, index === 0 ? null : `entry-${index - 1}`),
     );
@@ -126,4 +131,105 @@ describe("SQLite transcript append ancestry", () => {
       ),
     ).toBe("root");
   });
+
+  it("checks active ancestry directly without adopting another branch", async () => {
+    const { database, scope } = await createTranscript([
+      message("active-root", null),
+      message("active-tail", "active-root"),
+      message("other-root", null),
+      {
+        type: "leaf",
+        id: "select-active",
+        parentId: "other-root",
+        targetId: "active-tail",
+        appendParentId: "active-tail",
+      },
+    ]);
+
+    expect(
+      isTranscriptEntryOnActivePathInTransaction(database, scope.sessionId, "active-root"),
+    ).toBe(true);
+    expect(
+      isTranscriptEntryOnActivePathInTransaction(database, scope.sessionId, "active-tail"),
+    ).toBe(true);
+    expect(
+      isTranscriptEntryOnActivePathInTransaction(database, scope.sessionId, "other-root"),
+    ).toBe(false);
+    expect(isTranscriptEntryOnActivePathInTransaction(database, scope.sessionId, "missing")).toBe(
+      false,
+    );
+  });
+
+  it("checks selected visible ancestry instead of a disjoint append cursor", async () => {
+    const { database, scope } = await createTranscript([
+      message("visible", null),
+      message("hidden-user", "visible"),
+      {
+        type: "leaf",
+        id: "select-visible",
+        parentId: "hidden-user",
+        targetId: "visible",
+        appendParentId: "hidden-user",
+        appendMode: "side",
+      },
+      message("continued", "hidden-user"),
+    ]);
+
+    expect(isTranscriptEntryOnActivePathInTransaction(database, scope.sessionId, "visible")).toBe(
+      true,
+    );
+    expect(
+      isTranscriptEntryOnActivePathInTransaction(database, scope.sessionId, "hidden-user"),
+    ).toBe(false);
+    expect(isTranscriptEntryOnActivePathInTransaction(database, scope.sessionId, "continued")).toBe(
+      true,
+    );
+  });
 });
+
+it.each(["missing-prepared", "missing-admitted", "overflow-prepared"] as const)(
+  "preserves prepared assistant %s refusal before parsing newer messages",
+  async (scenario) => {
+    const { database, scope } = await createTranscript([
+      message("admitted", null),
+      message("prepared", "admitted"),
+      message("poison", "prepared"),
+      message("tail", "poison"),
+    ]);
+    database.db
+      .prepare("UPDATE transcript_events SET event_json = '{' WHERE session_id = ? AND seq = 3")
+      .run(scope.sessionId);
+    if (scenario === "overflow-prepared") {
+      runSqliteImmediateTransactionSync(database.db, () => {
+        database.db.exec("PRAGMA defer_foreign_keys = ON");
+        const offset = 9007199254740993n;
+        database.db
+          .prepare("UPDATE transcript_events SET seq = seq + ? WHERE session_id = ?")
+          .run(offset, scope.sessionId);
+        database.db
+          .prepare("UPDATE transcript_event_identities SET seq = seq + ? WHERE session_id = ?")
+          .run(offset, scope.sessionId);
+        database.db
+          .prepare(
+            "UPDATE session_transcript_active_events SET event_seq = event_seq + ? WHERE session_id = ?",
+          )
+          .run(offset, scope.sessionId);
+      });
+      expect(() => validatePreparedAssistantAppendSync(scope, "prepared", "prepared")).toThrow(
+        expect.objectContaining({ code: "ERR_OUT_OF_RANGE" }),
+      );
+    } else {
+      database.db
+        .prepare("DELETE FROM transcript_event_identities WHERE session_id = ? AND event_id = ?")
+        .run(scope.sessionId, scenario === "missing-prepared" ? "prepared" : "admitted");
+      expect(
+        validatePreparedAssistantAppendSync(
+          scope,
+          "prepared",
+          scenario === "missing-prepared" ? "prepared" : "admitted",
+        ),
+      ).toBeUndefined();
+    }
+    expect(database.db.isTransaction).toBe(false);
+  },
+);

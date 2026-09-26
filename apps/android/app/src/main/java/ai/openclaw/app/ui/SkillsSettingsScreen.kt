@@ -9,8 +9,8 @@ import ai.openclaw.app.MainViewModel
 import ai.openclaw.app.i18n.nativeString
 import ai.openclaw.app.isClawHubSkillInstalled
 import ai.openclaw.app.isClawHubSkillOperationActive
-import ai.openclaw.app.ui.design.ClawDetailRow
 import ai.openclaw.app.ui.design.ClawIconButton
+import ai.openclaw.app.ui.design.ClawListItem
 import ai.openclaw.app.ui.design.ClawListPanel
 import ai.openclaw.app.ui.design.ClawPanel
 import ai.openclaw.app.ui.design.ClawPill
@@ -21,7 +21,7 @@ import ai.openclaw.app.ui.design.ClawStatusPill
 import ai.openclaw.app.ui.design.ClawTextBadge
 import ai.openclaw.app.ui.design.ClawTextField
 import ai.openclaw.app.ui.design.ClawTheme
-import ai.openclaw.app.uppercaseFirstGraphemeOrNull
+import ai.openclaw.app.ui.design.badgeInitials
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -43,7 +43,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -375,13 +374,15 @@ private fun InstalledSkillsPane(
     }
 
     else -> {
-      SkillsPanel(
-        skills = visibleSkills,
-        canManageSkills = canManageSkills,
-        mutatingSkillKeys = mutatingSkillKeys,
-        onSkillClick = onSkillClick,
-        onSkillEnabledChange = onSkillEnabledChange,
-      )
+      ClawListPanel(items = visibleSkills) { skill ->
+        SkillListRow(
+          skill = skill,
+          canManageSkills = canManageSkills,
+          isMutating = skill.skillKey in mutatingSkillKeys,
+          onClick = { onSkillClick(skill) },
+          onSkillEnabledChange = onSkillEnabledChange,
+        )
+      }
     }
   }
 }
@@ -463,25 +464,6 @@ private fun SkillDetailPanel(
 }
 
 @Composable
-private fun SkillsPanel(
-  skills: List<GatewaySkillSummary>,
-  canManageSkills: Boolean,
-  mutatingSkillKeys: Set<String>,
-  onSkillClick: (GatewaySkillSummary) -> Unit,
-  onSkillEnabledChange: (String, Boolean) -> Unit,
-) {
-  ClawListPanel(items = skills) { skill ->
-    SkillListRow(
-      skill = skill,
-      canManageSkills = canManageSkills,
-      isMutating = skill.skillKey in mutatingSkillKeys,
-      onClick = { onSkillClick(skill) },
-      onSkillEnabledChange = onSkillEnabledChange,
-    )
-  }
-}
-
-@Composable
 private fun SkillListRow(
   skill: GatewaySkillSummary,
   canManageSkills: Boolean,
@@ -489,7 +471,7 @@ private fun SkillListRow(
   onClick: () -> Unit,
   onSkillEnabledChange: (String, Boolean) -> Unit,
 ) {
-  ClawDetailRow(
+  ClawListItem(
     title = skill.name,
     subtitle = skillSubtitle(skill),
     modifier = Modifier.clickable(onClickLabel = nativeString("Open skill detail"), onClick = onClick),
@@ -573,10 +555,10 @@ private fun ClawHubSkillSearchPanel(
           // An install-only row never opens a review dialog, so the warning has to show here.
           nativeString("Not scanned by ClawHub").takeIf { skill.isUnscannedSource },
         )
-      ClawDetailRow(
+      ClawListItem(
         title = skill.displayName,
         subtitle = subtitleParts.joinToString(" · "),
-        leading = { ClawTextBadge(text = skillBadge(skill.displayName)) },
+        leading = { ClawTextBadge(text = badgeInitials(skill.displayName, fallback = "S")) },
         trailing = {
           val reviewing = state.reviewingSlug == skill.reference
           val installing = isClawHubSkillOperationActive(state.installingSlugs, skill.reference)
@@ -687,7 +669,7 @@ private fun ClawHubInstallReviewDialog(
   onDismiss: () -> Unit,
   onInstall: () -> Unit,
 ) {
-  AlertDialog(
+  AppAlertDialog(
     onDismissRequest = onDismiss,
     title = { Text(text = nativeString("Review ClawHub skill")) },
     text = {
@@ -832,14 +814,5 @@ private fun skillSourceLabel(skill: GatewaySkillSummary): String =
 
 private fun skillBadge(skill: GatewaySkillSummary): String {
   skill.emoji?.let { return it }
-  return skillBadge(skill.name)
+  return badgeInitials(skill.name, fallback = "S")
 }
-
-private fun skillBadge(name: String): String =
-  name
-    .split(' ', '-', '_')
-    .filter { it.isNotBlank() }
-    .take(2)
-    .mapNotNull { it.uppercaseFirstGraphemeOrNull() }
-    .joinToString("")
-    .ifBlank { "S" }

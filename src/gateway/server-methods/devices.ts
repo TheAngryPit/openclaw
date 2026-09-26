@@ -26,11 +26,15 @@ import {
   getPendingDevicePairing,
   listDevicePairing,
   removePairedDevice,
-  type DeviceAuthToken,
+  type PairedDevice,
   rejectDevicePairing,
   updatePairedDeviceMetadata,
 } from "../../infra/device-pairing.js";
 import type { DiagnosticSecurityEventInput } from "../../infra/diagnostic-events.js";
+import type {
+  DevicePairingList,
+  PairedDevice as RedactedPairedDevice,
+} from "../device-pairing-list.types.js";
 import { reconcileRevokedDeviceWorker } from "../device-worker-revocation.js";
 import { GATEWAY_EVENT_DEVICE_PAIR_CHANGED } from "../events.js";
 import { clearRemovedNodeRuntimeState } from "../node-runtime-state.js";
@@ -47,11 +51,13 @@ import {
 import type { DeviceManagementAuthz } from "./device-management-authz.js";
 import { emitDeviceManagementSecurityEvent } from "./device-management-security.js";
 import { scopeUpgradeHandlers } from "./device-scope-upgrade.js";
-import type { GatewayRequestHandlers } from "./types.js";
+import type {
+  GatewayClient,
+  GatewayRequestContext,
+  GatewayRequestHandlers,
+  RespondFn,
+} from "./types.js";
 import { assertValidParams } from "./validation.js";
-
-const DEVICE_TOKEN_ROTATION_DENIED_MESSAGE = "device token rotation denied";
-const DEVICE_TOKEN_REVOCATION_DENIED_MESSAGE = "device token revocation denied";
 
 type DeviceSessionAuthz = ReturnType<typeof resolveDeviceSessionAuthz>;
 
@@ -59,9 +65,9 @@ const DEVICE_PAIR_APPROVAL_DENIED_MESSAGE = "device pairing approval denied";
 const DEVICE_PAIR_REJECTION_DENIED_MESSAGE = "device pairing rejection denied";
 
 function redactPairedDevice(
-  device: { tokens?: Record<string, DeviceAuthToken> } & Record<string, unknown>,
+  device: PairedDevice,
   opts?: { connected?: boolean },
-) {
+): RedactedPairedDevice {
   // Pairing lists are visible to operators; expose token lifecycle metadata
   // without returning raw token material or the internal approved-scope set.
   const { tokens, approvedScopes: _approvedScopes, ...rest } = device;
@@ -72,58 +78,74 @@ function redactPairedDevice(
   };
 }
 
-function logDeviceTokenRotationDenied(params: {
+function respondDeviceTokenDenied(params: {
+  operation: "rotate" | "revoke";
   log: { warn: (message: string) => void };
+  respond: RespondFn;
+  authz: DeviceSessionAuthz;
   deviceId: string;
   role: string;
   reason:
     | RotateDeviceTokenDenyReason
-    | "unknown-device-or-role"
-    | "device-ownership-mismatch"
-    | "role-management-requires-admin";
-  scope?: string | null;
-}) {
-  const suffix = params.scope ? ` scope=${params.scope}` : "";
-  params.log.warn(
-    `device token rotation denied device=${params.deviceId} role=${params.role} reason=${params.reason}${suffix}`,
-  );
-}
-
-function logDeviceTokenRevocationDenied(params: {
-  log: { warn: (message: string) => void };
-  deviceId: string;
-  role: string;
-  reason:
     | RevokeDeviceTokenDenyReason
     | "device-ownership-mismatch"
     | "role-management-requires-admin";
   scope?: string | null;
 }) {
+  const operation = params.operation === "rotate" ? "rotation" : "revocation";
+  const message = `device token ${operation} denied`;
   const suffix = params.scope ? ` scope=${params.scope}` : "";
   params.log.warn(
-    `device token revocation denied device=${params.deviceId} role=${params.role} reason=${params.reason}${suffix}`,
+    `${message} device=${params.deviceId} role=${params.role} reason=${params.reason}${suffix}`,
   );
+  emitDeviceTokenDeniedSecurityEvent({
+    action: `device.token.${operation}_denied`,
+    authz: params.authz,
+    targetDeviceId: params.deviceId,
+    controlId: `device.token.${params.operation}`,
+    reason: params.reason,
+    role: params.role,
+  });
+  params.respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, message));
+}
+
+async function runDevicePairingMutation(params: {
+  operation: "remove" | "rename";
+  client: GatewayClient | null;
+  context: Pick<GatewayRequestContext, "logGateway">;
+  respond: RespondFn;
+  deviceId: string;
+  run: (authz: DeviceManagementAuthz) => Promise<void>;
+}): Promise<void> {
+  const authz = resolveDeviceManagementAuthz(params.client, params.deviceId);
+  let reason: string | undefined;
+  if (deniesCrossDeviceManagement(authz)) {
+    reason = "device-ownership-mismatch";
+  } else if (authz.callerDeviceId && !authz.isAdminCaller) {
+    const paired = await getPairedDevice(authz.normalizedTargetDeviceId);
+    if (paired && pairedDeviceHasNonOperatorRole(paired)) {
+      reason = "role-management-requires-admin";
+    }
+  }
+  if (!reason) {
+    return params.run(authz);
+  }
+  const operation = params.operation === "remove" ? "removal" : "rename";
+  const message = `device pairing ${operation} denied`;
+  params.context.logGateway.warn(`${message} device=${params.deviceId} reason=${reason}`);
+  emitDevicePairingDeniedSecurityEvent({
+    authz,
+    targetDeviceId: params.deviceId,
+    controlId: `device.pair.${params.operation}`,
+    reason,
+  });
+  params.respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, message));
 }
 
 function shouldReturnRotatedDeviceToken(authz: DeviceManagementAuthz): boolean {
   // Admins can rotate any token, but only a device rotating itself receives
   // the new token in-band; other rotations are notification/invalidations.
   return Boolean(authz.callerDeviceId && authz.callerDeviceId === authz.normalizedTargetDeviceId);
-}
-
-function emitDeviceSecurityEvent(params: {
-  action: string;
-  outcome: DiagnosticSecurityEventInput["outcome"];
-  severity: DiagnosticSecurityEventInput["severity"];
-  authz: DeviceSessionAuthz;
-  targetDeviceId?: string;
-  policyId: string;
-  decision: NonNullable<DiagnosticSecurityEventInput["policy"]>["decision"];
-  controlId: string;
-  reason?: string;
-  attributes?: Record<string, string | number | boolean>;
-}) {
-  emitDeviceManagementSecurityEvent(params);
 }
 
 function emitDevicePairingDeniedSecurityEvent(params: {
@@ -133,7 +155,7 @@ function emitDevicePairingDeniedSecurityEvent(params: {
   reason: string;
   severity?: DiagnosticSecurityEventInput["severity"];
 }) {
-  emitDeviceSecurityEvent({
+  emitDeviceManagementSecurityEvent({
     action: "device.pairing.denied",
     outcome: "denied",
     severity: params.severity ?? "medium",
@@ -158,7 +180,7 @@ function emitDevicePairingLifecycleSecurityEvent(params: {
   controlId: string;
   attributes?: Record<string, string | number | boolean>;
 }) {
-  emitDeviceSecurityEvent({
+  emitDeviceManagementSecurityEvent({
     action: params.action,
     outcome: "success",
     severity: params.severity,
@@ -179,7 +201,7 @@ function emitDeviceTokenDeniedSecurityEvent(params: {
   reason: string;
   role: string;
 }) {
-  emitDeviceSecurityEvent({
+  emitDeviceManagementSecurityEvent({
     action: params.action,
     outcome: "denied",
     severity: "medium",
@@ -202,7 +224,7 @@ function emitDeviceTokenLifecycleSecurityEvent(params: {
   role: string;
   scopeCount?: number;
 }) {
-  emitDeviceSecurityEvent({
+  emitDeviceManagementSecurityEvent({
     action: params.action,
     outcome: "success",
     severity: params.severity,
@@ -245,7 +267,7 @@ export const deviceHandlers: GatewayRequestHandlers = {
             connected: context.hasConnectedClientsForDevice?.(device.deviceId.trim()) ?? false,
           }),
         ),
-      },
+      } satisfies DevicePairingList,
       undefined,
     );
   },
@@ -255,7 +277,7 @@ export const deviceHandlers: GatewayRequestHandlers = {
     ) {
       return;
     }
-    const { requestId } = params as { requestId: string };
+    const requestId = (params as { requestId: string }).requestId.trim();
     const authz = resolveDeviceSessionAuthz(client);
     if (!authz.isAdminCaller) {
       const pending = await getPendingDevicePairing(requestId);
@@ -368,7 +390,7 @@ export const deviceHandlers: GatewayRequestHandlers = {
     if (!assertValidParams(params, validateDevicePairRejectParams, "device.pair.reject", respond)) {
       return;
     }
-    const { requestId } = params as { requestId: string };
+    const requestId = (params as { requestId: string }).requestId.trim();
     const authz = resolveDeviceSessionAuthz(client);
     if (authz.callerDeviceId && !authz.isAdminCaller) {
       const pending = await getPendingDevicePairing(requestId);
@@ -428,142 +450,81 @@ export const deviceHandlers: GatewayRequestHandlers = {
       return;
     }
     const { deviceId } = params as { deviceId: string };
-    const authz = resolveDeviceManagementAuthz(client, deviceId);
-    if (deniesCrossDeviceManagement(authz)) {
-      context.logGateway.warn(
-        `device pairing removal denied device=${deviceId} reason=device-ownership-mismatch`,
-      );
-      emitDevicePairingDeniedSecurityEvent({
-        authz,
-        targetDeviceId: deviceId,
-        controlId: "device.pair.remove",
-        reason: "device-ownership-mismatch",
-      });
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, "device pairing removal denied"),
-      );
-      return;
-    }
-    if (authz.callerDeviceId && !authz.isAdminCaller) {
-      const paired = await getPairedDevice(authz.normalizedTargetDeviceId);
-      if (paired && pairedDeviceHasNonOperatorRole(paired)) {
-        context.logGateway.warn(
-          `device pairing removal denied device=${deviceId} reason=role-management-requires-admin`,
-        );
-        emitDevicePairingDeniedSecurityEvent({
-          authz,
-          targetDeviceId: deviceId,
-          controlId: "device.pair.remove",
-          reason: "role-management-requires-admin",
-        });
-        respond(
-          false,
-          undefined,
-          errorShape(ErrorCodes.INVALID_REQUEST, "device pairing removal denied"),
-        );
-        return;
-      }
-    }
-    const removed = await removePairedDevice(deviceId);
-    if (!removed) {
-      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown deviceId"));
-      return;
-    }
-    clearRemovedNodeRuntimeState({ nodeId: removed.deviceId, context });
-    // Removal can retire its requester. Keep only its final reply, without
-    // letting a failed claim or worker reconciliation skip client teardown.
-    try {
-      try {
-        holdGatewayPolicyResponse(respond);
-      } finally {
-        context.invalidateClientsForDevice?.(removed.deviceId, {
-          reason: "device-pair-removed",
-        });
-      }
-      await reconcileRevokedDeviceWorker(context, removed.deviceId);
-      context.logGateway.info(`device pairing removed device=${removed.deviceId}`);
-      emitDevicePairingLifecycleSecurityEvent({
-        action: "device.pairing.removed",
-        severity: "medium",
-        authz,
-        targetDeviceId: removed.deviceId,
-        controlId: "device.pair.remove",
-      });
-      respond(true, removed, undefined);
-    } finally {
-      queueMicrotask(() => {
-        context.disconnectClientsForDevice?.(removed.deviceId);
-      });
-    }
+    await runDevicePairingMutation({
+      operation: "remove",
+      client,
+      context,
+      respond,
+      deviceId,
+      run: async (authz) => {
+        const removed = await removePairedDevice(deviceId);
+        if (!removed) {
+          respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown deviceId"));
+          return;
+        }
+        clearRemovedNodeRuntimeState({ nodeId: removed.deviceId, context });
+        // Removal can retire its requester. Keep only its final reply, without
+        // letting a failed claim or worker reconciliation skip client teardown.
+        try {
+          try {
+            holdGatewayPolicyResponse(respond);
+          } finally {
+            context.invalidateClientsForDevice?.(removed.deviceId, {
+              reason: "device-pair-removed",
+            });
+            await reconcileRevokedDeviceWorker(context, removed.deviceId);
+          }
+          context.logGateway.info(`device pairing removed device=${removed.deviceId}`);
+          emitDevicePairingLifecycleSecurityEvent({
+            action: "device.pairing.removed",
+            severity: "medium",
+            authz,
+            targetDeviceId: removed.deviceId,
+            controlId: "device.pair.remove",
+          });
+          respond(true, removed, undefined);
+        } finally {
+          queueMicrotask(() => {
+            context.disconnectClientsForDevice?.(removed.deviceId);
+          });
+        }
+      },
+    });
   },
   "device.pair.rename": async ({ params, respond, context, client }) => {
     if (!assertValidParams(params, validateDevicePairRenameParams, "device.pair.rename", respond)) {
       return;
     }
-    const { deviceId, label } = params as {
-      deviceId: string;
-      label: string;
-    };
+    const { deviceId, label } = params;
     const trimmed = label.trim();
     if (!trimmed) {
       respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "label required"));
       return;
     }
-    const authz = resolveDeviceManagementAuthz(client, deviceId);
-    if (deniesCrossDeviceManagement(authz)) {
-      context.logGateway.warn(
-        `device pairing rename denied device=${deviceId} reason=device-ownership-mismatch`,
-      );
-      emitDevicePairingDeniedSecurityEvent({
-        authz,
-        targetDeviceId: deviceId,
-        controlId: "device.pair.rename",
-        reason: "device-ownership-mismatch",
-      });
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, "device pairing rename denied"),
-      );
-      return;
-    }
-    if (authz.callerDeviceId && !authz.isAdminCaller) {
-      const paired = await getPairedDevice(authz.normalizedTargetDeviceId);
-      if (paired && pairedDeviceHasNonOperatorRole(paired)) {
-        context.logGateway.warn(
-          `device pairing rename denied device=${deviceId} reason=role-management-requires-admin`,
-        );
-        emitDevicePairingDeniedSecurityEvent({
+    await runDevicePairingMutation({
+      operation: "rename",
+      client,
+      context,
+      respond,
+      deviceId,
+      run: async (authz) => {
+        const updated = await updatePairedDeviceMetadata(deviceId, { operatorLabel: trimmed });
+        if (!updated) {
+          respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown deviceId"));
+          return;
+        }
+        context.logGateway.info(`device pairing renamed device=${deviceId} label=${trimmed}`);
+        emitDevicePairingLifecycleSecurityEvent({
+          action: "device.pairing.renamed",
+          severity: "low",
           authz,
           targetDeviceId: deviceId,
           controlId: "device.pair.rename",
-          reason: "role-management-requires-admin",
         });
-        respond(
-          false,
-          undefined,
-          errorShape(ErrorCodes.INVALID_REQUEST, "device pairing rename denied"),
-        );
-        return;
-      }
-    }
-    const updated = await updatePairedDeviceMetadata(deviceId, { operatorLabel: trimmed });
-    if (!updated) {
-      respond(false, undefined, errorShape(ErrorCodes.INVALID_REQUEST, "unknown deviceId"));
-      return;
-    }
-    context.logGateway.info(`device pairing renamed device=${deviceId} label=${trimmed}`);
-    emitDevicePairingLifecycleSecurityEvent({
-      action: "device.pairing.renamed",
-      severity: "low",
-      authz,
-      targetDeviceId: deviceId,
-      controlId: "device.pair.rename",
+        context.broadcast(GATEWAY_EVENT_DEVICE_PAIR_CHANGED, {}, { dropIfSlow: true });
+        respond(true, { deviceId, label: trimmed }, undefined);
+      },
     });
-    context.broadcast(GATEWAY_EVENT_DEVICE_PAIR_CHANGED, {}, { dropIfSlow: true });
-    respond(true, { deviceId, label: trimmed }, undefined);
   },
   "device.token.rotate": async ({ params, respond, context, client }) => {
     if (
@@ -571,54 +532,30 @@ export const deviceHandlers: GatewayRequestHandlers = {
     ) {
       return;
     }
-    const { deviceId, role, scopes } = params as {
-      deviceId: string;
-      role: string;
-      scopes?: string[];
-    };
+    const { deviceId, role, scopes } = params;
     const authz = resolveDeviceManagementAuthz(client, deviceId);
     if (deniesCrossDeviceManagement(authz)) {
-      logDeviceTokenRotationDenied({
+      respondDeviceTokenDenied({
+        operation: "rotate",
         log: context.logGateway,
+        respond,
+        authz,
         deviceId,
         role,
         reason: "device-ownership-mismatch",
       });
-      emitDeviceTokenDeniedSecurityEvent({
-        action: "device.token.rotation_denied",
-        authz,
-        targetDeviceId: deviceId,
-        controlId: "device.token.rotate",
-        reason: "device-ownership-mismatch",
-        role,
-      });
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, DEVICE_TOKEN_ROTATION_DENIED_MESSAGE),
-      );
       return;
     }
     if (deniesDeviceTokenRoleManagement(authz, role)) {
-      logDeviceTokenRotationDenied({
+      respondDeviceTokenDenied({
+        operation: "rotate",
         log: context.logGateway,
+        respond,
+        authz,
         deviceId,
         role,
         reason: "role-management-requires-admin",
       });
-      emitDeviceTokenDeniedSecurityEvent({
-        action: "device.token.rotation_denied",
-        authz,
-        targetDeviceId: deviceId,
-        controlId: "device.token.rotate",
-        reason: "role-management-requires-admin",
-        role,
-      });
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, DEVICE_TOKEN_ROTATION_DENIED_MESSAGE),
-      );
       return;
     }
     // Other roles passed the admin guard; only operator tokens inherit the caller's scope cap.
@@ -630,26 +567,16 @@ export const deviceHandlers: GatewayRequestHandlers = {
       callerScopes,
     });
     if (!rotated.ok) {
-      logDeviceTokenRotationDenied({
+      respondDeviceTokenDenied({
+        operation: "rotate",
         log: context.logGateway,
+        respond,
+        authz,
         deviceId,
         role,
         reason: rotated.reason,
         scope: rotated.scope,
       });
-      emitDeviceTokenDeniedSecurityEvent({
-        action: "device.token.rotation_denied",
-        authz,
-        targetDeviceId: deviceId,
-        controlId: "device.token.rotate",
-        reason: rotated.reason,
-        role,
-      });
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, DEVICE_TOKEN_ROTATION_DENIED_MESSAGE),
-      );
       return;
     }
     const entry = rotated.entry;
@@ -708,69 +635,42 @@ export const deviceHandlers: GatewayRequestHandlers = {
     const { deviceId, role } = params as { deviceId: string; role: string };
     const authz = resolveDeviceManagementAuthz(client, deviceId);
     if (deniesCrossDeviceManagement(authz)) {
-      context.logGateway.warn(
-        `device token revocation denied device=${deviceId} role=${role} reason=device-ownership-mismatch`,
-      );
-      emitDeviceTokenDeniedSecurityEvent({
-        action: "device.token.revocation_denied",
+      respondDeviceTokenDenied({
+        operation: "revoke",
+        log: context.logGateway,
+        respond,
         authz,
-        targetDeviceId: deviceId,
-        controlId: "device.token.revoke",
-        reason: "device-ownership-mismatch",
+        deviceId,
         role,
+        reason: "device-ownership-mismatch",
       });
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, DEVICE_TOKEN_REVOCATION_DENIED_MESSAGE),
-      );
       return;
     }
     if (deniesDeviceTokenRoleManagement(authz, role)) {
-      logDeviceTokenRevocationDenied({
+      respondDeviceTokenDenied({
+        operation: "revoke",
         log: context.logGateway,
+        respond,
+        authz,
         deviceId,
         role,
         reason: "role-management-requires-admin",
       });
-      emitDeviceTokenDeniedSecurityEvent({
-        action: "device.token.revocation_denied",
-        authz,
-        targetDeviceId: deviceId,
-        controlId: "device.token.revoke",
-        reason: "role-management-requires-admin",
-        role,
-      });
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, DEVICE_TOKEN_REVOCATION_DENIED_MESSAGE),
-      );
       return;
     }
     const callerScopes = role.trim() === "operator" ? authz.callerScopes : undefined;
     const revoked = await revokeDeviceToken({ deviceId, role, callerScopes });
     if (!revoked.ok) {
-      logDeviceTokenRevocationDenied({
+      respondDeviceTokenDenied({
+        operation: "revoke",
         log: context.logGateway,
+        respond,
+        authz,
         deviceId,
         role,
         reason: revoked.reason,
         scope: revoked.scope,
       });
-      emitDeviceTokenDeniedSecurityEvent({
-        action: "device.token.revocation_denied",
-        authz,
-        targetDeviceId: deviceId,
-        controlId: "device.token.revoke",
-        reason: revoked.reason,
-        role,
-      });
-      respond(
-        false,
-        undefined,
-        errorShape(ErrorCodes.INVALID_REQUEST, DEVICE_TOKEN_REVOCATION_DENIED_MESSAGE),
-      );
       return;
     }
     const entry = revoked.entry;
@@ -784,22 +684,22 @@ export const deviceHandlers: GatewayRequestHandlers = {
       controlId: "device.token.revoke",
       role: entry.role,
     });
-    if (entry.role === "node") {
-      // Revoking a node token ends its authority like pairing removal does:
-      // run the same teardown owner so pending actions/work, wake state,
-      // surface caps, and worker placements are not stranded on a dead node.
-      clearRemovedNodeRuntimeState({ nodeId: normalizedDeviceId, context });
-      await reconcileRevokedDeviceWorker(context, normalizedDeviceId);
-    }
-    // Preserve only this committed mutation's reply across its own invalidation;
-    // a caller revoked during the await cannot claim it or skip target teardown.
+    // Claim the reply and fence revoked clients before worker cleanup can yield.
+    // Cleanup and disconnect remain owned even when that claim fails.
     try {
-      holdGatewayPolicyResponse(respond);
+      try {
+        holdGatewayPolicyResponse(respond);
+      } finally {
+        context.invalidateClientsForDevice?.(normalizedDeviceId, {
+          role: entry.role,
+          reason: "device-token-revoked",
+        });
+        if (entry.role === "node") {
+          clearRemovedNodeRuntimeState({ nodeId: normalizedDeviceId, context });
+          await reconcileRevokedDeviceWorker(context, normalizedDeviceId);
+        }
+      }
     } finally {
-      context.invalidateClientsForDevice?.(normalizedDeviceId, {
-        role: entry.role,
-        reason: "device-token-revoked",
-      });
       queueMicrotask(() => {
         context.disconnectClientsForDevice?.(normalizedDeviceId, { role: entry.role });
       });
@@ -815,4 +715,3 @@ export const deviceHandlers: GatewayRequestHandlers = {
     );
   },
 };
-/* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

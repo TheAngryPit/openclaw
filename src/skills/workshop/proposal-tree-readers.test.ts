@@ -79,6 +79,9 @@ describe("Skill Workshop target tree exclusions", () => {
       Array.from({ length: 513 }, (_, index) => fs.mkdir(path.join(metadata, `entry-${index}`))),
     );
     await expect(readSkillProposalTargetTreeSha256(dir)).resolves.toBe(initialHash);
+    await expect(
+      readSkillProposalTargetTreeSha256(dir, { includeRootMetadata: true }),
+    ).rejects.toThrow("exceeds traversal limits");
     const nested = path.join(dir, "references", ".openclaw");
     await fs.mkdir(nested, { recursive: true });
     await fs.writeFile(path.join(nested, "content.md"), "Ordinary nested skill content.\n");

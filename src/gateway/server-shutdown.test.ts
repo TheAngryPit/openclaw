@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeferredCore } from "../shared/deferred.js";
 import { finishGatewayRestartTrace, startGatewayRestartTrace } from "./restart-trace.js";
-import { runGatewayShutdownSteps } from "./server-shutdown.js";
+import { resolveGatewayShutdownNotice, runGatewayCloseSteps } from "./server-shutdown.js";
 
 const logInfo = vi.hoisted(() => vi.fn());
 vi.mock("../logging/subsystem.js", () => ({
@@ -14,7 +14,32 @@ afterEach(() => {
   logInfo.mockClear();
 });
 
-describe("gateway shutdown steps", () => {
+describe("gateway shutdown notice", () => {
+  it("omits invalid restart metadata and normalizes the reason", () => {
+    expect(
+      resolveGatewayShutdownNotice({ reason: "  upgrade  ", restartExpectedMs: Number.NaN }),
+    ).toEqual({
+      reason: "upgrade",
+    });
+    expect(resolveGatewayShutdownNotice({ restartExpectedMs: -2 })).toEqual({
+      reason: "gateway stopping",
+      restartExpectedMs: 0,
+    });
+  });
+});
+
+function createCloseOwner() {
+  return {
+    connectionWork: { drain: vi.fn(async () => {}) },
+    stopConnectionDependentSidecars: vi.fn(),
+    stopRegisteredGatewayLifetimeSidecars: vi.fn(),
+    stopRegisteredPostReadySidecars: vi.fn(),
+    runClosePrelude: vi.fn(),
+    sealAndJoinRegisteredSidecarStops: vi.fn(),
+  };
+}
+
+describe("gateway close steps", () => {
   it.each([false, true])(
     "reports a held step before it settles without changing order (trace=%s)",
     async (trace) => {
@@ -22,21 +47,14 @@ describe("gateway shutdown steps", () => {
       startGatewayRestartTrace("stop.signal.received");
       const entered = createDeferredCore();
       const released = createDeferredCore();
-      const second = vi.fn();
-      const onError = vi.fn();
-      const closing = runGatewayShutdownSteps({
-        steps: [
-          {
-            name: "gateway lifetime sidecars",
-            run: async () => {
-              entered.resolve();
-              await released.promise;
-            },
-          },
-          { name: "second", run: second },
-        ],
-        onError,
+      const owner = createCloseOwner();
+      owner.stopRegisteredGatewayLifetimeSidecars.mockImplementation(async () => {
+        entered.resolve();
+        await released.promise;
       });
+      const second = owner.stopRegisteredPostReadySidecars;
+      const onError = vi.fn();
+      const closing = runGatewayCloseSteps({ owner, close: vi.fn(), onError });
       const messages = () => logInfo.mock.calls.map(([message]) => String(message));
       try {
         await entered.promise;
@@ -47,7 +65,9 @@ describe("gateway shutdown steps", () => {
         expect(
           messages().some((line) => line.includes("shutdown.gateway-lifetime-sidecars ")),
         ).toBe(false);
-        expect(messages().some((line) => line.includes("shutdown.second"))).toBe(false);
+        expect(messages().some((line) => line.includes("shutdown.post-ready-sidecars"))).toBe(
+          false,
+        );
       } finally {
         released.resolve();
         await closing;
@@ -57,7 +77,54 @@ describe("gateway shutdown steps", () => {
       expect(messages().some((line) => line.includes("shutdown.gateway-lifetime-sidecars "))).toBe(
         trace,
       );
-      expect(messages().some((line) => line.includes("shutdown.second "))).toBe(trace);
+      expect(messages().some((line) => line.includes("shutdown.post-ready-sidecars "))).toBe(trace);
+    },
+  );
+
+  it.each([false, true])(
+    "retains prior failures and respects a required join (failure: %s)",
+    async (joinFails) => {
+      const stopError = new Error("optional sidecar stop failed");
+      const drainError = new Error("connection cleanup failed");
+      const closeDependencies = vi.fn();
+      const drain = vi.fn(async () => {
+        if (joinFails) {
+          throw drainError;
+        }
+      });
+      const onError = vi.fn();
+      await expect(
+        runGatewayCloseSteps({
+          owner: {
+            ...createCloseOwner(),
+            stopRegisteredGatewayLifetimeSidecars: () => {
+              throw stopError;
+            },
+            sealAndJoinRegisteredSidecarStops: drain,
+          },
+          close: closeDependencies,
+          onError,
+        }),
+      ).rejects.toMatchObject({
+        errors: [
+          {
+            message:
+              "shutdown step failed (gateway lifetime sidecars): optional sidecar stop failed",
+            cause: stopError,
+          },
+          ...(joinFails
+            ? [
+                {
+                  message: "shutdown step failed (late sidecar cleanup): connection cleanup failed",
+                  cause: drainError,
+                },
+              ]
+            : []),
+        ],
+      });
+      expect(drain).toHaveBeenCalledOnce();
+      expect(closeDependencies).toHaveBeenCalledTimes(joinFails ? 0 : 1);
+      expect(onError).toHaveBeenCalledTimes(joinFails ? 2 : 1);
     },
   );
 
@@ -73,12 +140,18 @@ describe("gateway shutdown steps", () => {
     const closeGateway = vi.fn(async () => {});
     const messages: string[] = [];
 
-    await runGatewayShutdownSteps({
-      steps: [
-        { name: "gateway lifetime sidecars", run: loadStopModule },
-        { name: "gateway close", run: closeGateway },
-      ],
-      onError: (message) => messages.push(message),
+    await expect(
+      runGatewayCloseSteps({
+        owner: {
+          ...createCloseOwner(),
+          stopRegisteredGatewayLifetimeSidecars: loadStopModule,
+        },
+        close: closeGateway,
+        onError: (message) => messages.push(message),
+      }),
+    ).rejects.toMatchObject({
+      message: "Gateway shutdown did not complete cleanly",
+      errors: [expect.objectContaining({ cause: missingModule })],
     });
 
     expect(closeGateway).toHaveBeenCalledOnce();

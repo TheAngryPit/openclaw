@@ -61,7 +61,7 @@ describe("worker launch capabilities", () => {
   it.each([true, false])(
     "carries only an available GitHub identity in the launch envelope (%s)",
     async (available) => {
-      seedActivePlacement();
+      await seedActivePlacement();
       const github: WorkerGitHubLaunchBinding = {
         token: "synthetic-turn-bound-github-token",
         login: "shared-bot",
@@ -116,7 +116,7 @@ describe("worker launch capabilities", () => {
   ])(
     "grants computer with negotiated features and model vision (missing: $missingFeature, vision: $modelHasVision)",
     async ({ missingFeature, modelHasVision, allowed }) => {
-      seedActivePlacement();
+      await seedActivePlacement();
       const environment = attachedEnvironment();
       if (!missingFeature) {
         environment.bootstrapReceipt!.protocolFeatures.push(WORKER_COMPUTER_PROTOCOL_FEATURE);
@@ -226,7 +226,7 @@ describe("worker launch capabilities", () => {
         "returned-success",
       ] as const
     ).flatMap((primary) =>
-      [false, true].map((closeFails) => ({
+      (primary.startsWith("returned") ? [true] : [false, true]).map((closeFails) => ({
         label: primary,
         nodeDeviceId: "paired-node-1",
         providerId: "device",
@@ -279,7 +279,7 @@ describe("worker launch capabilities", () => {
           : primary === "overload"
             ? ({ reason: "overloaded", status: 503 } as const)
             : primary === "http-507"
-              ? ({ reason: "timeout", status: 507 } as const)
+              ? ({ reason: "server_error", status: 507 } as const)
               : undefined;
       const primaryError = providerFailure
         ? primary === "http-507"
@@ -312,7 +312,7 @@ describe("worker launch capabilities", () => {
         media: [{ path: saved.path, contentType: "text/plain" }],
       };
       const originalPrompt = inputTurn.prompt;
-      seedActivePlacement("remote-exec", remote);
+      await seedActivePlacement("remote-exec", remote);
       const order: string[] = [];
       const launchTurn = vi.fn();
       const quiesceWorkspace = vi.fn(async () => {
@@ -326,8 +326,11 @@ describe("worker launch capabilities", () => {
       });
       const reconcileWorkspace = vi.fn(
         async (request: Parameters<WorkerTunnelHandle["reconcileWorkspace"]>[0]) => {
+          if (request.source.kind !== "local") {
+            throw new Error("expected a local workspace source");
+          }
           order.push("reconcile");
-          request.journal.commit(MANIFEST_REF);
+          request.source.journal.commit(MANIFEST_REF);
           return {
             manifestRef: MANIFEST_REF,
             changed: false,

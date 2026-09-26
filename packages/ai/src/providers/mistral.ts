@@ -1,4 +1,3 @@
-// Mistral provider adapts Mistral streams and tool calls to the runtime.
 import { randomUUID } from "node:crypto";
 import { HTTPClient, type Fetcher } from "@mistralai/mistralai/lib/http";
 import type {
@@ -7,12 +6,17 @@ import type {
   CompletionEvent,
   ContentChunk,
   FunctionTool,
+  ReasoningEffort,
 } from "@mistralai/mistralai/models/components";
+import { ReasoningEffort$inboundSchema } from "@mistralai/mistralai/models/components/reasoningeffort.js";
 import { Chat } from "@mistralai/mistralai/sdk/chat";
+import { appendAssistantThinking } from "@openclaw/llm-core/event-stream";
 import { getEnvApiKey } from "../env-api-keys.js";
 import { getAiTransportHost } from "../host.js";
+import { isImageWithMediaPayload } from "../media-payload.js";
 import { calculateCost, clampThinkingLevel } from "../model-utils.js";
 import { transformProviderMessages as transformMessages } from "../provider-transcript-transform.js";
+import { createAssistantOutput } from "../transports/assistant-output.js";
 import {
   assignTransportErrorDetails,
   finalizeTerminalToolCallArguments,
@@ -50,30 +54,14 @@ import {
   describeToolResultMediaPlaceholder,
   extractToolResultText,
   formatToolResultText,
-  isImageWithMediaPayload,
 } from "./tool-result-text.js";
 
 const MISTRAL_TOOL_CALL_ID_LENGTH = 9;
 
-// 16 MiB cap on Mistral streaming success bodies, matching the
-// `PROVIDER_TEXT_RESPONSE_MAX_BYTES` / `PROVIDER_JSON_RESPONSE_MAX_BYTES`
-// 16 MiB cap used elsewhere. A hostile or malfunctioning Mistral-compatible
-// endpoint cannot exhaust memory by streaming an unbounded SSE body;
-// `createSseByteGuard` cancels the upstream reader and throws once the
-// accumulated byte count exceeds this cap.
+// Bound compatible endpoints as well as the first-party streaming API.
 const MISTRAL_STREAM_BODY_MAX_BYTES = 16 * 1024 * 1024;
 
-/**
- * Builds a `Fetcher` that wraps the default `fetch` with a 16 MiB byte cap
- * on streamed response bodies. The wrapped `Response.body` exposes a
- * `ReadableStream` whose chunks flow through `createSseByteGuard`, so the
- * SDK's internal SSE parser (`EventStream` in
- * `@mistralai/mistralai/lib/event-streams.ts`) reads exactly as it would on
- * an unbounded body — but bounded.
- *
- * Bodyless responses (no `body` or no `getReader`) are returned unchanged so
- * the SDK's error-path `res.arrayBuffer()` call still works.
- */
+/** Cap the SDK's response reader while preserving bodyless error responses. */
 export function createBoundedMistralFetcher(
   maxBytes: number = MISTRAL_STREAM_BODY_MAX_BYTES,
   upstreamFetch: Fetcher = fetch,
@@ -89,9 +77,6 @@ export function createBoundedMistralFetcher(
       onOverflow: ({ size, maxBytes: cap }) =>
         new Error(`mistral: stream body exceeds ${cap} bytes (got ${size})`),
     });
-    // Re-shape the response body so the SDK's `responseBody.getReader()`
-    // call inside `EventStream` resolves to a stream whose `read()` is
-    // routed through `guard.read()`. Cancellation is also forwarded.
     const guardedStream = new ReadableStream<Uint8Array>({
       async pull(controller) {
         const { done, value } = await guard.read();
@@ -113,11 +98,6 @@ export function createBoundedMistralFetcher(
   };
 }
 
-/**
- * Provider-specific options for the Mistral API.
- */
-type MistralReasoningEffort = "none" | "high";
-
 interface MistralOptions extends StreamOptions {
   toolChoice?:
     | "auto"
@@ -126,12 +106,9 @@ interface MistralOptions extends StreamOptions {
     | "required"
     | { type: "function"; function: { name: string } };
   promptMode?: "reasoning";
-  reasoningEffort?: MistralReasoningEffort;
+  reasoningEffort?: ReasoningEffort;
 }
 
-/**
- * Stream responses from Mistral using `chat.stream`.
- */
 export const streamMistral: StreamFunction<"mistral-conversations", MistralOptions> = (
   model: Model<"mistral-conversations">,
   context: Context,
@@ -140,7 +117,7 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
   const stream = new AssistantMessageEventStream();
 
   void (async () => {
-    const output = createOutput(model);
+    const output = createAssistantOutput(model);
 
     try {
       const apiKey = options?.apiKey || getEnvApiKey(model.provider);
@@ -173,8 +150,10 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
       });
 
       const normalizeMistralToolCallId = createMistralToolCallIdNormalizer();
-      const transformedMessages = transformMessages(context.messages, model, (id) =>
-        normalizeMistralToolCallId(id),
+      const transformedMessages = transformMessages(
+        context.messages,
+        model,
+        normalizeMistralToolCallId,
       );
 
       let payload = buildChatPayload(model, context, transformedMessages, options);
@@ -225,9 +204,6 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
   return stream;
 };
 
-/**
- * Maps provider-agnostic `SimpleStreamOptions` to Mistral options.
- */
 export const streamSimpleMistral: StreamFunction<"mistral-conversations", SimpleStreamOptions> = (
   model: Model<"mistral-conversations">,
   context: Context,
@@ -247,36 +223,19 @@ export const streamSimpleMistral: StreamFunction<"mistral-conversations", Simple
     : undefined;
   const reasoning = clampedReasoning === "off" ? undefined : clampedReasoning;
   const shouldUseReasoning = model.reasoning && reasoning !== undefined;
+  const supportsReasoningEffort = usesReasoningEffort(model);
 
   return streamMistral(model, context, {
     ...base,
-    promptMode: shouldUseReasoning && usesPromptModeReasoning(model) ? "reasoning" : undefined,
+    promptMode: shouldUseReasoning && !supportsReasoningEffort ? "reasoning" : undefined,
     reasoningEffort:
-      shouldUseReasoning && usesReasoningEffort(model)
-        ? mapReasoningEffort(model, reasoning)
+      shouldUseReasoning && supportsReasoningEffort
+        ? ReasoningEffort$inboundSchema.parse(
+            model.thinkingLevelMap?.[reasoning] ?? (reasoning === "minimal" ? "none" : "high"),
+          )
         : undefined,
   } satisfies MistralOptions);
 };
-
-function createOutput(model: Model<"mistral-conversations">): AssistantMessage {
-  return {
-    role: "assistant",
-    content: [],
-    api: model.api,
-    provider: model.provider,
-    model: model.id,
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    },
-    stopReason: "stop",
-    timestamp: Date.now(),
-  };
-}
 
 function createMistralToolCallIdNormalizer(): (id: string) => string {
   const idMap = new Map<string, string>();
@@ -482,14 +441,6 @@ async function consumeChatStream(
           params.usedContentIndexes,
         )
       : new Set<number>();
-    const indexCandidates =
-      toolCallIndex === undefined
-        ? new Set<number>()
-        : findIdentityCandidates(
-            (identity) => identity.indexes.has(toolCallIndex),
-            params.usedContentIndexes,
-          );
-
     if (idCandidates.size > 0) {
       let candidates = idCandidates;
       if (nameCandidates.size > 0) {
@@ -535,6 +486,14 @@ async function consumeChatStream(
       }
       return requireSingleCandidate(indexCompatibleCandidates);
     }
+
+    const indexCandidates =
+      toolCallIndex === undefined
+        ? new Set<number>()
+        : findIdentityCandidates(
+            (identity) => identity.indexes.has(toolCallIndex),
+            params.usedContentIndexes,
+          );
 
     if (functionName) {
       // A new name normally starts a sibling call even when the SDK's omitted
@@ -590,6 +549,23 @@ async function consumeChatStream(
     }
   };
 
+  const appendTextDelta = (text: string) => {
+    const textDelta = sanitizeSurrogates(text);
+    if (!currentBlock || currentBlock.type !== "text") {
+      finishCurrentBlock(currentBlock);
+      currentBlock = { type: "text", text: "" };
+      output.content.push(currentBlock);
+      stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
+    }
+    currentBlock.text += textDelta;
+    stream.push({
+      type: "text_delta",
+      contentIndex: blockIndex(),
+      delta: textDelta,
+      partial: output,
+    });
+  };
+
   for await (const event of mistralStream) {
     notifyLlmRequestActivity(signal);
     const chunk = event.data;
@@ -636,28 +612,12 @@ async function consumeChatStream(
       const contentItems = typeof delta.content === "string" ? [delta.content] : delta.content;
       for (const item of contentItems) {
         if (typeof item === "string") {
-          const textDelta = sanitizeSurrogates(item);
-          if (!currentBlock || currentBlock.type !== "text") {
-            finishCurrentBlock(currentBlock);
-            currentBlock = { type: "text", text: "" };
-            output.content.push(currentBlock);
-            stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
-          }
-          currentBlock.text += textDelta;
-          stream.push({
-            type: "text_delta",
-            contentIndex: blockIndex(),
-            delta: textDelta,
-            partial: output,
-          });
+          appendTextDelta(item);
           continue;
         }
 
         if (item.type === "thinking") {
-          const deltaText = item.thinking
-            .map((part) => ("text" in part ? part.text : ""))
-            .filter((text) => text.length > 0)
-            .join("");
+          const deltaText = item.thinking.map((part) => ("text" in part ? part.text : "")).join("");
           const thinkingDelta = sanitizeSurrogates(deltaText);
           if (!thinkingDelta) {
             continue;
@@ -668,7 +628,7 @@ async function consumeChatStream(
             output.content.push(currentBlock);
             stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
           }
-          currentBlock.thinking += thinkingDelta;
+          appendAssistantThinking(currentBlock, thinkingDelta);
           stream.push({
             type: "thinking_delta",
             contentIndex: blockIndex(),
@@ -679,20 +639,7 @@ async function consumeChatStream(
         }
 
         if (item.type === "text") {
-          const textDelta = sanitizeSurrogates(item.text);
-          if (!currentBlock || currentBlock.type !== "text") {
-            finishCurrentBlock(currentBlock);
-            currentBlock = { type: "text", text: "" };
-            output.content.push(currentBlock);
-            stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
-          }
-          currentBlock.text += textDelta;
-          stream.push({
-            type: "text_delta",
-            contentIndex: blockIndex(),
-            delta: textDelta,
-            partial: output,
-          });
+          appendTextDelta(item.text);
         }
       }
     }
@@ -982,27 +929,10 @@ function usesReasoningEffort(model: Model<"mistral-conversations">): boolean {
   );
 }
 
-function usesPromptModeReasoning(model: Model<"mistral-conversations">): boolean {
-  return model.reasoning && !usesReasoningEffort(model);
-}
-
-function mapReasoningEffort(
-  model: Model<"mistral-conversations">,
-  level: Exclude<SimpleStreamOptions["reasoning"], undefined>,
-): MistralReasoningEffort {
-  return (model.thinkingLevelMap?.[level] ?? "high") as MistralReasoningEffort;
-}
-
 function mapToolChoice(
   choice: MistralOptions["toolChoice"],
   convertedToolNames?: ReadonlySet<string>,
-):
-  | "auto"
-  | "none"
-  | "any"
-  | "required"
-  | { type: "function"; function: { name: string } }
-  | undefined {
+): MistralOptions["toolChoice"] {
   if (!choice) {
     return undefined;
   }

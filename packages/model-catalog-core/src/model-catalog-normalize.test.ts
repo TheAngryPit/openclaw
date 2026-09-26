@@ -4,6 +4,27 @@ import { normalizeModelCatalog, normalizeModelCatalogProviderRows } from "./inde
 import { buildModelCatalogMergeKey, buildModelCatalogRef } from "./model-catalog-refs.js";
 
 describe("model catalog normalization", () => {
+  it.each([
+    { input: [" model-2 ", "model-0"], expected: ["model-2", "model-0"] },
+    { input: ["missing"], expected: undefined },
+    { input: ["model-0", " model-0 "], expected: undefined },
+    { input: [" "], expected: undefined },
+    { input: [42], expected: undefined },
+  ])("normalizes a complete recommendation list or omits it: $input", ({ input, expected }) => {
+    const catalog = normalizeModelCatalog(
+      {
+        providers: {
+          openai: {
+            recommendedModels: input,
+            models: Array.from({ length: 3 }, (_, index) => ({ id: `model-${index}` })),
+          },
+        },
+      },
+      { ownedProviders: new Set(["openai"]) },
+    );
+    expect(catalog?.providers?.openai?.recommendedModels).toEqual(expected);
+  });
+
   it("normalizes catalog ownership, aliases, suppressions, and row fields", () => {
     const catalog = normalizeModelCatalog(
       {
@@ -79,6 +100,7 @@ describe("model catalog normalization", () => {
                   sendSessionIdHeader: false,
                   supportsEagerToolInputStreaming: false,
                   supportsLongCacheRetention: true,
+                  supportsResponsesContinuation: true,
                   supportsJsonSchemaResponseFormat: true,
                   requiresReasoningContentOnAssistantMessages: true,
                   supportsStore: "yes",
@@ -185,6 +207,7 @@ describe("model catalog normalization", () => {
                 sendSessionIdHeader: false,
                 supportsEagerToolInputStreaming: false,
                 supportsLongCacheRetention: true,
+                supportsResponsesContinuation: true,
                 supportsJsonSchemaResponseFormat: true,
                 requiresReasoningContentOnAssistantMessages: true,
                 thinkingFormat: "together",
@@ -219,6 +242,27 @@ describe("model catalog normalization", () => {
         openai: "static",
       },
       runtimeAugment: true,
+    });
+  });
+
+  it("keeps only explicit owned models.dev mappings without creating provider rows", () => {
+    expect(
+      normalizeModelCatalog(
+        {
+          modelsDev: {
+            " Example ": " Upstream-ID ",
+            other: "other-source",
+            alias: "alias-source",
+            Constructor: "blocked-source",
+          },
+          providers: { example: { models: [] } },
+          aliases: { alias: { provider: "example" } },
+        },
+        { ownedProviders: new Set([" EXAMPLE ", "constructor"]) },
+      ),
+    ).toEqual({
+      modelsDev: { example: "Upstream-ID" },
+      aliases: { alias: { provider: "example" } },
     });
   });
 
@@ -388,6 +432,21 @@ describe("model catalog normalization", () => {
     ]);
   });
 
+  it("retains an explicitly empty supported reasoning effort list", () => {
+    const catalog = normalizeModelCatalog(
+      {
+        providers: {
+          example: { models: [{ id: "reasoner", compat: { supportedReasoningEfforts: [] } }] },
+        },
+      },
+      { ownedProviders: new Set(["example"]) },
+    );
+
+    expect(catalog?.providers?.example?.models[0]?.compat).toEqual({
+      supportedReasoningEfforts: [],
+    });
+  });
+
   it.each([
     { name: "non-record catalog", value: null },
     { name: "unowned provider", value: { providers: { anthropic: { models: [{ id: "x" }] } } } },
@@ -395,6 +454,13 @@ describe("model catalog normalization", () => {
     { name: "unowned alias", value: { aliases: { alias: { provider: "anthropic" } } } },
     { name: "invalid suppression", value: { suppressions: [{ provider: "openai" }] } },
     { name: "unknown discovery", value: { discovery: { openai: "unknown" } } },
+    { name: "non-record models.dev mapping", value: { modelsDev: "openai" } },
+    { name: "array models.dev mapping", value: { modelsDev: ["openai"] } },
+    { name: "null models.dev mapping", value: { modelsDev: null } },
+    { name: "empty models.dev mapping", value: { modelsDev: {} } },
+    { name: "blank models.dev source", value: { modelsDev: { openai: "  " } } },
+    { name: "non-string models.dev source", value: { modelsDev: { openai: true } } },
+    { name: "unowned models.dev mapping", value: { modelsDev: { anthropic: "anthropic" } } },
   ])("rejects a $name instead of publishing an empty catalog", ({ value }) => {
     expect(normalizeModelCatalog(value, { ownedProviders: new Set(["openai"]) })).toBeUndefined();
   });

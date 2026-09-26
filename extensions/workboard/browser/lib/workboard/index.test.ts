@@ -12,7 +12,7 @@ import {
   archiveWorkboardCard,
   deleteWorkboardCard,
   dispatchWorkboard,
-  filterWorkboardCardsForPreset,
+  filterWorkboardCards,
   getWorkboardLifecycle,
   getWorkboardDependencyState,
   getWorkboardState,
@@ -23,14 +23,12 @@ import {
   startWorkboardCard,
   stopWorkboardLifecycleRefresh,
   stopWorkboardCard,
-  summarizeWorkboardHealth,
   syncWorkboardLifecycle,
   type WorkboardCard,
   type WorkboardTaskSummary,
 } from "./index.ts";
 import { normalizeExecution, normalizeMetadata } from "./metadata-normalization.ts";
 import { getWorkboardRuntime } from "./runtime.ts";
-import { captureSessionToWorkboard } from "./session-capture.ts";
 import { listWorkboardTasks } from "./task-links.ts";
 import {
   createGatewaySession,
@@ -69,10 +67,6 @@ const sampleTask = createWorkboardTask();
 
 function makeCard(overrides: Partial<WorkboardCard> = {}) {
   return { ...sampleCard, ...overrides } satisfies WorkboardCard;
-}
-
-function makeSession(overrides: Partial<GatewaySessionRow> = {}) {
-  return { ...sampleSession, ...overrides } satisfies GatewaySessionRow;
 }
 
 function makeTask(overrides: Partial<WorkboardTaskSummary> = {}) {
@@ -279,10 +273,6 @@ function refreshBoard(
   return refreshWorkboard({ host, client, source });
 }
 
-function captureSession(client: WorkboardTestClient, session: GatewaySessionRow = sampleSession) {
-  return captureSessionToWorkboard({ host, client, session });
-}
-
 function dispatchBoard(
   client: WorkboardTestClient,
   options: Omit<Parameters<typeof dispatchWorkboard>[0], "host" | "client"> = {},
@@ -296,7 +286,10 @@ function saveDraft(client: WorkboardTestClient) {
 
 function moveCard(
   client: WorkboardTestClient,
-  options: Omit<Parameters<typeof moveWorkboardCard>[0], "host" | "client">,
+  options: Omit<
+    Extract<Parameters<typeof moveWorkboardCard>[0], { position: number }>,
+    "host" | "client"
+  >,
 ) {
   return moveWorkboardCard({ host, client, ...options });
 }
@@ -519,17 +512,6 @@ describe("workboard controller", () => {
     });
   });
 
-  it("loads cards through the plugin gateway method", async () => {
-    const client = createClient({
-      "workboard.cards.list": listResult([sampleCard], ["todo", "done"]),
-    });
-
-    await loadBoard(client);
-
-    expect(client.request).toHaveBeenCalledWith("workboard.cards.list", {});
-    expect(getWorkboardState(host).cards).toEqual([sampleCard]);
-  });
-
   it("refreshes diagnostics before listing cards when requested", async () => {
     const client = createClient({
       "workboard.cards.diagnostics.refresh": { diagnostics: [], count: 0 },
@@ -560,26 +542,6 @@ describe("workboard controller", () => {
     expect(state.error).toBeNull();
     expect(redact).toHaveBeenCalledWith("diagnostics denied: sensitive provider detail");
     expect(state.lastRefreshError).toBe("diagnostics denied: [redacted]");
-  });
-
-  it("links loaded cards to matching Gateway tasks", async () => {
-    const linked = makeCard({
-      sessionKey: sampleTaskSessionKey,
-      runId: "run-1",
-    });
-    const client = createClient({
-      "workboard.cards.list": listResult([linked], ["todo", "done"]),
-      "tasks.list": { tasks: [sampleTask] },
-    });
-
-    await loadBoard(client);
-
-    expect(client.request).toHaveBeenCalledWith("tasks.list", { limit: 500 });
-    expect(state.cards[0]).toMatchObject({ id: "card-1", taskId: "task-1" });
-    expect(state.tasksByCardId.get("card-1")).toMatchObject({
-      taskId: "task-1",
-      status: "running",
-    });
   });
 
   it("preserves matching task links when full task enrichment fails", async () => {
@@ -2208,6 +2170,42 @@ describe("workboard controller", () => {
     expect(getWorkboardState(host).loaded).toBe(false);
   });
 
+  it("reconciles selection after live refresh without dropping filtered-out cards", async () => {
+    const removed = makeCard({ id: "removed" });
+    const archived = makeCard({ id: "archived" });
+    const retained = makeCard({ id: "retained", status: "done" });
+    const client = createSequencedClient({
+      "workboard.cards.list": [
+        listResult([removed, archived, retained]),
+        listResult([{ ...archived, metadata: { archivedAt: 20 } }, retained]),
+        listResult([]),
+      ],
+    });
+    await loadBoard(client);
+    state.selectedCardIds = new Set([removed.id, archived.id, retained.id]);
+    state.bulkDialog = {
+      kind: "delete",
+      cardIds: [removed.id, archived.id, retained.id],
+      observedCards: [removed, archived, retained],
+    };
+    state.statusFilter = new Set(["todo"]);
+    state.query = "no visible matches";
+
+    await refreshWorkboard({ host, client, source: "live" });
+    expect(state.selectedCardIds).toEqual(new Set([retained.id]));
+    expect(state.bulkDialog).toEqual({
+      kind: "delete",
+      cardIds: [retained.id],
+      observedCards: [removed, archived, retained],
+    });
+    expect(state.statusFilter).toEqual(new Set(["todo"]));
+    expect(state.query).toBe("no visible matches");
+
+    await refreshWorkboard({ host, client, source: "live" });
+    expect(state.selectedCardIds.size).toBe(0);
+    expect(state.bulkDialog).toBeNull();
+  });
+
   it("reloads a previously loaded board after lifecycle teardown", async () => {
     const reopenedCard = makeCard({ title: "Reopened board" });
     const client = createSequencedClient({
@@ -2594,232 +2592,62 @@ describe("workboard controller", () => {
     ]);
   });
 
-  it("summarizes health from card metadata, linked tasks, and sessions", () => {
-    const running = createSessionCard({
-      id: "running",
-      status: "running",
-    });
-    const blocked = makeCard({ id: "blocked", status: "blocked" });
-    const ready = makeCard({ id: "ready", status: "ready" });
-    const missingProof = makeCard({ id: "done", status: "done" });
-    const artifactProof = makeCard({
-      id: "artifact-proof",
-      status: "done",
-      metadata: { artifacts: [{ id: "artifact-1", createdAt: 1, label: "log" }] },
-    });
-    const failed = makeCard({
-      id: "failed",
-      metadata: {
-        failureCount: 2,
-        attempts: [{ id: "attempt-1", status: "blocked", startedAt: 1 }],
-        stale: { detectedAt: 2, reason: "old" },
-      },
-    });
-    const recovered = makeCard({
-      id: "recovered",
-      metadata: {
-        failureCount: 0,
-        attempts: [{ id: "attempt-1", status: "failed", startedAt: 1 }],
-      },
-    });
-    const tasksByCardId = new Map<string, WorkboardTaskSummary>([
-      [
-        "ready",
-        makeTask({
-          taskId: "task-ready",
-          id: "task-ready",
-          status: "timed_out",
-        }),
-      ],
-    ]);
-
-    expect(
-      summarizeWorkboardHealth({
-        cards: [running, blocked, ready, missingProof, artifactProof, failed, recovered],
-        tasksByCardId,
-        sessions: [sampleSession],
-      }),
-    ).toEqual({
-      running: 1,
-      blocked: 1,
-      stale: 1,
-      readyUnassigned: 1,
-      missingProof: 1,
-      failedAttempts: 3,
-    });
-  });
-
-  it("does not count a terminal linked task already recorded as a failed attempt", () => {
-    const represented = makeCard({
-      id: "represented",
-      metadata: {
-        failureCount: 1,
-        attempts: [
-          {
-            id: "run-1",
-            runId: "run-1",
-            sessionKey: sampleTaskSessionKey,
-            status: "blocked",
-            startedAt: 1,
-          },
-        ],
-      },
-    });
-    const unrepresented = makeCard({
-      id: "unrepresented",
-      metadata: {
-        failureCount: 1,
-        attempts: [
-          {
-            id: "run-old",
-            runId: "run-old",
-            sessionKey: sampleTaskSessionKey,
-            status: "blocked",
-            startedAt: 1,
-          },
-        ],
-      },
-    });
-    const tasksByCardId = new Map<string, WorkboardTaskSummary>([
-      ["represented", makeTask({ status: "failed" })],
-      ["unrepresented", makeTask({ status: "failed" })],
-    ]);
-
-    expect(
-      summarizeWorkboardHealth({
-        cards: [represented, unrepresented],
-        tasksByCardId,
-        sessions: [],
-      }).failedAttempts,
-    ).toBe(3);
-  });
-
-  it("matches failed attempts by session when only one record has a run id", () => {
-    const taskRunOnly = makeCard({
-      id: "task-run-only",
-      metadata: {
-        failureCount: 1,
-        attempts: [
-          {
-            id: "attempt-task-run-only",
-            sessionKey: sampleTaskSessionKey,
-            status: "blocked",
-            startedAt: 1,
-          },
-        ],
-      },
-    });
-    const attemptRunOnly = makeCard({
-      id: "attempt-run-only",
-      metadata: {
-        failureCount: 1,
-        attempts: [
-          {
-            id: "attempt-run-only",
-            runId: "run-1",
-            sessionKey: sampleTaskSessionKey,
-            status: "blocked",
-            startedAt: 1,
-          },
-        ],
-      },
-    });
-    const tasksByCardId = new Map<string, WorkboardTaskSummary>([
-      ["task-run-only", makeTask({ status: "failed" })],
-      ["attempt-run-only", makeTask({ status: "failed", runId: undefined })],
-    ]);
-
-    expect(
-      summarizeWorkboardHealth({
-        cards: [taskRunOnly, attemptRunOnly],
-        tasksByCardId,
-        sessions: [],
-      }).failedAttempts,
-    ).toBe(2);
-  });
-
-  it("matches failed attempts to canonical default-agent task sessions", () => {
-    const card = makeCard({
-      metadata: {
-        failureCount: 1,
-        attempts: [
-          {
-            id: "canonical-attempt",
-            sessionKey: sampleTaskSessionKey,
-            status: "failed",
-            startedAt: 1,
-          },
-        ],
-      },
-    });
-    const tasksByCardId = new Map<string, WorkboardTaskSummary>([
-      [
-        card.id,
-        makeTask({
-          status: "failed",
-          childSessionKey: `agent:main:${sampleTaskSessionKey}`,
-        }),
-      ],
-    ]);
-
-    expect(
-      summarizeWorkboardHealth({
-        cards: [card],
-        tasksByCardId,
-        sessions: [],
-      }).failedAttempts,
-    ).toBe(1);
-  });
-
-  it("filters built-in Workboard view presets", () => {
-    vi.setSystemTime(new Date("2026-06-03T12:00:00Z"));
-    const now = Date.now();
+  it("combines choices within filters and intersects status with priority", () => {
     const cards = [
-      makeCard({ id: "default-agent" }),
-      makeCard({ id: "assigned", agentId: "agent-1" }),
-      makeCard({ id: "ready", status: "ready" }),
-      makeCard({ id: "review", status: "review" }),
-      makeCard({ id: "done", status: "done", completedAt: now - 60_000 }),
+      makeCard({ id: "ready-high", status: "ready", priority: "high" }),
+      makeCard({ id: "ready-low", status: "ready", priority: "low" }),
+      makeCard({ id: "review-high", status: "review", priority: "high" }),
+      makeCard({ id: "done-high", status: "done", priority: "high" }),
+    ];
+    state.statusFilter = new Set(["ready", "review"]);
+    state.priorityFilter = new Set(["high"]);
+    const params = {
+      cards,
+      filters: state,
+      tasksByCardId: new Map(),
+      sessions: [],
+      now: Date.now(),
+    };
+    expect(filterWorkboardCards(params).map((card) => card.id)).toEqual([
+      "ready-high",
+      "review-high",
+    ]);
+    state.priorityFilter.add("low");
+    expect(filterWorkboardCards(params).map((card) => card.id)).toEqual([
+      "ready-high",
+      "ready-low",
+      "review-high",
+    ]);
+  });
+
+  it("limits completed history without hiding unfinished work and combines attention filters", () => {
+    const now = Date.now();
+    const old = now - 10 * 24 * 60 * 60 * 1000;
+    const cards = [
+      makeCard({ id: "unfinished", status: "ready", updatedAt: old }),
+      makeCard({ id: "recent-done", status: "done", completedAt: now - 60_000 }),
+      makeCard({ id: "old-done", status: "done", completedAt: old }),
       makeCard({
-        id: "old-done",
+        id: "done-with-proof",
         status: "done",
-        completedAt: now - 10 * 24 * 60 * 60 * 1000,
+        completedAt: now,
+        metadata: { proof: [{ id: "proof", status: "passed", label: "Verified", createdAt: now }] },
       }),
     ];
-
-    expect(
-      filterWorkboardCardsForPreset({
-        cards,
-        preset: "default_agent",
-        tasksByCardId: new Map(),
-        sessions: [],
-        defaultAgentId: "agent-1",
-      }).map((card) => card.id),
-    ).toEqual(["default-agent", "assigned", "ready", "review", "done", "old-done"]);
-    expect(
-      filterWorkboardCardsForPreset({
-        cards,
-        preset: "ready",
-        tasksByCardId: new Map(),
-        sessions: [],
-      }).map((card) => card.id),
-    ).toEqual(["ready"]);
-    expect(
-      filterWorkboardCardsForPreset({
-        cards,
-        preset: "missing_proof",
-        tasksByCardId: new Map(),
-        sessions: [],
-      }).map((card) => card.id),
-    ).toEqual(["done", "old-done"]);
-    expect(
-      filterWorkboardCardsForPreset({
-        cards,
-        preset: "recently_done",
-        tasksByCardId: new Map(),
-        sessions: [],
-      }).map((card) => card.id),
-    ).toEqual(["done"]);
+    state.donePeriod = "week";
+    const params = { cards, filters: state, tasksByCardId: new Map(), sessions: [], now };
+    expect(filterWorkboardCards(params).map((card) => card.id)).toEqual([
+      "unfinished",
+      "recent-done",
+      "done-with-proof",
+    ]);
+    state.attentionFilter = new Set(["missingProof"]);
+    expect(filterWorkboardCards(params).map((card) => card.id)).toEqual(["recent-done"]);
+    state.donePeriod = "all";
+    expect(filterWorkboardCards(params).map((card) => card.id)).toEqual([
+      "recent-done",
+      "old-done",
+    ]);
   });
 
   it("links unassigned default-agent tasks with canonicalized session keys", async () => {
@@ -3262,403 +3090,6 @@ describe("workboard controller", () => {
     expect(state.draftOpen).toBe(false);
   });
 
-  it("captures existing sessions as linked workboard cards", async () => {
-    const session = makeSession({
-      label: "Fix login",
-      status: "done",
-      hasActiveRun: false,
-    });
-    const created = createSessionCard({
-      title: "Fix login",
-      status: "review",
-    });
-    const client = createClient((method) => {
-      if (method === "workboard.cards.list") {
-        return listResult([], ["todo", "running", "review"]);
-      }
-      if (method === "chat.history") {
-        return {
-          messages: [
-            { role: "user", content: [{ type: "text", text: "Please investigate login" }] },
-            { role: "assistant", content: [{ type: "text", text: "Found the issue." }] },
-            { role: "user", content: [{ type: "text", text: "Please fix login" }] },
-            { role: "assistant", content: [{ type: "text", text: "Implemented and tested." }] },
-          ],
-        };
-      }
-      if (method === "workboard.cards.captureSession") {
-        return { card: created };
-      }
-      return {};
-    });
-
-    const card = await captureSessionToWorkboard({ host, client: client as never, session });
-
-    expect(card).toMatchObject({ title: "Fix login", status: "review" });
-    expect(client.request).toHaveBeenNthCalledWith(1, "workboard.cards.list", {});
-    expect(client.request).toHaveBeenNthCalledWith(2, "chat.history", {
-      sessionKey: sampleSession.key,
-      limit: 40,
-      maxChars: 6000,
-    });
-    expect(client.request).toHaveBeenNthCalledWith(3, "workboard.cards.captureSession", {
-      title: "Fix login",
-      notes: [
-        `Session: ${sampleSession.key}`,
-        "",
-        "Recent user prompt: Please fix login",
-        "",
-        "Latest assistant note: Implemented and tested.",
-      ].join("\n"),
-      status: "review",
-      priority: "normal",
-      agentId: "",
-      sessionKey: sampleSession.key,
-    });
-    expect(getWorkboardState(host).cards[0]).toMatchObject({ sessionKey: sampleSession.key });
-  });
-
-  it("captures queued sessions as todo instead of running", async () => {
-    state.loaded = true;
-    const session = makeSession({ status: "queued", hasActiveRun: true });
-    const created = createSessionCard({ status: "todo" });
-    const client = createClient((method) => {
-      if (method === "chat.history") {
-        return { messages: [] };
-      }
-      if (method === "workboard.cards.captureSession") {
-        return { card: created };
-      }
-      return {};
-    });
-
-    await captureSession(client, session);
-
-    expect(client.request).toHaveBeenCalledWith(
-      "workboard.cards.captureSession",
-      expect.objectContaining({ status: "todo" }),
-    );
-  });
-
-  it("captures a session on the selected named board", async () => {
-    state.loaded = true;
-    state.boardFilter = "ops";
-    state.boards = [{ id: "ops", total: 0, active: 0, archived: 0, byStatus: {} }];
-    const created = createWorkboardCard({
-      id: "captured-ops-card",
-      sessionKey: sampleSession.key,
-      metadata: { automation: { boardId: "ops" } },
-    });
-    const client = createClient((method) => {
-      if (method === "chat.history") {
-        return { messages: [] };
-      }
-      if (method === "workboard.cards.captureSession") {
-        return { card: created };
-      }
-      return {};
-    });
-
-    await expect(captureSession(client, sampleSession)).resolves.toMatchObject({
-      id: "captured-ops-card",
-      metadata: { automation: { boardId: "ops" } },
-    });
-
-    expect(client.request).toHaveBeenCalledWith(
-      "workboard.cards.captureSession",
-      expect.objectContaining({ boardId: "ops", sessionKey: sampleSession.key }),
-    );
-    expect(state.cards).toContainEqual(created);
-  });
-
-  it("does not duplicate existing captured sessions", async () => {
-    const existing = createWorkboardCard({
-      execution: createWorkboardExecution({ sessionKey: sampleSession.key }),
-    });
-    setLoadedCard(existing);
-    const client = createClient({});
-
-    const card = await captureSession(client, sampleSession);
-
-    expect(card).toBe(existing);
-    expect(client.request).not.toHaveBeenCalled();
-  });
-
-  it("reuses an active captured session before an older archived match", async () => {
-    const archived = createSessionCard({
-      id: "archived-session-card",
-      metadata: { archivedAt: 10 },
-    });
-    const active = createSessionCard({
-      id: "active-session-card",
-    });
-    state.loaded = true;
-    state.cards = [archived, active];
-    const client = createClient({});
-
-    await expect(captureSession(client, sampleSession)).resolves.toBe(active);
-    expect(client.request).not.toHaveBeenCalled();
-    expect(state.cards).toEqual([archived, active]);
-  });
-
-  it.each([
-    { name: "reuses the newest active captured session", inFlight: false },
-    {
-      name: "returns the newest active captured session while a capture is in flight",
-      inFlight: true,
-    },
-  ])("$name", async ({ inFlight }) => {
-    const archived = createSessionCard({
-      id: "archived-newest-session-card",
-      position: 0,
-      updatedAt: 30,
-      metadata: { archivedAt: 40 },
-    });
-    const older = createSessionCard({
-      id: "older-active-session-card",
-      position: 1000,
-      updatedAt: 10,
-    });
-    const newest = createSessionCard({
-      id: "newest-active-session-card",
-      position: 2000,
-      updatedAt: 20,
-    });
-    state.loaded = true;
-    state.cards = [archived, older, newest];
-    if (inFlight) {
-      state.capturingSessionKeys.add(sampleSession.key);
-    }
-    const client = createClient({});
-
-    await expect(captureSession(client, sampleSession)).resolves.toBe(newest);
-    expect(client.request).not.toHaveBeenCalled();
-    expect(state.cards).toEqual([archived, older, newest]);
-  });
-
-  it("returns the active captured session while a duplicate capture is in flight", async () => {
-    const archived = createSessionCard({
-      id: "archived-inflight-session-card",
-      metadata: { archivedAt: 10 },
-    });
-    const active = createSessionCard({
-      id: "active-inflight-session-card",
-    });
-    state.loaded = true;
-    state.cards = [archived, active];
-    state.capturingSessionKeys.add(sampleSession.key);
-    const client = createClient({});
-
-    await expect(captureSession(client, sampleSession)).resolves.toBe(active);
-    expect(client.request).not.toHaveBeenCalled();
-    expect(state.cards).toEqual([archived, active]);
-  });
-
-  it("restores archived captured sessions instead of leaving them hidden", async () => {
-    const archived = createSessionCard({
-      metadata: { archivedAt: 10 },
-    });
-    const restored = {
-      ...archived,
-      metadata: {},
-    } satisfies WorkboardCard;
-    setLoadedCard(archived);
-    const client = createClient({
-      "workboard.cards.archive": { card: restored },
-    });
-
-    const card = await captureSession(client, sampleSession);
-
-    expect(card).toMatchObject({ id: restored.id, sessionKey: sampleSession.key });
-    expect(card?.metadata?.archivedAt).toBeUndefined();
-    expect(client.request).toHaveBeenCalledWith("workboard.cards.archive", {
-      id: archived.id,
-      archived: false,
-    });
-    expect(state.cards[0]?.metadata?.archivedAt).toBeUndefined();
-  });
-
-  it("does not start duplicate capture requests while a session is in flight", async () => {
-    state.capturingSessionKeys.add(sampleSession.key);
-    const existing = makeCard({ sessionKey: sampleSession.key });
-    state.cards = [existing];
-    const client = createClient({});
-
-    const card = await captureSession(client, sampleSession);
-
-    expect(card).toBe(existing);
-    expect(client.request).not.toHaveBeenCalled();
-  });
-
-  it("captures different sessions concurrently", async () => {
-    state.loaded = true;
-    const firstSession = makeSession({ key: "agent:main:dashboard:first" });
-    const secondSession = makeSession({ key: "agent:main:dashboard:second" });
-    const firstCard = makeCard({ id: "card-first", sessionKey: firstSession.key });
-    const secondCard = makeCard({ id: "card-second", sessionKey: secondSession.key });
-    const firstCreate = createDeferred<unknown>();
-    const client = createClient((method, params) => {
-      if (method === "chat.history") {
-        return { messages: [] };
-      }
-      if (method === "workboard.cards.captureSession") {
-        return (params as { sessionKey: string }).sessionKey === firstSession.key
-          ? firstCreate.promise
-          : { card: secondCard };
-      }
-      return {};
-    });
-
-    const firstCapture = captureSession(client, firstSession);
-    await waitForFast(() => {
-      expect(client.request).toHaveBeenCalledWith(
-        "workboard.cards.captureSession",
-        expect.objectContaining({
-          sessionKey: firstSession.key,
-        }),
-      );
-    });
-
-    await expect(
-      captureSessionToWorkboard({
-        host,
-        client: client as never,
-        session: secondSession,
-      }),
-    ).resolves.toEqual(secondCard);
-    firstCreate.resolve({ card: firstCard });
-    await expect(firstCapture).resolves.toEqual(firstCard);
-
-    expect(state.cards.map((card) => card.id).toSorted()).toEqual(["card-first", "card-second"]);
-    expect(state.capturingSessionKeys.size).toBe(0);
-  });
-
-  it("does not duplicate same-session captures waiting on the initial load", async () => {
-    const list = createDeferred<unknown>();
-    const create = createDeferred<unknown>();
-    const created = makeCard({ sessionKey: sampleSession.key });
-    const client = createClient((method) => {
-      if (method === "workboard.cards.list") {
-        return list.promise;
-      }
-      if (method === "chat.history") {
-        return { messages: [] };
-      }
-      if (method === "workboard.cards.captureSession") {
-        return create.promise;
-      }
-      return {};
-    });
-
-    const firstCapture = captureSession(client, sampleSession);
-    const secondCapture = captureSession(client, sampleSession);
-    list.resolve({ cards: [], statuses: ["todo"] });
-    await waitForFast(() => {
-      expect(client.request).toHaveBeenCalledWith(
-        "workboard.cards.captureSession",
-        expect.objectContaining({
-          sessionKey: sampleSession.key,
-        }),
-      );
-    });
-
-    expect(requestCalls(client, "workboard.cards.captureSession")).toHaveLength(1);
-    create.resolve({ card: created });
-    const captures = await Promise.all([firstCapture, secondCapture]);
-
-    expect(captures.filter(Boolean)).toEqual([created]);
-    expect(state.cards).toEqual([created]);
-    expect(state.capturingSessionKeys.size).toBe(0);
-  });
-
-  it("does not capture sessions while dispatch is active", async () => {
-    state.dispatching = true;
-    const client = createClient({});
-
-    const card = await captureSession(client, sampleSession);
-
-    expect(card).toBeNull();
-    expect(client.request).not.toHaveBeenCalled();
-  });
-
-  it("does not create capture cards when the duplicate preflight list fails", async () => {
-    const client = createClient((method) => {
-      if (method === "workboard.cards.list") {
-        throw new Error("list unavailable");
-      }
-      return {};
-    });
-
-    const card = await captureSession(client, sampleSession);
-
-    expect(card).toBeNull();
-    expect(client.request).toHaveBeenCalledOnce();
-    expect(client.request).toHaveBeenCalledWith("workboard.cards.list", {});
-  });
-
-  it("waits for an in-flight Workboard load before capturing a session", async () => {
-    const list = createDeferred<unknown>();
-    const created = makeCard({ sessionKey: sampleSession.key });
-    const client = createClient((method) => {
-      if (method === "workboard.cards.list") {
-        return list.promise;
-      }
-      if (method === "chat.history") {
-        return { messages: [] };
-      }
-      if (method === "workboard.cards.captureSession") {
-        return { card: created };
-      }
-      return {};
-    });
-
-    const loading = loadBoard(client);
-    const captured = captureSession(client, sampleSession);
-
-    await Promise.resolve();
-    expect(client.request).toHaveBeenCalledTimes(1);
-    list.resolve({ cards: [], statuses: ["todo"] });
-    await loading;
-
-    await expect(captured).resolves.toMatchObject({ sessionKey: sampleSession.key });
-    expect(client.request).toHaveBeenCalledWith(
-      "workboard.cards.captureSession",
-      expect.any(Object),
-    );
-  });
-
-  it("clamps captured session fields without splitting surrogate pairs", async () => {
-    const titlePrefix = "x".repeat(176);
-    const textPrefix = "y".repeat(696);
-    const client = createClient((method) => {
-      if (method === "workboard.cards.list") {
-        return listResult([], ["todo"]);
-      }
-      if (method === "chat.history") {
-        return {
-          messages: [{ role: "user", content: [{ type: "text", text: `${textPrefix}😀tail` }] }],
-        };
-      }
-      if (method === "workboard.cards.captureSession") {
-        return { card: makeCard({ title: `${titlePrefix}...` }) };
-      }
-      return {};
-    });
-
-    await captureSession(client, makeSession({ label: `${titlePrefix}😀tail` }));
-
-    expect(client.request).toHaveBeenNthCalledWith(
-      3,
-      "workboard.cards.captureSession",
-      expect.objectContaining({
-        title: `${titlePrefix}...`,
-        notes: [`Session: ${sampleSession.key}`, "", `Recent user prompt: ${textPrefix}...`].join(
-          "\n",
-        ),
-      }),
-    );
-  });
-
   it("links a started run after recovering its full task scan", async () => {
     const running = createLinkedCard();
     const taskList = createRejectedContinuationResponder([
@@ -3927,7 +3358,7 @@ describe("workboard controller", () => {
       taskId: "task-1",
       execution: createWorkboardExecution({
         id: "card-1:codex",
-        model: "openai/gpt-5.6-sol",
+        model: "openai/gpt-6-astra",
         sessionKey: sampleTaskSessionKey,
         runId: "run-1",
         startedAt: 10,
@@ -3948,7 +3379,7 @@ describe("workboard controller", () => {
     expect(client.request).toHaveBeenNthCalledWith(1, "workboard.cards.start", {
       id: sampleCard.id,
       provider: "openai",
-      model: "gpt-5.6-sol",
+      model: "gpt-6-astra",
     });
     expect(client.request).toHaveBeenNthCalledWith(2, "tasks.list", { limit: 500 });
     expect(state.cards).toEqual([running]);
@@ -4058,34 +3489,298 @@ describe("workboard controller", () => {
     expect(getWorkboardState(host).tasksByCardId.has("card-1")).toBe(false);
   });
 
-  it("surfaces Workboard-owned start failures without client rollback", async () => {
-    const client = createSequencedClient({
-      "workboard.cards.start": [new Error("provider unavailable")],
+  it.each([
+    {
+      name: "before another board in All",
+      boardFilter: "__all__",
+      beforeCardId: "b",
+      aPosition: 1000,
+      bPosition: 2000,
+      expected: 1500,
+    },
+    {
+      name: "at the end of All",
+      boardFilter: "__all__",
+      beforeCardId: null,
+      aPosition: 1000,
+      bPosition: 5000,
+      expected: 6000,
+    },
+    {
+      name: "within a specific board",
+      boardFilter: "a",
+      beforeCardId: "a",
+      aPosition: 2000,
+      bPosition: 1000,
+      expected: 999,
+    },
+  ])(
+    "places a dropped card $name without changing board membership",
+    async ({ boardFilter, beforeCardId, aPosition, bPosition, expected }) => {
+      const a = makeCard({
+        id: "a",
+        status: "todo",
+        position: aPosition,
+        metadata: { automation: { boardId: "a" } },
+      });
+      const b = makeCard({
+        id: "b",
+        status: "todo",
+        position: bPosition,
+        metadata: { automation: { boardId: "b" } },
+      });
+      const dragged = makeCard({
+        id: "dragged",
+        status: "todo",
+        position: 3000,
+        metadata: { automation: { boardId: "a" } },
+      });
+      state.cards = [a, b, dragged];
+      const moved = { ...dragged, position: expected };
+      const client = createClient({ "workboard.cards.move": { card: moved } });
+      await moveWorkboardCard({
+        host,
+        client,
+        cardId: dragged.id,
+        status: "todo",
+        beforeCardId,
+        boardFilter,
+      });
+      expect(client.request).toHaveBeenCalledTimes(1);
+      expect(client.request).toHaveBeenCalledWith("workboard.cards.move", {
+        id: dragged.id,
+        status: "todo",
+        position: expected,
+      });
+      expect(state.cards.find((card) => card.id === dragged.id)).toMatchObject({
+        position: expected,
+        metadata: { automation: { boardId: "a" } },
+      });
+      expect(state.cards.find((card) => card.id === a.id)).toEqual(a);
+      expect(state.cards.find((card) => card.id === b.id)).toEqual(b);
+      const visible = state.cards.filter(
+        (card) => boardFilter === "__all__" || card.metadata?.automation?.boardId === boardFilter,
+      );
+      if (beforeCardId) {
+        expect(visible.findIndex((card) => card.id === dragged.id)).toBe(
+          visible.findIndex((card) => card.id === beforeCardId) - 1,
+        );
+      } else {
+        expect(visible.at(-1)?.id).toBe(dragged.id);
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "reconciles a partially acknowledged drop with reload failure=%s",
+    async (reloadFails) => {
+      await loadWorkboard({
+        host,
+        client: createSequencedClient({
+          "workboard.cards.list": [new Error("move acknowledgment lost")],
+        }),
+      });
+      expect(state.error).toBe("move acknowledgment lost");
+      const a = makeCard({ id: "a", status: "todo", position: 0 });
+      const b = makeCard({ id: "b", status: "todo", position: 1 });
+      const c = makeCard({ id: "c", status: "todo", position: 2 });
+      const dragged = makeCard({ id: "dragged", status: "ready", position: 3000 });
+      state.cards = [a, b, c, dragged];
+      const movedC = { ...c, position: 3000 };
+      // The second move reached the server, but its acknowledgment was lost.
+      const canonicalCards = [a, { ...b, position: 2000 }, movedC, dragged];
+      const reload = createDeferred<{ cards: WorkboardCard[] }>();
+      const client = createSequencedClient({
+        "workboard.cards.update": [{ card: movedC }, new Error("move acknowledgment lost")],
+        "workboard.cards.list": [reload.promise],
+      });
+      const pending = moveWorkboardCard({
+        host,
+        client,
+        cardId: dragged.id,
+        status: "todo",
+        beforeCardId: b.id,
+        boardFilter: "__all__",
+      });
+      await waitForFast(() => expect(requestCalls(client, "workboard.cards.list")).toHaveLength(1));
+      expect(requestCalls(client, "workboard.cards.update").map(([, params]) => params)).toEqual([
+        { id: c.id, expectedUpdatedAt: c.updatedAt, patch: { position: 3000 } },
+        { id: b.id, expectedUpdatedAt: b.updatedAt, patch: { position: 2000 } },
+      ]);
+      expect(state.mutationReadiness).toBe("canonical_reload_required");
+      expect(state.busyCardIds.size).toBe(0);
+      await moveWorkboardCard({ host, client, cardId: a.id, status: "done", position: 0 });
+      expect(requestCalls(client, "workboard.cards.update")).toHaveLength(2);
+      if (reloadFails) {
+        reload.reject(new Error("canonical refresh unavailable"));
+      } else {
+        reload.resolve({ cards: canonicalCards });
+      }
+      await pending;
+      expect(state.error).toBe("move acknowledgment lost");
+      if (reloadFails) {
+        expect(state.mutationReadiness).toBe("canonical_reload_required");
+        expect(state.lastRefreshError).toBe("canonical refresh unavailable");
+        expect(state.cards.find((card) => card.id === c.id)).toEqual(movedC);
+      } else {
+        expect(state.mutationReadiness).toBe("ready");
+        expect(state.cards).toEqual(expect.arrayContaining(canonicalCards));
+        expect(state.cards.find((card) => card.id === dragged.id)?.status).toBe("ready");
+      }
+    },
+  );
+
+  it("preserves a peer completed by another client while a drop is making room", async () => {
+    const a = makeCard({ id: "a", status: "todo", position: 0 });
+    const b = makeCard({ id: "b", status: "todo", position: 1 });
+    const c = makeCard({ id: "c", status: "todo", position: 2 });
+    const dragged = makeCard({ id: "dragged", status: "ready", position: 3000 });
+    state.cards = [a, b, c, dragged];
+    const canonical = new Map(state.cards.map((card) => [card.id, card]));
+    const firstReply = createDeferred<{ card: WorkboardCard }>();
+    const client = createClient((method, params) => {
+      if (method === "workboard.cards.list") {
+        return { cards: [...canonical.values()] };
+      }
+      if (method !== "workboard.cards.move" && method !== "workboard.cards.update") {
+        return {};
+      }
+      const input = params as {
+        id: string;
+        status?: WorkboardCard["status"];
+        position?: number;
+        expectedUpdatedAt?: number;
+        patch?: Partial<WorkboardCard>;
+      };
+      const current = expectDefined(canonical.get(input.id), "stored card");
+      if (input.expectedUpdatedAt !== undefined && input.expectedUpdatedAt !== current.updatedAt) {
+        throw new GatewayRequestError({
+          code: "workboard_conflict",
+          message: "Card changed while moving.",
+          details: { type: "workboard_card_conflict", card: current },
+        });
+      }
+      const patch =
+        method === "workboard.cards.update"
+          ? input.patch
+          : { status: input.status, position: input.position };
+      const updated = { ...current, ...patch, updatedAt: current.updatedAt + 1 };
+      canonical.set(input.id, updated);
+      return input.id === c.id ? firstReply.promise : { card: updated };
     });
-
-    const sessionKey = await startSampleCard(client);
-
-    expect(sessionKey).toBeNull();
-    expect(client.request).toHaveBeenCalledOnce();
-    expect(client.request).toHaveBeenCalledWith("workboard.cards.start", { id: sampleCard.id });
-    expect(getWorkboardState(host).error).toBe("provider unavailable");
+    const pending = moveWorkboardCard({
+      host,
+      client,
+      cardId: dragged.id,
+      status: "todo",
+      beforeCardId: b.id,
+      boardFilter: "__all__",
+    });
+    await waitForFast(() => expect(canonical.get(c.id)?.position).toBe(3000));
+    // Another client completes the next peer before the first response arrives.
+    const completed = { ...b, status: "done" as const, updatedAt: b.updatedAt + 1 };
+    canonical.set(b.id, completed);
+    firstReply.resolve({ card: expectDefined(canonical.get(c.id), "first moved peer") });
+    await pending;
+    expect(canonical.get(b.id)).toEqual(completed);
+    expect(state.cards.find((card) => card.id === b.id)).toEqual(completed);
+    expect(canonical.get(dragged.id)).toEqual(dragged);
+    expect(state.mutationReadiness).toBe("ready");
+    expect(state.error).toBe("Card changed while moving.");
   });
 
-  it("moves cards through the plugin gateway method", async () => {
-    const moved = makeCard({ status: "blocked", position: 2000 });
-    const client = createClient({ "workboard.cards.move": { card: moved } });
+  it.each([false, true])(
+    "reconciles a single-request drop after a lost acknowledgment with reload failure=%s",
+    async (reloadFails) => {
+      const dragged = makeCard({ id: "dragged", status: "ready", position: 1000 });
+      const peer = makeCard({ id: "peer", status: "todo", position: 2000 });
+      state.cards = [dragged, peer];
+      state.detailCardId = dragged.id;
+      state.detailCommentBody = "  Keep this comment through recovery.  ";
+      const commentDraft = state.detailCommentBody;
+      let canonical = dragged;
+      const reload = createDeferred<{ cards: WorkboardCard[] }>();
+      const client = createClient((method) => {
+        if (method === "workboard.cards.move") {
+          canonical = { ...dragged, status: "todo", position: 1000 };
+          throw new Error("move acknowledgment lost");
+        }
+        if (method === "workboard.cards.list") {
+          return reload.promise;
+        }
+        if (method === "workboard.cards.comment") {
+          return { card: canonical };
+        }
+        return {};
+      });
+      const pending = moveWorkboardCard({
+        host,
+        client,
+        cardId: dragged.id,
+        status: "todo",
+        beforeCardId: peer.id,
+        boardFilter: "__all__",
+      });
+      await waitForFast(() => expect(requestCalls(client, "workboard.cards.list")).toHaveLength(1));
+      expect(requestCalls(client, "workboard.cards.move")).toHaveLength(1);
+      expect(requestCalls(client, "workboard.cards.update")).toHaveLength(0);
+      expect(canonical.status).toBe("todo");
+      expect(state.mutationReadiness).toBe("canonical_reload_required");
+      expect(state.busyCardIds.size).toBe(0);
+      await moveWorkboardCard({ host, client, cardId: peer.id, status: "done", position: 0 });
+      expect(requestCalls(client, "workboard.cards.move")).toHaveLength(1);
+      if (reloadFails) {
+        reload.reject(new Error("canonical refresh unavailable"));
+      } else {
+        reload.resolve({ cards: [canonical, peer] });
+      }
+      await pending;
+      expect(state.error).toBe("move acknowledgment lost");
+      expect(state.detailCommentBody).toBe(commentDraft);
+      if (reloadFails) {
+        expect(state.mutationReadiness).toBe("canonical_reload_required");
+        expect(state.lastRefreshError).toBe("canonical refresh unavailable");
+        expect(state.cards.find((card) => card.id === dragged.id)).toEqual(dragged);
+      } else {
+        expect(state.mutationReadiness).toBe("ready");
+        expect(state.cards.find((card) => card.id === dragged.id)).toEqual(canonical);
+        await addWorkboardCardComment({
+          host,
+          client,
+          cardId: dragged.id,
+          body: state.detailCommentBody,
+        });
+        expect(requestCalls(client, "workboard.cards.comment").map(([, params]) => params)).toEqual(
+          [{ id: dragged.id, body: commentDraft.trim() }],
+        );
+        expect(state.detailCommentBody).toBe("");
+      }
+    },
+  );
 
-    await moveCard(client, {
-      cardId: "card-1",
-      status: "blocked",
-      position: 2000,
-    });
-
-    expect(getWorkboardState(host).cards[0]).toMatchObject({
-      status: "blocked",
-      position: 2000,
-    });
+  it("removes an already-absent local card after an acknowledged delete", async () => {
+    state.cards = [sampleCard];
+    const client = createClient({ "workboard.cards.delete": { deleted: false } });
+    await expect(deleteCard(client, sampleCard.id)).resolves.toEqual({ deleted: false });
+    expect(state.cards).toEqual([]);
   });
+
+  it.each([false, true])(
+    "applies cleanup revisions only to matching local observations (newer=%s)",
+    async (newer) => {
+      const parent = makeCard({ id: "parent" });
+      const child = makeCard({ id: "child", updatedAt: newer ? 30 : 10 });
+      state.cards = [parent, child];
+      const client = createClient({
+        "workboard.cards.delete": {
+          deleted: true,
+          referenceUpdates: [{ id: child.id, previousUpdatedAt: 10, updatedAt: 20 }],
+        },
+      });
+      await deleteCard(client, parent.id);
+      expect(state.cards).toEqual([{ ...child, updatedAt: newer ? 30 : 20 }]);
+    },
+  );
 
   it("removes stale dependency links from local cards after delete", async () => {
     const parent = makeCard({
@@ -4118,8 +3813,10 @@ describe("workboard controller", () => {
       return { card: { ...child, status: "running", metadata: undefined } };
     });
     getWorkboardState(host).cards = [parent, child];
+    state.selectedCardIds = new Set([parent.id, child.id]);
 
     await deleteCard(client, parent.id);
+    expect(state.selectedCardIds).toEqual(new Set([child.id]));
 
     const remaining = expectDefined(getWorkboardState(host).cards[0], "remaining child card");
     expect(remaining).toMatchObject({ id: child.id });
@@ -4709,28 +4406,6 @@ describe("workboard controller", () => {
     expect(state.lifecycleTasksPrepared).toBe(true);
   });
 
-  it("does not retry a failed lifecycle task refresh before backoff", async () => {
-    const linked = createSessionCard({
-      status: "running",
-      updatedAt: 1000,
-    });
-    setLoadedCard(linked);
-    const client = createClient((method) => {
-      if (method === "tasks.list") {
-        throw new Error("tasks unavailable");
-      }
-      return {};
-    });
-
-    await syncLifecycle(client);
-    await syncLifecycle(client);
-
-    expect(requestCalls(client, "tasks.list")).toHaveLength(1);
-    expect(state.error).toBeNull();
-    expect(state.lifecycleTaskRefreshError).toBe("tasks unavailable");
-    expect(state.cards[0]?.status).toBe("running");
-  });
-
   it("stops linked sessions and marks cards blocked", async () => {
     const linked = makeCard({ sessionKey: sampleSession.key, runId: "run-1" });
     setLoadedCard(linked);
@@ -5053,8 +4728,10 @@ describe("workboard controller", () => {
       metadata: { archivedAt: 20 },
     });
     const client = createClient({ "workboard.cards.archive": { card: archived } });
+    state.selectedCardIds.add("card-1");
 
     await archiveCard(client, "card-1");
+    expect(state.selectedCardIds.size).toBe(0);
 
     expect(client.request).toHaveBeenCalledWith("workboard.cards.archive", {
       id: "card-1",

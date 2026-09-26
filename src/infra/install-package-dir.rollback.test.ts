@@ -27,12 +27,143 @@ describe("installPackageDir rollback", () => {
     await fixtureRootTracker.cleanup();
   });
 
+  async function createFixture(name: string) {
+    await fixtureRootTracker.setup();
+    const fixtureRoot = await fixtureRootTracker.make(name);
+    return { fixtureRoot, ...(await createExistingInstallFixture(fixtureRoot)) };
+  }
+
+  function updateOptions(sourceDir: string, targetDir: string) {
+    return {
+      sourceDir,
+      targetDir,
+      mode: "update" as const,
+      timeoutMs: 1_000,
+      copyErrorPrefix: "failed to copy plugin",
+      hasDeps: false,
+      depsLogMessage: "",
+    };
+  }
+
+  async function installRetainedUpdate(
+    sourceDir: string,
+    targetDir: string,
+    options: Pick<Parameters<typeof installPackageDir>[0], "sourceHardlinks"> = {},
+  ) {
+    let backupDir = "";
+    const result = await installPackageDir(
+      requestDeferredPackageDirInstall({
+        ...updateOptions(sourceDir, targetDir),
+        ...options,
+        afterBackup: async (directory: string) => {
+          backupDir = directory;
+          return { ok: true as const };
+        },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    const transaction = resolvePackageDirInstallTransaction(result);
+    if (!transaction) {
+      throw new Error("Expected a retained package transaction");
+    }
+    return { backupDir, transaction };
+  }
+
+  it("preserves the Windows EPERM backup copy fallback", async () => {
+    const { sourceDir, targetDir } = await createFixture("windows-backup-eperm");
+    let denied = false;
+    const denyInitialBackupRename = (from: fsSync.PathLike, to: fsSync.PathLike) => {
+      if (
+        !denied &&
+        normalizeComparablePath(String(from)) === normalizeComparablePath(targetDir) &&
+        path.basename(path.dirname(String(to))) === ".openclaw-install-backups"
+      ) {
+        denied = true;
+        throw Object.assign(new Error("Windows sharing violation"), { code: "EPERM" });
+      }
+    };
+    const realRename = fs.rename.bind(fs);
+    const realRenameSync = fsSync.renameSync.bind(fsSync);
+    const platform = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    const rename = vi.spyOn(fs, "rename").mockImplementation((from, to) => {
+      denyInitialBackupRename(from, to);
+      return realRename(from, to);
+    });
+    const renameSync = vi.spyOn(fsSync, "renameSync").mockImplementation((from, to) => {
+      denyInitialBackupRename(from, to);
+      return realRenameSync(from, to);
+    });
+    let result;
+    try {
+      result = await installPackageDir({
+        ...updateOptions(sourceDir, targetDir),
+        sourceHardlinks: "package-manager",
+      });
+    } finally {
+      rename.mockRestore();
+      renameSync.mockRestore();
+      platform.mockRestore();
+    }
+    expect(denied).toBe(true);
+    expect(result.ok).toBe(true);
+    expect(await fs.readFile(path.join(targetDir, "marker.txt"), "utf8")).toBe("new");
+  });
+
+  it("preserves the canonical tree when ownership closes after backup copy publication", async () => {
+    const { sourceDir, targetDir } = await createFixture("backup-copy-owner");
+    const expired = new Error("install owner expired after backup publication");
+    let ownerActive = true;
+    let revoked = false;
+    let treeAtRevocation: Record<string, string> | undefined;
+    const readTargetTree = async () => {
+      const entries = await fs.readdir(targetDir, { recursive: true, withFileTypes: true });
+      return Object.fromEntries(
+        await Promise.all(
+          entries
+            .filter((entry) => entry.isFile())
+            .map(async (entry) => {
+              const file = path.join(entry.parentPath, entry.name);
+              return [path.relative(targetDir, file), await fs.readFile(file, "utf8")];
+            }),
+        ),
+      );
+    };
+    const realRename = fs.rename.bind(fs);
+    vi.spyOn(fs, "rename").mockImplementation(async (...args: Parameters<typeof fs.rename>) => {
+      await realRename(...args);
+      if (
+        !revoked &&
+        path.basename(String(args[0])).startsWith(".fs-safe-move-") &&
+        path.basename(path.dirname(String(args[1]))) === ".openclaw-install-backups"
+      ) {
+        await fs.mkdir(targetDir, { recursive: true });
+        await fs.writeFile(path.join(targetDir, "successor.txt"), "successor-owned");
+        treeAtRevocation = await readTargetTree();
+        ownerActive = false;
+        revoked = true;
+      }
+    });
+
+    const result = await installPackageDir(
+      requestDeferredPackageDirInstall(updateOptions(sourceDir, targetDir), () => {
+        if (!ownerActive) {
+          throw expired;
+        }
+      }),
+    );
+
+    expect(revoked).toBe(true);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain(expired.message);
+    }
+    expect(await readTargetTree()).toEqual(treeAtRevocation);
+  });
+
   it.each(["install", "update"] as const)(
     "preserves a successor when an earlier %s rollback finishes delayed removal",
     async (mode) => {
-      await fixtureRootTracker.setup();
-      const fixtureRoot = await fixtureRootTracker.make("rollback-removal-owner");
-      const { sourceDir, targetDir } = await createExistingInstallFixture(fixtureRoot);
+      const { fixtureRoot, sourceDir, targetDir } = await createFixture("rollback-removal-owner");
       if (mode === "install") {
         await fs.rm(targetDir, { recursive: true });
       }
@@ -42,13 +173,8 @@ describe("installPackageDir rollback", () => {
         waitMs: 0,
       };
       const installOptions = {
-        sourceDir,
-        targetDir,
+        ...updateOptions(sourceDir, targetDir),
         mode,
-        timeoutMs: 1_000,
-        copyErrorPrefix: "failed to copy plugin",
-        hasDeps: false,
-        depsLogMessage: "",
       };
       const paused = createDeferred();
       const release = createDeferred();
@@ -142,31 +268,8 @@ describe("installPackageDir rollback", () => {
   it.each(["removal", "restoration"] as const)(
     "retains rollback progress for a retry after %s fails",
     async (failure) => {
-      await fixtureRootTracker.setup();
-      const fixtureRoot = await fixtureRootTracker.make("rollback-retry");
-      const { installBaseDir, sourceDir, targetDir } =
-        await createExistingInstallFixture(fixtureRoot);
-      let backupDir = "";
-      const result = await installPackageDir(
-        requestDeferredPackageDirInstall({
-          sourceDir,
-          targetDir,
-          mode: "update",
-          timeoutMs: 1_000,
-          copyErrorPrefix: "failed to copy plugin",
-          hasDeps: false,
-          depsLogMessage: "",
-          afterBackup: async (directory: string) => {
-            backupDir = directory;
-            return { ok: true as const };
-          },
-        }),
-      );
-      expect(result.ok).toBe(true);
-      const transaction = resolvePackageDirInstallTransaction(result);
-      if (!transaction) {
-        throw new Error("Expected a retained package transaction");
-      }
+      const { installBaseDir, sourceDir, targetDir } = await createFixture("rollback-retry");
+      const { backupDir, transaction } = await installRetainedUpdate(sourceDir, targetDir);
       const publishedIdentity = await fs.lstat(targetDir, { bigint: true });
       const ioError = Object.assign(new Error(`${failure} failed`), { code: "EIO" });
       let injected = false;
@@ -196,7 +299,15 @@ describe("installPackageDir rollback", () => {
         });
       }
 
-      await expect(transaction.rollback()).rejects.toBe(ioError);
+      const rollback = transaction.rollback();
+      if (failure === "restoration") {
+        await expect(rollback).rejects.toMatchObject({
+          cause: ioError,
+          message: expect.stringContaining(backupDir),
+        });
+      } else {
+        await expect(rollback).rejects.toBe(ioError);
+      }
       expect(await fs.readFile(path.join(backupDir, "marker.txt"), "utf8")).toBe("old");
       await transaction.rollback();
       expect(await fs.readFile(path.join(targetDir, "marker.txt"), "utf8")).toBe("old");
@@ -205,10 +316,72 @@ describe("installPackageDir rollback", () => {
     },
   );
 
+  it.each([
+    { action: "commit", sourceHardlinks: "package-manager" },
+    { action: "rollback", sourceHardlinks: "package-manager" },
+    { action: "commit", sourceHardlinks: "reject" },
+    { action: "rollback", sourceHardlinks: "reject" },
+  ] as const)(
+    "preserves a substituted $sourceHardlinks backup when $action is requested",
+    async ({ action, sourceHardlinks }) => {
+      const { fixtureRoot, sourceDir, targetDir } = await createFixture("substituted-backup");
+      const { backupDir, transaction } = await installRetainedUpdate(sourceDir, targetDir, {
+        sourceHardlinks,
+      });
+      const retainedBackup = path.join(fixtureRoot, "retained-backup");
+      await fs.rename(backupDir, retainedBackup);
+      await fs.mkdir(backupDir);
+      await fs.writeFile(path.join(backupDir, "marker.txt"), "foreign backup");
+
+      await expect(transaction[action]()).rejects.toThrow("install directory changed");
+      expect(await fs.readFile(path.join(backupDir, "marker.txt"), "utf8")).toBe("foreign backup");
+      expect(await fs.readFile(path.join(retainedBackup, "marker.txt"), "utf8")).toBe("old");
+      expect(await fs.readFile(path.join(targetDir, "marker.txt"), "utf8")).toBe("new");
+
+      await fs.rm(backupDir, { recursive: true });
+      await fs.rename(retainedBackup, backupDir);
+      await transaction[action]();
+      expect(await fs.readFile(path.join(targetDir, "marker.txt"), "utf8")).toBe(
+        action === "commit" ? "new" : "old",
+      );
+    },
+  );
+
+  it.each(["dev", "ino"] as const)(
+    "preserves the published tree when Windows reports an unknown %s during rollback",
+    async (field) => {
+      const { sourceDir, targetDir } = await createFixture("rollback-unknown-identity");
+      const { backupDir, transaction } = await installRetainedUpdate(sourceDir, targetDir, {
+        sourceHardlinks: "package-manager",
+      });
+      const realLstat = fsSync.lstatSync.bind(fsSync);
+      const platform = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+      const lstat = vi.spyOn(fsSync, "lstatSync").mockImplementation((candidate, options) => {
+        const current = realLstat(candidate, options);
+        if (
+          normalizeComparablePath(String(candidate)) === normalizeComparablePath(targetDir) &&
+          current &&
+          typeof current.dev === "bigint"
+        ) {
+          Object.defineProperty(current, field, { value: 0n });
+        }
+        return current;
+      });
+      try {
+        await expect(transaction.rollback()).rejects.toThrow("install directory changed");
+      } finally {
+        lstat.mockRestore();
+        platform.mockRestore();
+      }
+      expect(await fs.readFile(path.join(targetDir, "marker.txt"), "utf8")).toBe("new");
+      expect(await fs.readFile(path.join(backupDir, "marker.txt"), "utf8")).toBe("old");
+      await transaction.rollback();
+      expect(await fs.readFile(path.join(targetDir, "marker.txt"), "utf8")).toBe("old");
+    },
+  );
+
   it("preserves a replacement inode while the original rollback owner remains live", async () => {
-    await fixtureRootTracker.setup();
-    const fixtureRoot = await fixtureRootTracker.make("rollback-inode");
-    const { sourceDir, targetDir } = await createExistingInstallFixture(fixtureRoot);
+    const { fixtureRoot, sourceDir, targetDir } = await createFixture("rollback-inode");
     const preservedDir = path.join(fixtureRoot, "preserved-install");
     let backupDir = "";
     try {
@@ -218,13 +391,7 @@ describe("installPackageDir rollback", () => {
           const result = await installPackageDir(
             requestDeferredPackageDirInstall(
               {
-                sourceDir,
-                targetDir,
-                mode: "update",
-                timeoutMs: 1_000,
-                copyErrorPrefix: "failed to copy plugin",
-                hasDeps: false,
-                depsLogMessage: "",
+                ...updateOptions(sourceDir, targetDir),
                 afterBackup: async (directory: string) => {
                   backupDir = directory;
                   return { ok: true as const };

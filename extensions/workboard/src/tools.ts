@@ -5,12 +5,13 @@ import type { AnyAgentTool, OpenClawPluginToolContext } from "openclaw/plugin-sd
 import { safeEqualSecret } from "openclaw/plugin-sdk/security-runtime";
 import { Type } from "typebox";
 import { redactClaimToken } from "./card-redaction.js";
-import { WorkboardStore } from "./store.js";
+import type { WorkboardStore } from "./store.js";
 import {
   cardIdField,
   claimTokenField,
   createWorkboardMoveTool,
   strictObject,
+  workspaceField,
 } from "./tools-card-mutations.js";
 import { createWorkboardOrchestrationTools } from "./tools-orchestration.js";
 
@@ -168,9 +169,9 @@ const CardIdSchema = strictObject({
 
 export function createWorkboardTools(params: {
   context?: OpenClawPluginToolContext;
-  store?: WorkboardStore;
+  store: WorkboardStore;
 }): AnyAgentTool[] {
-  const store = params.store ?? WorkboardStore.openSqlite();
+  const { store } = params;
   const ownerId = contextOwner(params.context);
   const readScopedCardToolParams = async (rawParams: unknown): Promise<WorkboardToolCardParams> => {
     const input = readCardToolParams(rawParams, ownerId);
@@ -196,7 +197,7 @@ export function createWorkboardTools(params: {
     runCardMutation(rawParams, readScopedCardToolParams, mutate);
   const runClaimedCardMutation = (rawParams: unknown, mutate: WorkboardCardMutation) =>
     runCardMutation(rawParams, readClaimedCardToolParams, mutate);
-  return [
+  const tools: AnyAgentTool[] = [
     {
       name: "workboard_list",
       label: "Workboard List",
@@ -259,13 +260,7 @@ export function createWorkboardTools(params: {
         ),
         idempotencyKey: Type.Optional(Type.String({ description: "Idempotent create key." })),
         skills: Type.Optional(Type.Array(Type.String(), { description: "Suggested skills." })),
-        workspace: Type.Optional(
-          strictObject({
-            kind: Type.String({ description: "scratch, dir, or worktree." }),
-            path: Type.Optional(Type.String({ description: "Absolute dir/worktree path." })),
-            branch: Type.Optional(Type.String({ description: "Suggested branch." })),
-          }),
-        ),
+        workspace: workspaceField(),
         maxRuntimeSeconds: Type.Optional(Type.Number({ description: "Run timeout seconds." })),
         maxRetries: Type.Optional(Type.Number({ description: "Retry budget." })),
         scheduledAt: Type.Optional(Type.Number({ description: "Unix epoch milliseconds." })),
@@ -563,4 +558,9 @@ export function createWorkboardTools(params: {
       redactedCardResult,
     }),
   ];
+  for (const tool of tools) {
+    const execute = tool.execute;
+    tool.execute = (...args) => store.runOperation(() => execute(...args));
+  }
+  return tools;
 }

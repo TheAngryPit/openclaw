@@ -1,9 +1,9 @@
 // Azure Speech tests cover tts plugin behavior.
-import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
+import { withServer } from "openclaw/plugin-sdk/test-env";
 import { installPinnedHostnameTestHooks } from "openclaw/plugin-sdk/test-media-understanding";
 import { withTimeout } from "openclaw/plugin-sdk/text-utility-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createStreamingResponse } from "../test-support/streaming-error-response.js";
 import {
   azureSpeechTTS,
   inferAzureSpeechFileExtension,
@@ -14,31 +14,6 @@ import {
 
 describe("azure speech tts", () => {
   installPinnedHostnameTestHooks();
-
-  function createStreamingAudioResponse(params: {
-    chunkCount: number;
-    chunkSize: number;
-    byte: number;
-  }): { response: Response; getReadCount: () => number } {
-    let reads = 0;
-    const stream = new ReadableStream<Uint8Array>({
-      pull(controller) {
-        if (reads >= params.chunkCount) {
-          controller.close();
-          return;
-        }
-        reads += 1;
-        controller.enqueue(new Uint8Array(params.chunkSize).fill(params.byte));
-      },
-    });
-    return {
-      response: new Response(stream, {
-        status: 200,
-        headers: { "Content-Type": "audio/mpeg" },
-      }),
-      getReadCount: () => reads,
-    };
-  }
 
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -101,10 +76,11 @@ describe("azure speech tts", () => {
   });
 
   it("caps streamed audio responses instead of buffering oversized TTS output", async () => {
-    const streamed = createStreamingAudioResponse({
+    const streamed = createStreamingResponse({
       chunkCount: 20,
       chunkSize: 1024,
       byte: 121,
+      headers: { "Content-Type": "audio/mpeg" },
     });
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(streamed.response));
 
@@ -260,39 +236,31 @@ describe("azure speech tts", () => {
     const socketClosed = new Promise<boolean>((resolve) => {
       notifySocketClosed = resolve;
     });
-    const server = createServer((request, response) => {
-      request.socket.once("close", () => notifySocketClosed?.(true));
-      response.writeHead(200, { "content-type": "application/json" });
-      // Headers land, then the body never ends: only an explicit cancel closes this.
-      response.write('{"error":"still streaming');
-    });
-    await new Promise<void>((resolve) => {
-      server.listen(0, "127.0.0.1", resolve);
-    });
+    await withServer(
+      (request, response) => {
+        request.socket.once("close", () => notifySocketClosed?.(true));
+        response.writeHead(200, { "content-type": "application/json" });
+        // Headers land, then the body never ends: only an explicit cancel closes this.
+        response.write('{"error":"still streaming');
+      },
+      async (baseUrl) => {
+        await expect(
+          azureSpeechTTS({
+            text: "hello",
+            apiKey: "fixture-value",
+            endpoint: baseUrl,
+            voice: "en-US-JennyNeural",
+            lang: "en-US",
+            timeoutMs: 5_000,
+          }),
+        ).rejects.toThrow("Azure Speech TTS API error: malformed audio response");
 
-    try {
-      const { port } = server.address() as AddressInfo;
-      await expect(
-        azureSpeechTTS({
-          text: "hello",
-          apiKey: "fixture-value",
-          endpoint: `http://127.0.0.1:${port}`,
-          voice: "en-US-JennyNeural",
-          lang: "en-US",
-          timeoutMs: 5_000,
-        }),
-      ).rejects.toThrow("Azure Speech TTS API error: malformed audio response");
-
-      await expect(
-        withTimeout(socketClosed, 250, {
-          message: "Azure Speech malformed-response socket did not close",
-        }),
-      ).resolves.toBe(true);
-    } finally {
-      server.closeAllConnections();
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-      });
-    }
+        await expect(
+          withTimeout(socketClosed, 250, {
+            message: "Azure Speech malformed-response socket did not close",
+          }),
+        ).resolves.toBe(true);
+      },
+    );
   });
 });
