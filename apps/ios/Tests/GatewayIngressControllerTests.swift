@@ -612,11 +612,34 @@ struct GatewayIngressControllerTests {
         #expect(storage.deleted == [fixture.application.origin, fixture.application.origin])
         storage.deletionSucceeds = true
         if cold {
+            fixture.profileRows[0].contextPath = "/saved-gateway"
             let restarted = fixture.controller(persistence: storage.persistence)
             #expect(restarted.hasSession(stableID: fixture.stableID))
             await restarted.signOut(stableID: fixture.stableID)
             #expect(restarted.attention?.origin == fixture.application.origin)
             #expect(!restarted.hasSession(stableID: fixture.stableID))
+            let coldAttention = try #require(restarted.attention)
+            fixture.preauthenticated = false
+            let signIn = Task {
+                try await restarted.signIn(
+                    for: coldAttention,
+                    admissionCheckpoint: restarted.admissionCheckpoint())
+            }
+            defer {
+                fixture.release.continuation.finish()
+                signIn.cancel()
+            }
+            try await waitForIngress { fixture.browser.presented.count == 1 }
+            let route = try #require(fixture.requestRoutes.last)
+            #expect(route.stableID == fixture.stableID)
+            #expect(route.url.host == "gateway.example.test")
+            #expect(route.url.port == 8443)
+            #expect(route.url.path == "/saved-gateway")
+            #expect(route.tls?.required == true)
+            #expect(route.tls?.allowTOFU == false)
+            fixture.release.continuation.yield()
+            try await signIn.value
+            #expect(restarted.attention == nil)
         } else {
             try await ingress.signIn(for: attention, admissionCheckpoint: ingress.admissionCheckpoint())
             #expect(fixture.profileRows[0].accessOrigin == nil)
@@ -625,7 +648,7 @@ struct GatewayIngressControllerTests {
         #expect(storage.values[fixture.application.origin] == nil)
         #expect(storage.values[replacementOrigin] == before[replacementOrigin])
         #expect(storage.deleted.allSatisfy { $0 == fixture.application.origin })
-        #expect(fixture.browser.presented.isEmpty)
+        #expect(fixture.browser.presented.count == (cold ? 1 : 0))
     }
 
     @Test @MainActor

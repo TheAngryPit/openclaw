@@ -268,7 +268,7 @@ final class GatewayIngressController {
 
     func signIn(for attention: Attention, admissionCheckpoint: UInt64) async throws {
         guard let current = self.attention, current.id == attention.id, current.canSignIn,
-              let route = routes[GatewayStableIdentifier.Key(current.stableID)]?.route
+              let route = self.route(stableID: current.stableID, origin: current.origin)
         else {
             throw CancellationError()
         }
@@ -286,7 +286,10 @@ final class GatewayIngressController {
         if self.foregroundIntent?.application.origin == origin {
             self.cancelSignIn()
         }
-        let route = Route(url: origin.url, stableID: stableID, tls: nil)
+        let route = self.route(stableID: stableID, origin: origin) ?? Route(
+            url: origin.url,
+            stableID: stableID,
+            tls: nil)
         let retirement = self.sessions.forget(origin)
         let operationID = UUID()
         self.showAttention(
@@ -430,6 +433,55 @@ final class GatewayIngressController {
         // Capture before cancellation or presentation can publish a successor.
         pending.forEach { $0.cancel() }
         return pending
+    }
+
+    private func route(stableID: String, origin: CloudflareAccessOrigin) -> Route? {
+        let key = GatewayStableIdentifier.Key(stableID)
+        if let route = self.routes[key]?.route,
+           GatewayStableIdentifier.matches(route.stableID, stableID),
+           (try? CloudflareAccessOrigin(route.url)) == origin
+        {
+            return route
+        }
+
+        guard let profile = self.profiles().first(where: { $0.id == key }),
+              profile.accessOrigin == origin
+        else { return nil }
+
+        let host: String
+        let port: Int
+        let contextPath: String?
+        let tlsRequired: Bool
+        switch profile.kind {
+        case .manual:
+            guard let savedHost = profile.host, let savedPort = profile.port else { return nil }
+            host = savedHost
+            port = savedPort
+            contextPath = profile.contextPath
+            tlsRequired = GatewayConnectionController.manualTransportPresentation(
+                host: savedHost,
+                requestedTLS: profile.useTLS).effectiveTLS
+        case .discovered:
+            guard let savedHost = origin.url.host else { return nil }
+            host = savedHost
+            port = origin.url.port ?? 443
+            contextPath = nil
+            tlsRequired = true
+        }
+
+        let fingerprint = GatewayTLSStore.loadFingerprint(stableID: profile.stableID)
+        let tls = tlsRequired || fingerprint != nil
+            ? GatewayTLSParams(
+                required: true,
+                expectedFingerprint: fingerprint,
+                allowTOFU: false,
+                storeKey: profile.stableID)
+            : nil
+        guard let url = GatewayConnectEndpoint(
+            host: host, port: port, tls: tls?.required == true, contextPath: contextPath).websocketURL,
+            (try? CloudflareAccessOrigin(url)) == origin
+        else { return nil }
+        return Route(url: url, stableID: profile.stableID, tls: tls)
     }
 
     private func origin(stableID: String) -> CloudflareAccessOrigin? {
