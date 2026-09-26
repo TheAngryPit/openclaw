@@ -59,37 +59,6 @@ enum GatewaySettingsStore {
     private static let gatewayCustomHeadersService = "ai.openclawfoundation.app.gateway.custom-headers"
     private static let talkProviderApiKeyAccountPrefix = "provider.apiKey." // pragma: allowlist secret
 
-    struct GatewayRegistryEntry: Codable, Equatable, Identifiable, Sendable {
-        enum Kind: String, Codable, Sendable {
-            case manual
-            case discovered
-        }
-
-        var stableID: String
-        var kind: Kind
-        var name: String
-        var host: String?
-        var port: Int?
-        var useTLS: Bool
-        var contextPath: String?
-        var lastConnectedAtMs: Int?
-
-        var id: GatewayStableIdentifier.Key {
-            GatewayStableIdentifier.Key(self.stableID)
-        }
-
-        static func == (lhs: Self, rhs: Self) -> Bool {
-            GatewayStableIdentifier.matches(lhs.stableID, rhs.stableID) &&
-                lhs.kind == rhs.kind &&
-                lhs.name == rhs.name &&
-                lhs.host == rhs.host &&
-                lhs.port == rhs.port &&
-                lhs.useTLS == rhs.useTLS &&
-                lhs.contextPath == rhs.contextPath &&
-                lhs.lastConnectedAtMs == rhs.lastConnectedAtMs
-        }
-    }
-
     struct GatewayCredentialMetadata: Codable, Equatable {
         let gatewayStableID: String
         let suppressStoredDeviceAuth: Bool
