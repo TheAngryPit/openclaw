@@ -22,6 +22,30 @@ import Testing
         GatewayConnectionController(appModel: NodeAppModel(), startDiscovery: false)
     }
 
+    @MainActor
+    private func ordinaryIngress() -> (GatewayIngressController, OSAllocatedUnfairLock<Int>) {
+        let probeCalls = OSAllocatedUnfairLock(initialState: 0)
+        let ingress = GatewayIngressController(
+            persistence: .init(
+                load: { _ in nil },
+                save: { _, _ in true },
+                delete: { _ in true }),
+            requestFactory: { _ in
+                { request, _ in
+                    probeCalls.withLock { $0 += 1 }
+                    guard let url = request.url,
+                          let response = HTTPURLResponse(
+                              url: url, statusCode: 200, httpVersion: nil, headerFields: nil)
+                    else { throw URLError(.badURL) }
+                    return (Data(), response)
+                }
+            },
+            profiles: { [] },
+            saveProfileOrigin: { _, _ in true },
+            retireTransports: { _ in })
+        return (ingress, probeCalls)
+    }
+
     private func makeDiscoveredGateway(
         stableID: String,
         lanHost: String?,
@@ -363,11 +387,13 @@ import Testing
 
         let appModel = NodeAppModel()
         defer { appModel.disconnectGateway() }
+        let (ingress, probeCalls) = self.ordinaryIngress()
         let controller = GatewayConnectionController(
             appModel: appModel,
             startDiscovery: false,
             tcpReachabilityProbe: { _, _, _, _ in true },
-            tlsFingerprintProbe: { _ in .systemTrusted(fingerprint: "setup-system-trusted") })
+            tlsFingerprintProbe: { _ in .systemTrusted(fingerprint: "setup-system-trusted") },
+            ingress: ingress)
 
         let result = await controller.connectManual(
             host: link.host,
@@ -377,6 +403,7 @@ import Testing
         await self.waitUntil { appModel.activeGatewayConnectConfig != nil }
 
         #expect(result == .accepted)
+        #expect(probeCalls.withLock { $0 } > 0)
         #expect(controller.pendingTrustPrompt == nil)
         #expect(appModel.activeGatewayConnectConfig?.tls?.required == true)
         #expect(appModel.activeGatewayConnectConfig?.tls?.expectedFingerprint == nil)
@@ -401,6 +428,7 @@ import Testing
 
         let appModel = NodeAppModel()
         defer { appModel.disconnectGateway() }
+        let (ingress, probeCalls) = self.ordinaryIngress()
         let controller = GatewayConnectionController(
             appModel: appModel,
             startDiscovery: false,
@@ -412,7 +440,8 @@ import Testing
             persistTLSFingerprint: { fingerprint, stableID in
                 persistedFingerprint.withLock { $0 = (fingerprint, stableID) }
                 return true
-            })
+            },
+            ingress: ingress)
 
         let result = await controller.connectManual(
             host: link.host,
@@ -424,6 +453,7 @@ import Testing
         }
 
         #expect(result == .accepted)
+        #expect(probeCalls.withLock { $0 } > 0)
         #expect(tlsProbeCalls.withLock { $0 } == 1)
         #expect(controller.pendingTrustPrompt == nil)
         #expect(appModel.activeGatewayConnectConfig?.tls?.expectedFingerprint == fingerprint)
@@ -910,6 +940,7 @@ import Testing
         let tcpCalls = OSAllocatedUnfairLock(initialState: 0)
         let appModel = NodeAppModel()
         defer { appModel.disconnectGateway() }
+        let (ingress, probeCalls) = self.ordinaryIngress()
         let controller = GatewayConnectionController(
             appModel: appModel,
             startDiscovery: false,
@@ -919,7 +950,8 @@ import Testing
                     return $0 > 1
                 }
             },
-            tlsFingerprintProbe: { _ in .fingerprint(fingerprint) })
+            tlsFingerprintProbe: { _ in .fingerprint(fingerprint) },
+            ingress: ingress)
         var pending: GatewayConnectionController.ManualAuthOverride? = auth.manualAuthOverride
         let firstInput = GatewayConnectionController.ManualAuthOverride.currentManualInput(
             token: "edited-token",
@@ -952,13 +984,14 @@ import Testing
         #expect(retryInput.token == "edited-token")
         let accepted = await controller.retryGatewayConnection()
         #expect(accepted == .accepted)
+        await self.waitUntil { appModel.activeGatewayConnectConfig != nil }
+        #expect(probeCalls.withLock { $0 } > 0)
         // Settings did not receive this result and still owns its old value. The controller's
         // shared handoff receipt, not a view-local clear, must retire its setup credentials.
         #expect(pending != nil)
         #expect(pending?.wasHandedOff == true)
         #expect(pending?.bootstrapToken == "unconsumed-bootstrap")
         #expect(controller.pendingGatewayRetryKind == nil)
-        await self.waitUntil { appModel.activeGatewayConnectConfig != nil }
         #expect(appModel.activeGatewayConnectConfig?.token == "edited-token")
         #expect(appModel.activeGatewayConnectConfig?.bootstrapToken == "unconsumed-bootstrap")
 
