@@ -11,7 +11,7 @@ import {
 import {
   type AgentIdentityFile,
   loadAgentIdentityFromFile,
-  loadAgentIdentityFromWorkspace,
+  loadAgentIdentityFromWorkspaceAsync,
 } from "../agents/identity-file.js";
 import { DEFAULT_IDENTITY_FILENAME } from "../agents/workspace.js";
 import { formatCliCommand } from "../cli/command-format.js";
@@ -137,7 +137,7 @@ export async function agentsSetIdentityCommand(
         failAgentIdentity(formatErrorMessage(error));
       }
     } else if (workspaceDir) {
-      identityFromFile = loadAgentIdentityFromWorkspace(workspaceDir);
+      identityFromFile = await loadAgentIdentityFromWorkspaceAsync(workspaceDir);
     }
     if (!identityFromFile) {
       const targetPath =
@@ -165,6 +165,8 @@ export async function agentsSetIdentityCommand(
   const committed = await replaceConfigFile({
     ...writeSnapshot,
     sourceConfig: nextConfig,
+    // Replacing an avatar can intentionally shrink the configuration.
+    writeOptions: { ...writeSnapshot.writeOptions, allowConfigSizeDrop: true },
   });
 
   const committedEntry = expectDefined(
