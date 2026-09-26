@@ -139,6 +139,31 @@ private let preconnectTimeoutProblem = GatewayConnectionProblem(
     retryable: true,
     pauseReconnect: false)
 
+@MainActor
+private func makeTestGatewayIngressController() -> GatewayIngressController {
+    GatewayIngressController(
+        persistence: .init(
+            load: { _ in nil },
+            save: { _, _ in true },
+            delete: { _ in true }),
+        requestFactory: { _ in
+            { request, _ in
+                guard let url = request.url,
+                      let response = HTTPURLResponse(
+                          url: url,
+                          statusCode: 200,
+                          httpVersion: nil,
+                          headerFields: nil)
+                else { throw URLError(.badURL) }
+                return (Data(), response)
+            }
+        },
+        customHeaders: { _ in [:] },
+        profiles: { [] },
+        saveProfileOrigin: { _, _ in true },
+        retireTransports: { _ in })
+}
+
 private struct ControllableTLSProbe {
     let started = AsyncStream<Void>.makeStream()
     let results = AsyncStream<GatewayTLSFingerprintProbeResult>.makeStream()
@@ -155,7 +180,8 @@ private struct ControllableTLSProbe {
                     return result
                 }
                 return .failure(.certificateUnavailable)
-            })
+            },
+            ingress: makeTestGatewayIngressController())
     }
 }
 
@@ -168,7 +194,8 @@ private func makeTLSProbeController(
         appModel: appModel,
         startDiscovery: false,
         tcpReachabilityProbe: { _, _, _, _ in true },
-        tlsFingerprintProbe: { _ in .fingerprint(fingerprint) })
+        tlsFingerprintProbe: { _ in .fingerprint(fingerprint) },
+        ingress: makeTestGatewayIngressController())
 }
 
 @MainActor
@@ -1721,7 +1748,8 @@ private func waitUntil(
             persistTLSFingerprint: { _, owner in
                 persistedOwnerBytes.withLock { $0 = Array(owner.utf8) }
                 return true
-            })
+            },
+            ingress: makeTestGatewayIngressController())
 
         #expect(await controller.connectWithDiagnostics(gateway) == nil)
         #expect(controller.pendingTrustPrompt?.fingerprintSha256 == "exact-owner-fingerprint")
@@ -1784,7 +1812,10 @@ private func waitUntil(
             password: nil,
             nodeOptions: options)
         appModel.applyGatewayConnectConfig(config)
-        let controller = GatewayConnectionController(appModel: appModel, startDiscovery: false)
+        let controller = GatewayConnectionController(
+            appModel: appModel,
+            startDiscovery: false,
+            ingress: makeTestGatewayIngressController())
         let error = GatewayTLSValidationError(
             failure: GatewayTLSValidationFailure(
                 kind: .pinMismatch,
@@ -1828,7 +1859,8 @@ private func waitUntil(
                 for await _ in resetRelease.stream {
                     return
                 }
-            })
+            },
+            ingress: makeTestGatewayIngressController())
         var finishedIterator = resetFinished.stream.makeAsyncIterator()
 
         await controller.connectManual(host: host, port: 443, useTLS: true, forceReconnect: true)
@@ -1996,7 +2028,8 @@ private func waitUntil(
                         return reachableRetry && $0.count > 1
                     }
                 },
-                tlsFingerprintProbe: { _ in .fingerprint("replacement-fingerprint") })
+                tlsFingerprintProbe: { _ in .fingerprint("replacement-fingerprint") },
+                ingress: makeTestGatewayIngressController())
             #expect(saveActiveManualGateway(
                 host: "current.gateway.invalid",
                 port: 443,
@@ -2193,7 +2226,10 @@ private func waitUntil(
         ]) {
             let appModel = NodeAppModel()
             defer { appModel.disconnectGateway() }
-            let controller = GatewayConnectionController(appModel: appModel, startDiscovery: false)
+            let controller = GatewayConnectionController(
+                appModel: appModel,
+                startDiscovery: false,
+                ingress: makeTestGatewayIngressController())
 
             controller._test_triggerAutoConnect()
             #expect(controller._test_didAutoConnect())
@@ -2848,7 +2884,8 @@ private func waitUntil(
         let controller = GatewayConnectionController(
             appModel: appModel,
             startDiscovery: false,
-            forceReconnectReset: { _ in })
+            forceReconnectReset: { _ in },
+            ingress: makeTestGatewayIngressController())
 
         appModel.isGatewayPickerRequestInFlight = true
         let result = await controller.switchToGateway(stableID: targetID)

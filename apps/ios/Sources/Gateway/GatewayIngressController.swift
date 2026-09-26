@@ -287,7 +287,7 @@ final class GatewayIngressController {
             self.cancelSignIn()
         }
         let route = Route(url: origin.url, stableID: stableID, tls: nil)
-        let retirement = self.sessions.forget(origin)
+        let retirement = self.sessions.reconcileForget(origin)
         let operationID = UUID()
         self.showAttention(
             route, message: "Signing out of Cloudflare Access…", id: operationID, canSignIn: false)
@@ -341,10 +341,10 @@ final class GatewayIngressController {
         try Task.checkCancellation()
         guard try isCurrent() else { return false }
         var retirements: [CloudflareAccessOrigin: CloudflareAccessSessionStore.Retirement] = [:]
-        // Revoke last-owner admissions before draining this profile. Keep its durable
+        // Reconcile last-owner revocation before draining, reusing any current cleanup. Keep its durable
         // association until acknowledged deletion so failure remains recoverable.
         for origin in origins where !hasSibling(origin) {
-            retirements[origin] = self.sessions.forget(origin)
+            retirements[origin] = self.sessions.reconcileForget(origin)
         }
         if registrationID == nil { await self.retireRequests(profileID: key) }
         while true {

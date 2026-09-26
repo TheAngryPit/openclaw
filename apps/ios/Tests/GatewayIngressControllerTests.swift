@@ -572,9 +572,10 @@ struct GatewayIngressControllerTests {
         #expect(storage.values[replacementOrigin] == replacementBytes)
         #expect(storage.deleted == [fixture.application.origin])
         #expect(ingress.attention?.origin == fixture.application.origin)
-        #expect(!ingress.hasSession(stableID: fixture.stableID))
-        if case .success = await download.result { Issue.record("Retired media returned a result") }
         #expect(try await replacement.value == nil)
+        // Once replacement settles, lookup follows P and sees only P's preexisting grant.
+        #expect(ingress.hasSession(stableID: fixture.stableID) == replacementHasGrant)
+        if case .success = await download.result { Issue.record("Retired media returned a result") }
         #expect(storage.values[replacementOrigin] == replacementBytes)
     }
 

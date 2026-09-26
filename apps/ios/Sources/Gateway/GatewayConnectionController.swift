@@ -62,7 +62,7 @@ final class GatewayConnectionController {
         suspendedConfig: GatewayConnectConfig?)?
     @ObservationIgnored private var pendingAutoConnectTask: Task<Void, Never>?
     @ObservationIgnored var operatorFleetReconcileTask: Task<Void, Never>?
-    @ObservationIgnored private var pendingAutoConnectGeneration: UInt64?
+    private var pendingAutoConnectGeneration: UInt64?
     @ObservationIgnored private var pendingAutoConnectSuppressionGeneration: UInt64?
     @ObservationIgnored private var pendingGatewayRestoration: GatewayRestoration?
     @ObservationIgnored private var pendingForgetCleanups: [
