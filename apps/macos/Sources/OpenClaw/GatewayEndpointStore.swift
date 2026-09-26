@@ -305,7 +305,18 @@ actor GatewayEndpointStore {
            let auth = gateway["auth"] as? [String: Any],
            let token = auth["token"] as? String
         {
-            return self.resolveLocalConfigAuthString(token, env: env, serviceEnv: serviceEnv)
+            if let resolved = self.resolveLocalConfigAuthString(token, env: env, serviceEnv: serviceEnv) {
+                return resolved
+            }
+            // A non-empty local token, including an unresolved SecretRef, stays authoritative.
+            if !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return nil }
+        }
+        if let gateway = root["gateway"] as? [String: Any],
+           let remote = gateway["remote"] as? [String: Any],
+           let token = remote["token"] as? String
+        {
+            let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
         }
         return nil
     }
@@ -1022,8 +1033,16 @@ extension GatewayEndpointStore {
         }
         let configuredToken = configuredInput("token")
         let configuredPassword = configuredInput("password")
+        let remote = gateway?["remote"] as? [String: Any]
+        let hasConfiguredRemoteToken = remote?["token"].map { value in
+            guard let token = value as? String else { return true }
+            return !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        } ?? false
         // Core rejects two configured inputs without an explicit mode.
         guard !(configuredToken.configured && configuredPassword.configured) else { return nil }
+
+        // Core treats gateway.remote.token as a token candidate for local connections too.
+        if hasConfiguredRemoteToken { return "token" }
 
         let ambientToken = hasAmbientCandidate("OPENCLAW_GATEWAY_TOKEN", launchdSnapshot?.token)
         let ambientPassword = hasAmbientCandidate("OPENCLAW_GATEWAY_PASSWORD", launchdSnapshot?.password)

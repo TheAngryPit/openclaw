@@ -644,17 +644,39 @@ struct GatewayEndpointStoreTests {
             ]]],
         ]
 
-        let cases: [(root: [String: Any], token: String?, password: String?, authPresent: Bool)] = [
-            (allowedRoot, "custom-token", nil, true),
-            (deniedRoot, nil, nil, false),
-            (passwordRoot, nil, "custom-password", true), // pragma: allowlist secret
-            (trustedProxyRoot, nil, "custom-password", true), // pragma: allowlist secret
+        let remoteTokenRoot: [String: Any] = [
+            "gateway": [
+                "auth": [
+                    "password": ["source": "env", "provider": "restricted", "id": "GW_PASSWORD"],
+                ],
+                "remote": ["token": "remote-token"],
+            ],
+            "secrets": ["providers": ["restricted": [
+                "source": "env",
+                "allowlist": ["GW_PASSWORD"],
+            ]]],
+        ]
+        let remoteTokenSnapshot = self.makeLaunchAgentSnapshot(
+            env: ["GW_PASSWORD": "custom-password"], // pragma: allowlist secret
+            password: "custom-password")
+
+        let cases: [(
+            root: [String: Any],
+            token: String?,
+            password: String?,
+            authPresent: Bool,
+            launchdSnapshot: LaunchAgentPlistSnapshot)] = [
+            (allowedRoot, "custom-token", nil, true, snapshot),
+            (deniedRoot, nil, nil, false, snapshot),
+            (passwordRoot, nil, "custom-password", true, snapshot), // pragma: allowlist secret
+            (trustedProxyRoot, nil, "custom-password", true, snapshot), // pragma: allowlist secret
+            (remoteTokenRoot, "remote-token", nil, true, remoteTokenSnapshot),
         ]
         for testCase in cases {
             let config = GatewayEndpointStore._testLocalConfig(
                 root: testCase.root,
                 env: [:],
-                launchdSnapshot: snapshot)
+                launchdSnapshot: testCase.launchdSnapshot)
             #expect(config.token == testCase.token)
             #expect(config.password == testCase.password)
             let recordedAuth = OSAllocatedUnfairLock<(present: Bool, token: String?, password: String?)>(
