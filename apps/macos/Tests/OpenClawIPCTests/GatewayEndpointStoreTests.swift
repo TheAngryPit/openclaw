@@ -656,6 +656,36 @@ struct GatewayEndpointStoreTests {
                 "allowlist": ["GW_PASSWORD"],
             ]]],
         ]
+        let remotePasswordRoot: [String: Any] = [
+            "gateway": [
+                "auth": [
+                    "token": ["source": "env", "provider": "restricted", "id": "GW_TOKEN"],
+                ],
+                "remote": ["password": "remote-password"],
+            ],
+            "secrets": ["providers": ["restricted": [
+                "source": "env",
+                "allowlist": ["GW_TOKEN"],
+            ]]],
+        ]
+        let remotePasswordWithLocalPasswordRefRoot: [String: Any] = [
+            "gateway": [
+                "auth": [
+                    "password": ["source": "env", "provider": "restricted", "id": "GW_PASSWORD"],
+                ],
+                "remote": ["password": "remote-password"],
+            ],
+            "secrets": ["providers": ["restricted": [
+                "source": "env",
+                "allowlist": ["GW_PASSWORD"],
+            ]]],
+        ]
+        let trustedProxyRemotePasswordRoot: [String: Any] = [
+            "gateway": [
+                "auth": ["mode": "trusted-proxy"],
+                "remote": ["password": "remote-password"],
+            ],
+        ]
         let remoteTokenSnapshot = self.makeLaunchAgentSnapshot(
             env: ["GW_PASSWORD": "custom-password"], // pragma: allowlist secret
             password: "custom-password")
@@ -664,8 +694,15 @@ struct GatewayEndpointStoreTests {
                 "GW_PASSWORD": "custom-password", // pragma: allowlist secret
                 "OPENCLAW_GATEWAY_TOKEN": "service-token",
             ],
-            token: "service-token",
-            password: "custom-password")
+            token: "service-token")
+        let remotePasswordSnapshot = self.makeLaunchAgentSnapshot(env: ["GW_TOKEN": "custom-token"])
+        let remotePasswordWithServiceTokenSnapshot = self.makeLaunchAgentSnapshot(
+            env: [
+                "GW_PASSWORD": "custom-password", // pragma: allowlist secret
+                "OPENCLAW_GATEWAY_TOKEN": "service-token",
+            ],
+            token: "service-token")
+        let noAuthSnapshot = self.makeLaunchAgentSnapshot(env: [:])
 
         let cases: [(
             root: [String: Any],
@@ -679,6 +716,9 @@ struct GatewayEndpointStoreTests {
             (trustedProxyRoot, nil, "custom-password", true, snapshot), // pragma: allowlist secret
             (remoteTokenRoot, nil, "custom-password", true, remoteTokenSnapshot), // pragma: allowlist secret
             (remoteTokenRoot, "service-token", nil, true, serviceTokenSnapshot),
+            (remotePasswordRoot, nil, "remote-password", true, remotePasswordSnapshot), // pragma: allowlist secret
+            (remotePasswordWithLocalPasswordRefRoot, "service-token", nil, true, remotePasswordWithServiceTokenSnapshot),
+            (trustedProxyRemotePasswordRoot, nil, nil, false, noAuthSnapshot),
         ]
         for testCase in cases {
             let config = GatewayEndpointStore._testLocalConfig(
@@ -765,6 +805,45 @@ struct GatewayEndpointStoreTests {
             #expect(config.token == expectedToken)
             #expect(config.password == expectedPassword)
         }
+    }
+
+    @Test func `inferred gateway auth follows service environment over app only fallback`() {
+        let snapshot = self.makeLaunchAgentTokenSnapshot("service-token")
+        let config = GatewayEndpointStore._testLocalConfig(
+            root: [:],
+            env: ["OPENCLAW_GATEWAY_PASSWORD": "app-password"], // pragma: allowlist secret
+            launchdSnapshot: snapshot)
+
+        #expect(config.token == "service-token")
+        #expect(config.password == nil)
+    }
+
+    @Test func `inferred gateway auth masks ambient password behind unresolved local password ref`() {
+        let snapshot = self.makeLaunchAgentSnapshot(
+            env: [
+                "OPENCLAW_GATEWAY_TOKEN": "service-token",
+                "OPENCLAW_GATEWAY_PASSWORD": "service-password", // pragma: allowlist secret
+            ],
+            token: "service-token",
+            password: "service-password")
+        let root: [String: Any] = [
+            "gateway": ["auth": ["password": [
+                "source": "env",
+                "provider": "restricted",
+                "id": "MISSING_SERVICE_PASSWORD",
+            ]]],
+            "secrets": ["providers": ["restricted": [
+                "source": "env",
+                "allowlist": ["MISSING_SERVICE_PASSWORD"],
+            ]]],
+        ]
+        let config = GatewayEndpointStore._testLocalConfig(
+            root: root,
+            env: [:],
+            launchdSnapshot: snapshot)
+
+        #expect(config.token == "service-token")
+        #expect(config.password == nil)
     }
 
     @Test func `typed env secret ref stays authoritative over app environment`() {
