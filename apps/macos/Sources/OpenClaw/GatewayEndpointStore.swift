@@ -179,14 +179,13 @@ actor GatewayEndpointStore {
 
         let envVar = "OPENCLAW_GATEWAY_\(kind.rawValue.uppercased())"
         let override = env[envVar]?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
-        let configured: String?
-        if isRemote {
-            configured = switch kind {
+        let configured: String? = if isRemote {
+            switch kind {
             case .token: GatewayRemoteConfig.resolveTokenString(root: root)
             case .password: GatewayRemoteConfig.resolvePasswordString(root: root)
             }
         } else {
-            configured = (auth?[kind.rawValue] as? String).flatMap {
+            (auth?[kind.rawValue] as? String).flatMap {
                 self.resolveLocalConfigAuthString($0, env: env, serviceEnv: serviceEnv)
             }
         }
