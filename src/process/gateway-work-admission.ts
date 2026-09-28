@@ -175,7 +175,8 @@ function invalidateSuspendAdmission(): void {
   }
 }
 
-function clearRestartSignalFence(): boolean {
+/** Reopens a reversible restart-signal fence; one-way restart drain retains admission. */
+export function rollbackGatewayRestartSignalFence(): boolean {
   if (
     GATEWAY_WORK_ADMISSION_STATE.restartDraining ||
     !GATEWAY_WORK_ADMISSION_STATE.restartSignalPending
@@ -317,17 +318,9 @@ export function beginGatewayRestartSignalAdmission(): GatewayRestartSignalAdmiss
       ) {
         return false;
       }
-      return clearRestartSignalFence();
+      return rollbackGatewayRestartSignalFence();
     },
   };
-}
-
-/**
- * Reopens a reversible restart-signal fence that no longer has a live lease.
- * No-op while one-way restart drain owns admission.
- */
-export function rollbackGatewayRestartSignalFence(): boolean {
-  return clearRestartSignalFence();
 }
 
 /** Root RPC/timer admission. Nested work in the same async chain counts once. */
@@ -396,8 +389,10 @@ async function waitForGatewayWorkAdmissionChange(signal?: AbortSignal): Promise<
 /** Waits through a prepared lease, then joins the root-work set atomically. */
 export async function beginGatewayRootWorkAdmissionWhenOpen(
   origin = "gateway",
+  signal?: AbortSignal,
 ): Promise<GatewayRootWorkAdmissionLease> {
   while (true) {
+    signal?.throwIfAborted();
     if (GATEWAY_WORK_ADMISSION_STATE.restartDraining) {
       throw new GatewayDrainingError();
     }
@@ -405,7 +400,7 @@ export async function beginGatewayRootWorkAdmissionWhenOpen(
     if (admission) {
       return admission;
     }
-    await waitForGatewayWorkAdmissionChange();
+    await waitForGatewayWorkAdmissionChange(signal);
   }
 }
 

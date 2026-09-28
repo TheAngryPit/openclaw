@@ -20,8 +20,8 @@ import { createAssistantOutput } from "../transports/assistant-output.js";
 import {
   assignTransportErrorDetails,
   finalizeTerminalToolCallArguments,
+  finalizeTransportStream,
   notifyProviderHttpResponse,
-  transportAbortError,
 } from "../transports/transport-stream-shared.js";
 import type {
   AssistantMessage,
@@ -182,16 +182,7 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
       stream.push({ type: "start", partial: output });
       await consumeChatStream(model, output, stream, mistralStream, options?.signal);
 
-      if (options?.signal?.aborted) {
-        throw transportAbortError(options.signal);
-      }
-
-      if (output.stopReason === "aborted" || output.stopReason === "error") {
-        throw new Error(output.errorMessage ?? "An unknown error occurred");
-      }
-
-      stream.push({ type: "done", reason: output.stopReason, message: output });
-      stream.end();
+      finalizeTransportStream({ stream, output, signal: options?.signal });
     } catch (error) {
       const terminal = assignTransportErrorDetails(output, error, options?.signal);
       // Failed or canceled generations must never retain partially repaired tool calls.
@@ -401,6 +392,17 @@ async function consumeChatStream(
   const intersectCandidates = (left: Set<number>, right: Set<number>): Set<number> =>
     new Set([...left].filter((contentIndex) => right.has(contentIndex)));
 
+  const filterIdentityCandidates = (
+    candidates: Set<number>,
+    matches: (identity: ToolBlockIdentity) => boolean,
+  ): Set<number> =>
+    new Set(
+      [...candidates].filter((contentIndex) => {
+        const identity = toolBlockIdentities.get(contentIndex);
+        return identity !== undefined && matches(identity);
+      }),
+    );
+
   const requireSingleCandidate = (candidates: Set<number>): number | undefined => {
     if (candidates.size > 1) {
       throw new Error(
@@ -450,14 +452,9 @@ async function consumeChatStream(
     }
 
     if (nameCandidates.size > 0) {
-      const idCompatibleCandidates = new Set(
-        [...nameCandidates].filter((contentIndex) => {
-          const identity = toolBlockIdentities.get(contentIndex);
-          if (!identity) {
-            return false;
-          }
-          return !explicitId || identity.explicitIds.size === 0;
-        }),
+      const idCompatibleCandidates = filterIdentityCandidates(
+        nameCandidates,
+        (identity) => !explicitId || identity.explicitIds.size === 0,
       );
       if (
         idCompatibleCandidates.size <= 1 &&
@@ -468,22 +465,13 @@ async function consumeChatStream(
         // different call even when the provider repeats a function name.
         return requireSingleCandidate(idCompatibleCandidates);
       }
-      const indexCompatibleCandidates = new Set(
-        [...idCompatibleCandidates].filter((contentIndex) => {
-          const identity = toolBlockIdentities.get(contentIndex);
-          if (!identity) {
-            return false;
-          }
-          return (
-            toolCallIndex === undefined ||
-            identity.indexes.size === 0 ||
-            identity.indexes.has(toolCallIndex)
-          );
-        }),
+      const indexCompatibleCandidates = filterIdentityCandidates(
+        idCompatibleCandidates,
+        (identity) =>
+          toolCallIndex === undefined ||
+          identity.indexes.size === 0 ||
+          identity.indexes.has(toolCallIndex),
       );
-      if (indexCompatibleCandidates.size === 0) {
-        return undefined;
-      }
       return requireSingleCandidate(indexCompatibleCandidates);
     }
 
@@ -499,13 +487,10 @@ async function consumeChatStream(
       // A new name normally starts a sibling call even when the SDK's omitted
       // index default aliases an earlier block. It is a continuation only when
       // one nameless block can safely adopt the name.
-      const namelessCandidates = new Set(
-        [...indexCandidates].filter((contentIndex) => {
-          const identity = toolBlockIdentities.get(contentIndex);
-          return (
-            identity?.functionNames.size === 0 && (!explicitId || identity.explicitIds.size === 0)
-          );
-        }),
+      const namelessCandidates = filterIdentityCandidates(
+        indexCandidates,
+        (identity) =>
+          identity.functionNames.size === 0 && (!explicitId || identity.explicitIds.size === 0),
       );
       return requireSingleCandidate(namelessCandidates);
     }
@@ -513,10 +498,9 @@ async function consumeChatStream(
     if (explicitId) {
       // A provider id may arrive after an idless opening fragment. Adopt it
       // only when one indexed block still lacks an explicit id.
-      const idlessCandidates = new Set(
-        [...indexCandidates].filter(
-          (contentIndex) => toolBlockIdentities.get(contentIndex)?.explicitIds.size === 0,
-        ),
+      const idlessCandidates = filterIdentityCandidates(
+        indexCandidates,
+        (identity) => identity.explicitIds.size === 0,
       );
       return requireSingleCandidate(idlessCandidates);
     }

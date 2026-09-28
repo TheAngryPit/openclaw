@@ -102,10 +102,32 @@ function renderReceiptCodes(values: readonly string[], emptyCopy: string) {
       </ul>`;
 }
 
+export function renderRunInspectorPagination(
+  kind: "candidates" | "decisions",
+  status: "loading" | "error" | undefined,
+  onLoad: () => void,
+) {
+  return html`<div class="run-inspector__pagination">
+    <span>${t(`activity.runInspector.${kind}.more`)}</span>
+    <button type="button" class="btn" ?disabled=${status === "loading"} @click=${onLoad}>
+      ${t(`activity.runInspector.${kind}.${status === "loading" ? "loadingMore" : "loadMore"}`)}
+    </button>
+    ${
+      status === "error"
+        ? html`<span role="alert">${t(`activity.runInspector.${kind}.loadMoreError`)}</span>`
+        : nothing
+    }
+  </div>`;
+}
+
 function renderReceiptDetail(receipt: DecisionReceiptDisplayV1) {
   const coverage = receipt.enforcement.coverageState;
   return html`
-    <article class="run-inspector__receipt-detail" aria-labelledby="run-inspector-receipt-detail">
+    <article
+      class="run-inspector__receipt-detail"
+      data-receipt-selector-id=${receipt.selectorId}
+      aria-labelledby="run-inspector-receipt-detail"
+    >
       <h4 id="run-inspector-receipt-detail">
         ${t("activity.runInspector.decisions.detailHeading")}
       </h4>
@@ -294,28 +316,7 @@ export function renderRunInspectorDecisions(
       }
       ${
         result.nextDecisionCursor
-          ? html`<div class="run-inspector__pagination">
-              <span>${t("activity.runInspector.decisions.more")}</span>
-              <button
-                type="button"
-                class="btn"
-                ?disabled=${state.decisionPageStatus === "loading"}
-                @click=${onLoadMoreDecisions}
-              >
-                ${
-                  state.decisionPageStatus === "loading"
-                    ? t("activity.runInspector.decisions.loadingMore")
-                    : t("activity.runInspector.decisions.loadMore")
-                }
-              </button>
-              ${
-                state.decisionPageStatus === "error"
-                  ? html`<span role="alert">
-                      ${t("activity.runInspector.decisions.loadMoreError")}
-                    </span>`
-                  : nothing
-              }
-            </div>`
+          ? renderRunInspectorPagination("decisions", state.decisionPageStatus, onLoadMoreDecisions)
           : html`<div class="run-inspector__pagination" role="note">
               ${t("activity.runInspector.decisions.bounded")}
             </div>`
