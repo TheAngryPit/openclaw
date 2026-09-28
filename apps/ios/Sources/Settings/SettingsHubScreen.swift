@@ -206,7 +206,7 @@ struct EmbeddedDashboardContent: View {
         let config = self.config
         let url = self.url
         let nativeAuthProvider = IOSDashboardNativeGatewayAuthProvider(appModel: self.appModel, config: self.config)
-        AuthenticatedControlUIWebView(
+        return AuthenticatedControlUIWebView(
             url: url,
             authScript: AuthenticatedControlUI.authUserScript(
                 config: config,
