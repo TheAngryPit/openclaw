@@ -4041,14 +4041,16 @@ extension NodeAppModel {
             token: token,
             bootstrapToken: bootstrapToken,
             password: password,
-            hasStoredOperatorToken: canUseStoredOperatorAuth && storedOperatorAuth != nil)
+            hasStoredOperatorToken: canUseStoredOperatorAuth && storedOperatorAuth != nil,
+            hasVerifiedIngressPrincipal: ingressPrincipal != nil)
     }
 
     nonisolated static func shouldStartOperatorGatewayLoop(
         token: String?,
         bootstrapToken: String?,
         password: String?,
-        hasStoredOperatorToken: Bool) -> Bool
+        hasStoredOperatorToken: Bool,
+        hasVerifiedIngressPrincipal: Bool = false) -> Bool
     {
         let trimmedToken = token?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !trimmedToken.isEmpty {
@@ -4062,7 +4064,7 @@ extension NodeAppModel {
         if !trimmedBootstrapToken.isEmpty {
             return false
         }
-        return hasStoredOperatorToken
+        return hasStoredOperatorToken || hasVerifiedIngressPrincipal
     }
 
     private func currentGatewayReconnectAuth(
