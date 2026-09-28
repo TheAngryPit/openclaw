@@ -39,11 +39,11 @@ enum ControlUIHubPage {
     }
 
     @MainActor
-    func authUserScript(config: GatewayConnectConfig?, storedOperatorToken: String?) -> String? {
+    func authUserScript(config: GatewayConnectConfig?, legacyCredentials: [String: String]? = nil) -> String? {
         AuthenticatedControlUI.authUserScript(
             config: config,
             pageURL: self.url(config: config),
-            storedOperatorToken: storedOperatorToken)
+            legacyCredentials: legacyCredentials)
     }
 
     func webContentIdentity(config: GatewayConnectConfig?, storedOperatorToken: String?) -> Int {
@@ -85,13 +85,19 @@ struct ControlUIHubScreen: View {
     var body: some View {
         let config = self.appModel.activeGatewayConnectConfig
         let storedOperatorToken = AuthenticatedControlUI.storedOperatorToken(config: config)
+        let nativeAuthProvider = IOSDashboardNativeGatewayAuthProvider(appModel: self.appModel, config: config)
         ZStack {
             OpenClawProBackground()
             if let url = self.page.url(config: config) {
                 AuthenticatedControlUIWebView(
                     url: url,
-                    authScript: self.page.authUserScript(config: config, storedOperatorToken: storedOperatorToken),
-                    tls: config?.tls)
+                    authScript: self.page.authUserScript(config: config),
+                    tls: config?.tls,
+                    authScriptProvider: {
+                        let credentials = await nativeAuthProvider?.legacyCredentials()
+                        return self.page.authUserScript(config: config, legacyCredentials: credentials)
+                    },
+                    nativeGatewayAuthProvider: nativeAuthProvider)
                     // Unrelated SwiftUI updates must not reload a live desktop or shell.
                         .id(self.page.webContentIdentity(config: config, storedOperatorToken: storedOperatorToken))
                         .ignoresSafeArea(.container, edges: .bottom)

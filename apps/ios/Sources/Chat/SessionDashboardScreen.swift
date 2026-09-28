@@ -12,6 +12,7 @@ struct SessionDashboardScreen: View {
     var body: some View {
         let config = self.appModel.activeGatewayConnectConfig
         let storedOperatorToken = AuthenticatedControlUI.storedOperatorToken(config: config)
+        let nativeAuthProvider = IOSDashboardNativeGatewayAuthProvider(appModel: self.appModel, config: config)
         ZStack {
             OpenClawProBackground()
             if let url = Self.dashboardURL(
@@ -24,9 +25,17 @@ struct SessionDashboardScreen: View {
                     authScript: AuthenticatedControlUI.authUserScript(
                         config: config,
                         pageURL: url,
-                        storedOperatorToken: storedOperatorToken,
                         usesNativeNavigationChrome: true),
                     tls: config?.tls,
+                    authScriptProvider: {
+                        let credentials = await nativeAuthProvider?.legacyCredentials()
+                        return AuthenticatedControlUI.authUserScript(
+                            config: config,
+                            pageURL: url,
+                            legacyCredentials: credentials,
+                            usesNativeNavigationChrome: true)
+                    },
+                    nativeGatewayAuthProvider: nativeAuthProvider,
                     allowedMainFramePathPrefix: Self.dashboardPathPrefix(config: config),
                     onMainFrameNavigationOutsideScope: {
                         self.dismiss()

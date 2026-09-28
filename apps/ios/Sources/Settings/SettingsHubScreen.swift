@@ -175,7 +175,6 @@ struct EmbeddedDashboardContent: View {
                         self.accessUnavailable
                     } else {
                         self.dashboardWebView(
-                            storedOperatorToken: storedOperatorToken,
                             accessCookie: cookie,
                             authorization: authorization,
                             webContentIdentity: webContentIdentity,
@@ -188,7 +187,6 @@ struct EmbeddedDashboardContent: View {
                 }
             } else {
                 self.dashboardWebView(
-                    storedOperatorToken: storedOperatorToken,
                     accessCookie: nil,
                     authorization: nil,
                     webContentIdentity: webContentIdentity)
@@ -198,20 +196,30 @@ struct EmbeddedDashboardContent: View {
 
     @MainActor
     private func dashboardWebView(
-        storedOperatorToken: String?,
         accessCookie: HTTPCookie?,
         authorization: GatewayIngressAuthorization?,
         webContentIdentity: Int,
         onAccessCookieBoundaryFailure: (@MainActor () -> Void)? = nil) -> some View
     {
+        let config = self.config
+        let url = self.url
+        let nativeAuthProvider = IOSDashboardNativeGatewayAuthProvider(appModel: self.appModel, config: self.config)
         AuthenticatedControlUIWebView(
-            url: self.url,
+            url: url,
             authScript: AuthenticatedControlUI.authUserScript(
-                config: self.config,
-                pageURL: self.url,
-                storedOperatorToken: storedOperatorToken,
+                config: config,
+                pageURL: url,
                 usesNativeNavigationChrome: true),
-            tls: self.config?.tls,
+            tls: config?.tls,
+            authScriptProvider: {
+                let credentials = await nativeAuthProvider?.legacyCredentials()
+                return AuthenticatedControlUI.authUserScript(
+                    config: config,
+                    pageURL: url,
+                    legacyCredentials: credentials,
+                    usesNativeNavigationChrome: true)
+            },
+            nativeGatewayAuthProvider: nativeAuthProvider,
             deviceSettingsBridge: self.bridge,
             usesNativeEmbed: true,
             embedCompatibility: self.embedCompatibility,

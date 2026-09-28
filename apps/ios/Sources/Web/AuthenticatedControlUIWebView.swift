@@ -56,84 +56,32 @@ enum AuthenticatedControlUI {
     static func authUserScript(
         config: GatewayConnectConfig?,
         pageURL: URL?,
-        storedOperatorToken: String?,
+        legacyCredentials: [String: String]? = nil,
         usesNativeNavigationChrome: Bool = false) -> String?
     {
         guard let config, let pageURL else { return nil }
-        var payload: [String: Any] = ["gatewayUrl": config.url.absoluteString]
-        let token = config.token?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let storedToken = storedOperatorToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let password = config.password?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let storedAuthorization = Self.storedOperatorAuthorization(
-            config: config,
-            expectedToken: storedToken)
-        let shouldClearStaleOperatorAuth = config.ingressAuthorization?.principal != nil &&
-            storedAuthorization == nil
-        if let storedAuthorization {
-            payload["client"] = [
-                "id": config.nodeOptions.clientId,
-                "mode": "ui",
-                "platform": InstanceIdentity.platformString,
-                "deviceFamily": InstanceIdentity.deviceFamily,
-                "instanceId": InstanceIdentity.instanceId,
-                "scopes": storedAuthorization.entry.scopes,
-            ]
-        }
-        if !token.isEmpty {
+        var payload: [String: Any] = [
+            "gatewayUrl": config.url.absoluteString,
+            "nativeConnectAuth": true,
+        ]
+        if let token = legacyCredentials?["token"]?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
             payload["token"] = token
-        } else if storedAuthorization == nil,
-                  !shouldClearStaleOperatorAuth,
-                  !storedToken.isEmpty
+        }
+        if let password = legacyCredentials?["password"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !password.isEmpty
         {
-            payload["token"] = storedToken
-        }
-        if !password.isEmpty {
             payload["password"] = password
-        }
-        guard payload["token"] != nil || payload["password"] != nil ||
-            storedAuthorization != nil || shouldClearStaleOperatorAuth
-        else {
-            return nil
         }
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
               let json = String(data: data, encoding: .utf8)
         else {
             return nil
         }
-        let deviceAuthSeed = storedAuthorization.flatMap { Self.deviceAuthSeed(
-            gatewayURL: config.url,
-            authorization: $0)
-        } ?? "null"
         let allowedOrigin = Self.jsStringLiteral(Self.originString(for: pageURL))
         return """
         (() => {
           try {
             if (location.origin !== \(allowedOrigin)) return;
-            const deviceAuthSeed = \(deviceAuthSeed);
-            if (deviceAuthSeed) {
-              const gateway = new URL(deviceAuthSeed.gatewayUrl, location.href);
-              gateway.hash = "";
-              const path = gateway.pathname === "/"
-                ? ""
-                : gateway.pathname.replace(/\\/+$/, "") || gateway.pathname;
-              const scope = `${gateway.protocol}//${gateway.host}${path}${gateway.search}`;
-              localStorage.setItem(
-                "openclaw-device-identity-v1",
-                JSON.stringify(deviceAuthSeed.identity));
-              localStorage.setItem(
-                `openclaw.device.auth.v1:${scope}`,
-                JSON.stringify(deviceAuthSeed.authorization));
-              localStorage.removeItem("openclaw.device.auth.v1");
-            } else if (\(shouldClearStaleOperatorAuth)) {
-              const gateway = new URL(\(Self.jsStringLiteral(config.url.absoluteString)), location.href);
-              gateway.hash = "";
-              const path = gateway.pathname === "/"
-                ? ""
-                : gateway.pathname.replace(/\\/+$/, "") || gateway.pathname;
-              const scope = `${gateway.protocol}//${gateway.host}${path}${gateway.search}`;
-              localStorage.removeItem(`openclaw.device.auth.v1:${scope}`);
-              localStorage.removeItem("openclaw.device.auth.v1");
-            }
             if (\(usesNativeNavigationChrome)) {
               Object.defineProperty(window, "__OPENCLAW_NATIVE_WEB_CHROME__", {
                 value: true,
@@ -223,47 +171,6 @@ enum AuthenticatedControlUI {
             return nil
         }
         return StoredOperatorAuthorization(identity: identity, entry: entry)
-    }
-
-    private static func deviceAuthSeed(
-        gatewayURL: URL,
-        authorization: StoredOperatorAuthorization) -> String?
-    {
-        guard let publicKey = base64URL(authorization.identity.publicKey),
-              let privateKey = base64URL(authorization.identity.privateKey)
-        else { return nil }
-        let identity: [String: Any] = [
-            "version": 1,
-            "deviceId": authorization.identity.deviceId,
-            "publicKey": publicKey,
-            "privateKey": privateKey,
-            "createdAtMs": authorization.identity.createdAtMs,
-        ]
-        let entry: [String: Any] = [
-            "token": authorization.entry.token,
-            "role": "operator",
-            "scopes": authorization.entry.scopes,
-            "updatedAtMs": authorization.entry.updatedAtMs,
-        ]
-        let seed: [String: Any] = [
-            "gatewayUrl": gatewayURL.absoluteString,
-            "identity": identity,
-            "authorization": [
-                "version": 1,
-                "deviceId": authorization.identity.deviceId,
-                "tokens": ["operator": entry],
-            ],
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: seed) else { return nil }
-        return String(data: data, encoding: .utf8)
-    }
-
-    private static func base64URL(_ value: String) -> String? {
-        guard let data = Data(base64Encoded: value) else { return nil }
-        return data.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
     }
 
     private static func pagePath(basePath rawPath: String, path: String) -> String {
@@ -426,10 +333,12 @@ final class DashboardEmbedCompatibility {
 @MainActor
 final class AuthenticatedControlUIWebViewCoordinator: NSObject, WKNavigationDelegate {
     let deviceSettingsBridge: IOSDeviceSettingsBridge?
+    let nativeAuthDocument: IOSDashboardNativeGatewayAuthDocument
     private let embedCompatibility: DashboardEmbedCompatibility?
     private var compatibilityDocumentID: UUID?
     private let url: URL
-    private let authScript: String?
+    private var authScript: String?
+    private let authScriptProvider: (@MainActor () async -> String?)?
     private let usesNativeEmbed: Bool
     private let expectedOrigin: GatewayTLSAuthority?
     private let allowedMainFramePathPrefix: String?
@@ -449,6 +358,8 @@ final class AuthenticatedControlUIWebViewCoordinator: NSObject, WKNavigationDele
         allowedMainFramePathPrefix: String? = nil,
         onMainFrameNavigationOutsideScope: (() -> Void)? = nil,
         authScript: String? = nil,
+        authScriptProvider: (@MainActor () async -> String?)? = nil,
+        nativeGatewayAuthProvider: IOSDashboardNativeGatewayAuthProvider? = nil,
         deviceSettingsBridge: IOSDeviceSettingsBridge? = nil,
         usesNativeEmbed: Bool = false,
         embedCompatibility: DashboardEmbedCompatibility? = nil,
@@ -459,6 +370,12 @@ final class AuthenticatedControlUIWebViewCoordinator: NSObject, WKNavigationDele
     {
         self.url = url
         self.authScript = authScript
+        self.authScriptProvider = authScriptProvider
+        self.nativeAuthDocument = IOSDashboardNativeGatewayAuthDocument(
+            url: url,
+            allowedMainFramePathPrefix: allowedMainFramePathPrefix,
+            provider: nativeGatewayAuthProvider,
+            accessAdmissionIsCurrent: accessAdmissionIsCurrent)
         self.deviceSettingsBridge = deviceSettingsBridge
         self.usesNativeEmbed = usesNativeEmbed
         self.embedCompatibility = embedCompatibility
@@ -484,6 +401,7 @@ final class AuthenticatedControlUIWebViewCoordinator: NSObject, WKNavigationDele
     func retireAccess(in webView: WKWebView) {
         guard self.accessCookie != nil, !self.hasRetiredAccess else { return }
         self.hasRetiredAccess = true
+        self.nativeAuthDocument.retire()
         self.activeNavigation = nil
         self.retireEmbedCompatibility()
         webView.navigationDelegate = nil
@@ -514,6 +432,27 @@ final class AuthenticatedControlUIWebViewCoordinator: NSObject, WKNavigationDele
         }
     }
 
+    func prepareInitialLoad() async -> Bool {
+        guard self.isAccessAdmissionCurrent() else { return false }
+        if let authScriptProvider {
+            self.authScript = await authScriptProvider()
+            guard self.isAccessAdmissionCurrent() else { return false }
+            // The released Dashboard reads startup auth during document start.
+            // Replace this script before loading; never patch credentials afterward.
+            if let webView = self.nativeAuthWebView {
+                self.installUserScripts(in: webView.configuration.userContentController)
+            }
+        }
+        return self.isAccessAdmissionCurrent()
+    }
+
+    private weak var nativeAuthWebView: WKWebView?
+
+    func attachNativeAuthDocument(to webView: WKWebView) {
+        self.nativeAuthWebView = webView
+        self.nativeAuthDocument.attach(to: webView)
+    }
+
     static func embedScript(url: URL, isPad: Bool = UIDevice.current.userInterfaceIdiom == .pad) -> String? {
         let formFactor = isPad ? "pad" : "phone"
         return IOSDeviceSettingsBridge.originGatedScript(
@@ -522,12 +461,14 @@ final class AuthenticatedControlUIWebViewCoordinator: NSObject, WKNavigationDele
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         self.activeNavigation = navigation
+        self.nativeAuthDocument.beginNavigation()
         self.deviceSettingsBridge?.willNavigate(in: webView)
         self.installUserScripts(in: webView.configuration.userContentController)
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         guard self.activeNavigation === navigation else { return }
+        self.nativeAuthDocument.beginNavigation()
         // WebKit retains the previous committed page when a provisional navigation fails.
         self.compatibilityDocumentID = self.embedCompatibility?.beginDocument()
         self.deviceSettingsBridge?.didCommitDocument(in: webView)
@@ -546,11 +487,13 @@ final class AuthenticatedControlUIWebViewCoordinator: NSObject, WKNavigationDele
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError _: any Error) {
         guard self.activeNavigation === navigation else { return }
+        self.nativeAuthDocument.beginNavigation()
         self.deviceSettingsBridge?.didFailProvisionalNavigation(in: webView)
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         self.activeNavigation = nil
+        self.nativeAuthDocument.beginNavigation()
         self.retireEmbedCompatibility()
         self.deviceSettingsBridge?.retireDocument(in: webView)
     }
@@ -700,7 +643,9 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
 
     let url: URL
     let authScript: String?
+    let authScriptProvider: (@MainActor () async -> String?)?
     let tls: GatewayTLSParams?
+    let nativeGatewayAuthProvider: IOSDashboardNativeGatewayAuthProvider?
     let allowedMainFramePathPrefix: String?
     let onMainFrameNavigationOutsideScope: (() -> Void)?
     let deviceSettingsBridge: IOSDeviceSettingsBridge?
@@ -715,6 +660,8 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
         url: URL,
         authScript: String?,
         tls: GatewayTLSParams?,
+        authScriptProvider: (@MainActor () async -> String?)? = nil,
+        nativeGatewayAuthProvider: IOSDashboardNativeGatewayAuthProvider? = nil,
         allowedMainFramePathPrefix: String? = nil,
         onMainFrameNavigationOutsideScope: (() -> Void)? = nil,
         deviceSettingsBridge: IOSDeviceSettingsBridge? = nil,
@@ -727,7 +674,9 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
     {
         self.url = url
         self.authScript = authScript
+        self.authScriptProvider = authScriptProvider
         self.tls = tls
+        self.nativeGatewayAuthProvider = nativeGatewayAuthProvider
         self.allowedMainFramePathPrefix = allowedMainFramePathPrefix
         self.onMainFrameNavigationOutsideScope = onMainFrameNavigationOutsideScope
         self.deviceSettingsBridge = deviceSettingsBridge
@@ -746,6 +695,8 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
             allowedMainFramePathPrefix: self.allowedMainFramePathPrefix,
             onMainFrameNavigationOutsideScope: self.onMainFrameNavigationOutsideScope,
             authScript: self.authScript,
+            authScriptProvider: self.authScriptProvider,
+            nativeGatewayAuthProvider: self.nativeGatewayAuthProvider,
             deviceSettingsBridge: self.deviceSettingsBridge,
             usesNativeEmbed: self.usesNativeEmbed,
             embedCompatibility: self.embedCompatibility,
@@ -761,12 +712,17 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         context.coordinator.installUserScripts(in: configuration.userContentController)
+        configuration.userContentController.addScriptMessageHandler(
+            context.coordinator.nativeAuthDocument,
+            contentWorld: .page,
+            name: IOSDashboardNativeGatewayAuthDocument.messageHandlerName)
         if let deviceSettingsBridge {
             configuration.userContentController.addScriptMessageHandler(
                 deviceSettingsBridge, contentWorld: .page, name: IOSDeviceSettingsBridge.messageHandlerName)
         }
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
+        context.coordinator.attachNativeAuthDocument(to: webView)
         self.deviceSettingsBridge?.attach(to: webView) { [weak coordinator = context.coordinator, weak webView] in
             guard let coordinator, let webView else { return }
             coordinator.installUserScripts(in: webView.configuration.userContentController)
@@ -787,48 +743,51 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
         scrollView.automaticallyAdjustsScrollIndicatorInsets = false
 
         let request = URLRequest(url: self.url, cachePolicy: .reloadIgnoringLocalCacheData)
-        if let accessCookie = self.accessCookie {
+        Task { @MainActor [weak webView, weak coordinator = context.coordinator] in
+            guard let webView, let coordinator else { return }
+            guard await coordinator.prepareInitialLoad() else {
+                coordinator.retireAccess(in: webView)
+                return
+            }
+            guard let accessCookie = self.accessCookie else {
+                _ = webView.load(request)
+                return
+            }
             let cookieStore = configuration.websiteDataStore.httpCookieStore
-            Task { @MainActor [weak webView, weak coordinator = context.coordinator] in
-                guard let webView, let coordinator else { return }
+            guard let rules = AuthenticatedControlUIAccessCookieBoundary.rules(for: self.url) else {
+                coordinator.failAccessCookieBoundary(in: webView)
+                return
+            }
+            do {
+                guard let rule = try await WKContentRuleListStore.default().compileContentRuleList(
+                    forIdentifier: "openclaw.gateway-cookie-origin",
+                    encodedContentRuleList: rules)
+                else {
+                    coordinator.failAccessCookieBoundary(in: webView)
+                    return
+                }
                 guard coordinator.isAccessAdmissionCurrent() else {
                     coordinator.retireAccess(in: webView)
                     return
                 }
-                guard let rules = AuthenticatedControlUIAccessCookieBoundary.rules(for: self.url) else {
-                    coordinator.failAccessCookieBoundary(in: webView)
-                    return
-                }
-                do {
-                    guard let rule = try await WKContentRuleListStore.default().compileContentRuleList(
-                        forIdentifier: "openclaw.gateway-cookie-origin",
-                        encodedContentRuleList: rules)
-                    else {
-                        coordinator.failAccessCookieBoundary(in: webView)
-                        return
-                    }
-                    guard coordinator.isAccessAdmissionCurrent() else { return }
-                    webView.configuration.userContentController.add(rule)
-                    AuthenticatedControlUIAccessCookieInstaller.install(
-                        cookie: accessCookie,
-                        isCurrent: { [weak coordinator, weak webView] in
-                            coordinator?.isAccessAdmissionCurrent() == true && webView != nil
-                        },
-                        setCookie: { cookie, completion in
-                            cookieStore.setCookie(cookie) {
-                                Task { @MainActor in completion() }
-                            }
-                        },
-                        deleteCookie: { cookie in cookieStore.delete(cookie) },
-                        load: { [weak webView] in
-                            _ = webView?.load(request)
-                        })
-                } catch {
-                    coordinator.failAccessCookieBoundary(in: webView)
-                }
+                webView.configuration.userContentController.add(rule)
+                AuthenticatedControlUIAccessCookieInstaller.install(
+                    cookie: accessCookie,
+                    isCurrent: { [weak coordinator, weak webView] in
+                        coordinator?.isAccessAdmissionCurrent() == true && webView != nil
+                    },
+                    setCookie: { cookie, completion in
+                        cookieStore.setCookie(cookie) {
+                            Task { @MainActor in completion() }
+                        }
+                    },
+                    deleteCookie: { cookie in cookieStore.delete(cookie) },
+                    load: { [weak webView] in
+                        _ = webView?.load(request)
+                    })
+            } catch {
+                coordinator.failAccessCookieBoundary(in: webView)
             }
-        } else {
-            _ = webView.load(request)
         }
         return webView
     }
@@ -851,8 +810,11 @@ struct AuthenticatedControlUIWebView: UIViewRepresentable {
         coordinator: AuthenticatedControlUIWebViewCoordinator)
     {
         coordinator.retireAccess(in: webView)
+        coordinator.nativeAuthDocument.retire()
         coordinator.retireEmbedCompatibility()
         coordinator.deviceSettingsBridge?.detach(from: webView)
+        webView.configuration.userContentController.removeScriptMessageHandler(
+            forName: IOSDashboardNativeGatewayAuthDocument.messageHandlerName, contentWorld: .page)
         webView.configuration.userContentController.removeScriptMessageHandler(
             forName: IOSDeviceSettingsBridge.messageHandlerName, contentWorld: .page)
         webView.stopLoading()
