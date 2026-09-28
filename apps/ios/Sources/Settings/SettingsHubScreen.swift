@@ -131,6 +131,7 @@ struct SettingsHubScreen: View {
 struct EmbeddedDashboardContent: View {
     @State private var bridge: IOSDeviceSettingsBridge
     @State private var failedAccessBoundaryIdentity: Int?
+    private let appModel: NodeAppModel
     let embedCompatibility: DashboardEmbedCompatibility?
     let url: URL
     let config: GatewayConnectConfig?
@@ -146,6 +147,7 @@ struct EmbeddedDashboardContent: View {
         embedCompatibility: DashboardEmbedCompatibility? = nil,
         openGateway: (() -> Void)? = nil)
     {
+        self.appModel = appModel
         self.url = url
         self.config = config
         self.openGateway = openGateway
