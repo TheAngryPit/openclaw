@@ -130,86 +130,19 @@ public actor GatewayChannelActor {
         return self.acceptedHTTPBearer?.token
     }
 
-    /// Startup compatibility credentials for released Control UI bundles. Only
-    /// credentials selected by the current socket may cross this boundary, and
-    /// device/bootstrap grants are deliberately never projected into JavaScript.
-    public func controlUIDashboardLegacyCredentials(
-        ifCurrentConnectionGeneration expectedGeneration: UInt64) -> [String: String]?
+    func dashboardAuthContext(
+        ifCurrentConnectionGeneration expectedGeneration: UInt64) -> GatewayChannelDashboardAuthContext?
     {
         guard let binding = self.authBinding(ifCurrentConnectionGeneration: expectedGeneration),
-              let options = self.connectOptions,
-              options.role == "operator", options.clientMode == "ui", options.includeDeviceIdentity
+              let options = self.connectOptions
         else { return nil }
-        switch binding.source {
-        case .sharedToken:
-            guard let token = self.token?.trimmedNonEmpty else { return nil }
-            return ["token": token]
-        case .password:
-            guard let password = self.password?.trimmedNonEmpty else { return nil }
-            return ["password": password]
-        case .deviceToken, .bootstrapToken, .none:
-            return nil
-        }
-    }
-
-    /// Signs a Dashboard challenge with the live operator connection's accepted
-    /// credential and identity. This never reads candidate credentials from config.
-    public func controlUIDashboardAuthorization(
-        ifCurrentConnectionGeneration expectedGeneration: UInt64,
-        scopes: [String],
-        nonce: String,
-        signedAtMs: Int64) throws -> Data
-    {
-        guard let binding = self.authBinding(ifCurrentConnectionGeneration: expectedGeneration),
-              let options = self.connectOptions,
-              options.role == "operator", options.clientMode == "ui", options.includeDeviceIdentity,
-              !nonce.isEmpty, nonce.utf8.count <= 1024, !nonce.contains("|"),
-              signedAtMs > 0, signedAtMs <= 9_007_199_254_740_991,
-              let identity = DeviceIdentityStore.loadOrCreatePersisted(profile: options.deviceIdentityProfile),
-              binding.deviceId == identity.deviceId
-        else { throw CancellationError() }
-
-        let credential: (auth: [String: String], signatureToken: String?)
-        switch binding.source {
-        case .sharedToken:
-            guard let token = self.token?.trimmedNonEmpty else { throw CancellationError() }
-            credential = (["token": token], token)
-        case .password:
-            guard let password = self.password?.trimmedNonEmpty else { throw CancellationError() }
-            credential = (["password": password], nil)
-        case .deviceToken, .bootstrapToken, .none:
-            guard let token = self.httpResourceBearer(ifCurrentConnectionGeneration: expectedGeneration)?
-                .trimmedNonEmpty
-            else { throw CancellationError() }
-            credential = (["deviceToken": token], token)
-        }
-
-        let fields = GatewayDeviceAuthPayload.Fields(
-            deviceId: identity.deviceId,
-            client: .init(id: options.clientId, mode: options.clientMode),
-            role: options.role,
-            scopes: scopes,
-            signedAtMs: signedAtMs,
-            token: credential.signatureToken,
-            nonce: nonce)
-        let payload = GatewayDeviceAuthPayload.buildConnectCompatibilityPayload(fields: fields)
-        guard let device = GatewayDeviceAuthPayload.signedDeviceDictionary(
-            payload: payload,
-            identity: identity,
-            signedAtMs: signedAtMs,
-            nonce: nonce)
-        else { throw CancellationError() }
-
-        let result: [String: ProtoAnyCodable] = [
-            "client": ProtoAnyCodable(GatewayConnectPayload.makeClient(
-                options: options,
-                displayName: options.clientDisplayName ?? InstanceIdentity.displayName,
-                platform: InstanceIdentity.platformString)),
-            "scopes": ProtoAnyCodable(scopes),
-            "auth": ProtoAnyCodable(credential.auth),
-            "device": ProtoAnyCodable(device),
-        ]
-        return try self.encoder.encode(result)
+        return GatewayChannelDashboardAuthContext(
+            binding: binding,
+            options: options,
+            encoder: self.encoder,
+            token: self.token,
+            password: self.password,
+            httpResourceBearer: self.httpResourceBearer(ifCurrentConnectionGeneration: expectedGeneration))
     }
 
     nonisolated func retireSocketAdmission() {
