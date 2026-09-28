@@ -3923,6 +3923,13 @@ describe("ci workflow guards", () => {
     }
 
     it.each([
+      {
+        task: "test-third-party",
+        lint: false,
+        app_lint: "third-party",
+        build_benchmark: false,
+        calls: 2,
+      },
       { task: "test-wear", lint: true, app_lint: "third-party", build_benchmark: false, calls: 3 },
       { task: "ktlint", lint: false, app_lint: "play", build_benchmark: false, calls: 2 },
       { task: "ktlint", lint: false, app_lint: "play", build_benchmark: true, calls: 3 },
@@ -4099,6 +4106,12 @@ describe("ci workflow guards", () => {
     it.each([
       { task: "test-play", failTask: ":app:testPlayDebugUnitTest", calls: 1 },
       { task: "test-third-party", failTask: ":app:testThirdPartyDebugUnitTest", calls: 1 },
+      {
+        task: "test-third-party",
+        app_lint: "third-party",
+        failTask: ":app:lintThirdPartyDebug",
+        calls: 2,
+      },
       {
         task: "test-wear",
         lint: true,
@@ -7792,12 +7805,15 @@ describe("ci workflow guards", () => {
           JSON.parse(expectDefined(preflightOutputs.android_matrix, "Android matrix")).include,
         ).toEqual([
           { check_name: "android-test-play", task: "test-play" },
-          { check_name: "android-test-third-party", task: "test-third-party" },
+          {
+            check_name: "android-test-third-party",
+            task: "test-third-party",
+            app_lint: "third-party",
+          },
           {
             check_name: "android-test-wear",
             task: "test-wear",
             lint: true,
-            app_lint: "third-party",
           },
           { check_name: "android-ktlint", task: "ktlint", app_lint: "play" },
         ]);
@@ -8352,12 +8368,15 @@ describe("ci workflow guards", () => {
       ).include,
     ).toEqual([
       { check_name: "android-test-play", task: "test-play" },
-      { check_name: "android-test-third-party", task: "test-third-party" },
+      {
+        check_name: "android-test-third-party",
+        task: "test-third-party",
+        app_lint: "third-party",
+      },
       {
         check_name: "android-test-wear",
         task: "test-wear",
         lint: true,
-        app_lint: "third-party",
       },
       { check_name: "android-ktlint", task: "ktlint", app_lint: "play" },
     ]);
