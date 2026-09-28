@@ -97,10 +97,7 @@ struct GatewayAccessDeviceAuthBindingTests {
             gatewayID: self.gatewayID,
             role: "operator",
             profile: .primary).isEmpty)
-        let legacyVersion = store.currentTokenVersion(
-            role: "operator",
-            gatewayID: self.gatewayID,
-            profile: .primary)
+        let legacyVersion = store.tokenVersion(for: memory.deviceAuth)
         #expect(legacyVersion != nil)
         #expect(!store.bindCurrentTokenAfterHandshake(
             principal: owner,
@@ -213,10 +210,7 @@ struct GatewayAccessDeviceAuthBindingTests {
         let memory = MemoryStore()
         memory.deviceAuth = self.storedToken("gateway-admin-A")
         let store = self.bindingStore(memory: memory)
-        let tokenVersionA = store.currentTokenVersion(
-            role: "operator",
-            gatewayID: self.gatewayID,
-            profile: .primary)
+        let tokenVersionA = store.tokenVersion(for: memory.deviceAuth)
         #expect(store.bindGatewayIssuedToken(
             principal: ownerA,
             gatewayID: self.gatewayID,

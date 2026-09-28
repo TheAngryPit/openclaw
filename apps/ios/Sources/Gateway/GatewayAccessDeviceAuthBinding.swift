@@ -134,14 +134,6 @@ struct GatewayAccessDeviceAuthBindingStore {
             updatedAtMs: entry.entry.updatedAtMs)
     }
 
-    func currentTokenVersion(
-        role: String,
-        gatewayID: String?,
-        profile: GatewayDeviceIdentityProfile) -> TokenVersion?
-    {
-        self.tokenVersion(for: self.storedDeviceAuth(role: role, gatewayID: gatewayID, profile: profile))
-    }
-
     @discardableResult
     func bindCurrentTokenAfterHandshake(
         principal: CloudflareAccessPrincipal?,
