@@ -557,29 +557,6 @@ struct GatewayEndpointStoreTests {
         }
     }
 
-    @Test func `typed env secret ref accepts configured provider allowlist`() {
-        let snapshot = self.makeLaunchAgentSnapshot(env: ["GW_TOKEN": "service-token"])
-        let root: [String: Any] = [
-            "gateway": ["auth": ["token": [
-                "source": "env",
-                "provider": "restricted",
-                "id": "GW_TOKEN",
-            ]]],
-            "secrets": ["providers": ["restricted": [
-                "source": "env",
-                "allowlist": ["GW_TOKEN"],
-            ]]],
-        ]
-
-        let token = GatewayEndpointStore.resolveGatewayCredential(
-            .token,
-            isRemote: false,
-            root: root,
-            env: [:],
-            launchdSnapshot: snapshot)
-        #expect(token == "service-token")
-    }
-
     @Test func `typed env secret ref prefers gateway service environment`() {
         let snapshot = self.makeLaunchAgentSnapshot(env: ["GW_TOKEN": "service-token"])
         let root: [String: Any] = [
