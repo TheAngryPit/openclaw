@@ -39,14 +39,10 @@ extension GatewayChannelActor {
             throw CancellationError()
         }
         let payload = try GatewayChannelDashboardAuth.authorizationPayload(
-            binding: context.binding,
-            options: context.options,
+            context: context,
             scopes: scopes,
             nonce: nonce,
-            signedAtMs: signedAtMs,
-            token: context.token,
-            password: context.password,
-            httpResourceBearer: context.httpResourceBearer)
+            signedAtMs: signedAtMs)
         return try context.encoder.encode(payload)
     }
 }
@@ -72,15 +68,13 @@ enum GatewayChannelDashboardAuth {
     }
 
     static func authorizationPayload(
-        binding: GatewayAuthBinding,
-        options: GatewayConnectOptions,
+        context: GatewayChannelDashboardAuthContext,
         scopes: [String],
         nonce: String,
-        signedAtMs: Int64,
-        token: String?,
-        password: String?,
-        httpResourceBearer: String?) throws -> [String: OpenClawProtocol.AnyCodable]
+        signedAtMs: Int64) throws -> [String: OpenClawProtocol.AnyCodable]
     {
+        let binding = context.binding
+        let options = context.options
         guard options.role == "operator", options.clientMode == "ui", options.includeDeviceIdentity,
               !nonce.isEmpty, nonce.utf8.count <= 1024, !nonce.contains("|"),
               signedAtMs > 0, signedAtMs <= 9_007_199_254_740_991,
@@ -91,13 +85,13 @@ enum GatewayChannelDashboardAuth {
         let credential: (auth: [String: String], signatureToken: String?)
         switch binding.source {
         case .sharedToken:
-            guard let token = token?.trimmedNonEmpty else { throw CancellationError() }
+            guard let token = context.token?.trimmedNonEmpty else { throw CancellationError() }
             credential = (["token": token], token)
         case .password:
-            guard let password = password?.trimmedNonEmpty else { throw CancellationError() }
+            guard let password = context.password?.trimmedNonEmpty else { throw CancellationError() }
             credential = (["password": password], nil)
         case .deviceToken, .bootstrapToken, .none:
-            guard let token = httpResourceBearer?.trimmedNonEmpty else { throw CancellationError() }
+            guard let token = context.httpResourceBearer?.trimmedNonEmpty else { throw CancellationError() }
             credential = (["deviceToken": token], token)
         }
 
