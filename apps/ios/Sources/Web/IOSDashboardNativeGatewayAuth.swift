@@ -136,7 +136,6 @@ final class IOSDashboardNativeGatewayAuthProvider {
         guard self.isCurrent(), await self.session.currentRoute() == route else { return nil }
         return route
     }
-
 }
 
 @MainActor

@@ -180,8 +180,7 @@ final class GatewayConnectionController {
             self.ingress.foregrounded()
             scheduleOperatorFleetReconcile()
         } else if phase == .background {
-            self.operatorFleetReconcileTask?.cancel()
-            self.operatorFleetReconcileTask = nil
+            self.cancelOperatorFleetReconcile()
             self.operatorFleet.stopAll()
         }
         guard self.discoveryEnabled else {
@@ -190,13 +189,9 @@ final class GatewayConnectionController {
         }
         guard self.localNetworkAccessRequested else { return }
 
-        switch phase {
-        case .background:
+        if phase == .background {
             self.discovery.stop()
-        case .active, .inactive:
-            self.discovery.start()
-            self.attemptAutoReconnectIfNeeded()
-        @unknown default:
+        } else {
             self.discovery.start()
             self.attemptAutoReconnectIfNeeded()
         }
@@ -1130,10 +1125,12 @@ extension GatewayConnectionController {
         let configuredPort = defaults.integer(forKey: "gateway.manual.port")
         let useTLS = self.resolveManualUseTLS(host: host, useTLS: defaults.bool(forKey: "gateway.manual.tls"))
         guard let port = Self.resolvedManualPort(host: host, port: configuredPort) else { return }
-
         let stableID = self.manualStableID(host: host, port: port)
-        let tlsParams = self.resolveManualTLSParams(stableID: stableID, tlsEnabled: useTLS)
-        guard let url = self.buildGatewayURL(host: host, port: port, useTLS: tlsParams?.required == true)
+        guard let route = self.manualGatewayRoute(
+            host: host,
+            port: port,
+            useTLS: defaults.bool(forKey: "gateway.manual.tls"),
+            stableID: stableID)
         else { return }
 
         // Legacy manual defaults can exist without a registry row. Access admission
@@ -1145,9 +1142,9 @@ extension GatewayConnectionController {
             gatewayStableID: stableID)
         self.didAutoConnect = true
         self.startAutoConnect(
-            url: url,
+            url: route.url,
             gatewayStableID: stableID,
-            tls: tlsParams,
+            tls: route.tls,
             token: credentials.token,
             bootstrapToken: credentials.bootstrapToken,
             password: credentials.password,
@@ -1158,36 +1155,47 @@ extension GatewayConnectionController {
         _ active: GatewaySettingsStore.GatewayRegistryEntry,
         instanceId: String) -> Bool
     {
-        switch active.kind {
-        case .manual:
-            guard let host = active.host, let port = active.port else { return false }
-            let stableID = active.stableID
-            let useTLS = active.useTLS
-            let resolvedUseTLS = self.resolveManualUseTLS(host: host, useTLS: useTLS)
-            let tlsParams = self.resolveManualTLSParams(stableID: stableID, tlsEnabled: resolvedUseTLS)
-            guard let url = self.buildGatewayURL(
-                host: host,
-                port: port,
-                useTLS: tlsParams?.required == true,
-                contextPath: active.contextPath)
-            else { return false }
+        guard active.kind == .manual,
+              let host = active.host, let port = active.port,
+              let route = self.manualGatewayRoute(
+                  host: host,
+                  port: port,
+                  useTLS: active.useTLS,
+                  stableID: active.stableID,
+                  contextPath: active.contextPath)
+        else { return false }
+        let credentials = GatewaySettingsStore.loadGatewayCredentials(
+            instanceId: instanceId,
+            gatewayStableID: active.stableID)
+        self.didAutoConnect = true
+        self.startAutoConnect(
+            url: route.url,
+            gatewayStableID: active.stableID,
+            tls: route.tls,
+            token: credentials.token,
+            bootstrapToken: credentials.bootstrapToken,
+            password: credentials.password,
+            allowStoredDeviceAuth: !credentials.suppressStoredDeviceAuth)
+        return true
+    }
 
-            let credentials = GatewaySettingsStore.loadGatewayCredentials(
-                instanceId: instanceId,
-                gatewayStableID: stableID)
-            self.didAutoConnect = true
-            self.startAutoConnect(
-                url: url,
-                gatewayStableID: stableID,
-                tls: tlsParams,
-                token: credentials.token,
-                bootstrapToken: credentials.bootstrapToken,
-                password: credentials.password,
-                allowStoredDeviceAuth: !credentials.suppressStoredDeviceAuth)
-            return true
-        case .discovered:
-            return false
-        }
+    private func manualGatewayRoute(
+        host: String,
+        port: Int,
+        useTLS: Bool,
+        stableID: String,
+        contextPath: String? = nil) -> (url: URL, tls: GatewayTLSParams?)?
+    {
+        let tls = self.resolveManualTLSParams(
+            stableID: stableID,
+            tlsEnabled: self.resolveManualUseTLS(host: host, useTLS: useTLS))
+        guard let url = self.buildGatewayURL(
+            host: host,
+            port: port,
+            useTLS: tls?.required == true,
+            contextPath: contextPath)
+        else { return nil }
+        return (url, tls)
     }
 
     private func attemptAutoReconnectIfNeeded() {
