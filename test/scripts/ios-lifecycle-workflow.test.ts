@@ -407,7 +407,6 @@ describe.skipIf(process.platform === "win32")("iOS Access simulator workflow", (
         "-only-testing:OpenClawTests/GatewayAccessDeviceAuthBindingTests",
         "-only-testing:OpenClawLogicTests/WatchVoiceTurnTrackerTests",
         "-only-testing:OpenClawTests/NodeAppModelInvokeTests",
-        "-only-testing:OpenClawTests/OpenClawTypographyTests",
       ]),
     );
     expect(tests[1]?.args.filter((arg) => arg.startsWith("-only-testing:"))).toEqual([

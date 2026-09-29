@@ -4129,18 +4129,18 @@ extension NodeAppModel {
             let instanceID = GatewaySettingsStore.currentInstanceID()
             let deviceAuthGatewayID = nodeOptions.deviceAuthGatewayID ?? stableID
             if let principal = config.ingressAuthorization?.principal {
-                _ = GatewayAccessDeviceAuthBindingStore.shared.bindGatewayIssuedToken(
+                guard GatewayAccessDeviceAuthBindingStore.shared.bindGatewayIssuedToken(
                     principal: principal,
                     gatewayID: deviceAuthGatewayID,
                     role: "operator",
                     profile: nodeOptions.deviceIdentityProfile,
-                    persistedRoles: authRoles.persisted)
-                guard GatewayAccessDeviceAuthBindingStore.shared.bindGatewayIssuedToken(
-                    principal: principal,
-                    gatewayID: deviceAuthGatewayID,
-                    role: "node",
-                    profile: nodeOptions.deviceIdentityProfile,
-                    persistedRoles: authRoles.persisted)
+                    persistedRoles: authRoles.persisted),
+                    GatewayAccessDeviceAuthBindingStore.shared.bindGatewayIssuedToken(
+                        principal: principal,
+                        gatewayID: deviceAuthGatewayID,
+                        role: "node",
+                        profile: nodeOptions.deviceIdentityProfile,
+                        persistedRoles: authRoles.persisted)
                 else { throw GatewayCredentialHandoffError.persistenceFailed }
             }
             if let metadata = GatewaySettingsStore.loadGatewayCredentialMetadata(
