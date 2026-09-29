@@ -1,13 +1,6 @@
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import {
-  Container,
-  Loader,
-  matchesKey,
-  ProcessTerminal,
-  Text,
-  TuiMainScreen,
-} from "@earendil-works/pi-tui";
+import { Container, Loader, matchesKey, Text, TuiMainScreen } from "@earendil-works/pi-tui";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { classifyGatewayConnectFailure } from "../../packages/gateway-protocol/src/connect-error-details.js";
 import type { CommandEntry } from "../../packages/gateway-protocol/src/index.js";
@@ -72,6 +65,7 @@ import { createTuiLocalCliRunner } from "./tui-local-cli.js";
 import { createLocalShellRunner } from "./tui-local-shell.js";
 import { createOverlayHandlers } from "./tui-overlays.js";
 import { createTuiPluginApprovalController } from "./tui-plugin-approvals.js";
+import { TuiProcessTerminal } from "./tui-process-terminal.js";
 import { createTuiQuestionController } from "./tui-questions.js";
 import { createSessionActions } from "./tui-session-actions.js";
 import { createTuiRunIdTracker } from "./tui-session-run-coordinator.js";
@@ -85,6 +79,7 @@ import {
 import { createTuiTaskSuggestionController } from "./tui-task-suggestions.js";
 import type {
   SessionScope,
+  TuiBoundGateway,
   TuiHistoryRunOutcome,
   TuiOptions,
   TuiResult,
@@ -107,12 +102,7 @@ type RunTuiOptions = TuiOptions & {
   ctrlCExitWindowMs?: number;
   onSubmitBurstCaptured?: (value: string) => void;
   /** Exact pre-probed remote target for an in-process setup handoff. */
-  boundGateway?: {
-    url: string;
-    token?: string;
-    password?: string;
-    tlsFingerprint?: string;
-  };
+  boundGateway?: TuiBoundGateway;
   config?: OpenClawConfig;
   title?: string;
 };
@@ -195,20 +185,14 @@ export function resolveTuiSessionKey(params: {
   sessionMainKey: string;
 }) {
   const trimmed = (params.raw ?? "").trim();
-  if (!trimmed) {
+  if (!trimmed || trimmed.toLowerCase() === "global") {
     return resolveCanonicalMainSessionKey({
       agentId: params.currentAgentId,
       mainKey: params.sessionMainKey,
       sessionScope: params.sessionScope,
     });
   }
-  const parsed = parseAgentSessionKey(trimmed);
-  if (parsed?.rest === "global") {
-    // Initial agent selection already consumed the explicit owner prefix. TUI operations
-    // need the literal sentinel so they carry that owner separately as agentId.
-    return "global";
-  }
-  if (trimmed === "global" || trimmed === "unknown") {
+  if (trimmed === "unknown") {
     return trimmed;
   }
   return toAgentStoreSessionKey({
@@ -245,7 +229,7 @@ export function resolveTuiSessionSelection(params: {
   const keepDurableBareKey =
     !parsed &&
     persistedOwner?.kind === "configured" &&
-    trimmed !== "global" &&
+    trimmed.toLowerCase() !== "global" &&
     trimmed !== "unknown" &&
     trimmed.toLowerCase() !== "main" &&
     trimmed.toLowerCase() !== mainKey;
@@ -331,30 +315,18 @@ export function resolveGatewayDisconnectState(
   const failure = classifyGatewayConnectFailure(input);
   const reasonLabel =
     failure.userMessage === "gateway unreachable" ? "closed" : failure.userMessage;
-  if (failure.kind === "pairing-required") {
-    return {
-      connectionStatus: `gateway disconnected: ${reasonLabel}`,
-      activityStatus: "device approval needed: preview latest request",
-      remediation: failure.remediation,
-    };
-  }
-  if (failure.kind === "rate-limited") {
-    return {
-      connectionStatus: `gateway disconnected: ${reasonLabel}`,
-      activityStatus: "gateway authentication temporarily rate-limited",
-      remediation: failure.remediation,
-    };
-  }
-  if (failure.kind === "identity-proxy") {
-    return {
-      connectionStatus: `gateway disconnected: ${reasonLabel}`,
-      activityStatus: "identity-aware proxy rejected connection",
-      remediation: failure.remediation,
-    };
-  }
   return {
     connectionStatus: `gateway disconnected: ${reasonLabel}`,
-    activityStatus: failure.remediation ? "gateway authentication needs attention" : "idle",
+    activityStatus:
+      failure.kind === "pairing-required"
+        ? "device approval needed: preview latest request"
+        : failure.kind === "rate-limited"
+          ? "gateway authentication temporarily rate-limited"
+          : failure.kind === "identity-proxy"
+            ? "identity-aware proxy rejected connection"
+            : failure.remediation
+              ? "gateway authentication needs attention"
+              : "idle",
     remediation: failure.remediation,
   };
 }
@@ -447,15 +419,14 @@ export function installTuiTerminalLossExitHandler(
     requestOnce();
     return true;
   });
-  const onClose = (): void => requestOnce();
-  targets.stdin?.on("end", onClose);
-  targets.stdin?.on("close", onClose);
-  targets.stdout?.on("close", onClose);
+  targets.stdin?.on("end", requestOnce);
+  targets.stdin?.on("close", requestOnce);
+  targets.stdout?.on("close", requestOnce);
   return () => {
     removeUncaughtExceptionHandler();
-    targets.stdin?.off("end", onClose);
-    targets.stdin?.off("close", onClose);
-    targets.stdout?.off("close", onClose);
+    targets.stdin?.off("end", requestOnce);
+    targets.stdin?.off("close", requestOnce);
+    targets.stdout?.off("close", requestOnce);
   };
 }
 
@@ -805,7 +776,7 @@ async function runTuiUnlocked(opts: RunTuiOptions): Promise<TuiResult> {
     setConsoleSubsystemFilter(["__openclaw_tui_quiet__"]);
   }
 
-  const tui = new TuiMainScreen(new ProcessTerminal());
+  const tui = new TuiMainScreen(new TuiProcessTerminal());
   const dedupeBackspace = createBackspaceDeduper();
   tui.addInputListener((data) => {
     const next = dedupeBackspace(data);
@@ -1782,9 +1753,13 @@ async function runTuiUnlocked(opts: RunTuiOptions): Promise<TuiResult> {
       scheduleDynamicSlashCommandsRefresh();
       if (!state.autoMessageSent && autoMessage) {
         state.autoMessageSent = true;
-        await sendMessage(autoMessage, opts.initialMessageTimeoutMs);
-        if (!ownsConnection()) {
-          return;
+        if (resolveMessageAdmission(autoMessage).status === "blocked") {
+          chatLog.addSystem("initial message not sent — retry it after the session is ready");
+        } else {
+          await sendMessage(autoMessage, opts.initialMessageTimeoutMs);
+          if (!ownsConnection()) {
+            return;
+          }
         }
       }
       updateFooter();
