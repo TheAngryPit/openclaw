@@ -84,6 +84,12 @@ struct GatewayAccessDeviceAuthBindingTests {
             role: "operator",
             profile: .primary,
             fallbackAllowed: true))
+        #expect(!IOSDashboardNativeGatewayAuthProvider.accessBindingAllowsDeviceToken(
+            legacy.entry.token,
+            principal: owner,
+            gatewayID: self.gatewayID,
+            profile: .primary,
+            store: store))
         #expect(!store.allowsStoredDeviceAuth(
             entry: legacy,
             principal: nonowner,
@@ -131,6 +137,12 @@ struct GatewayAccessDeviceAuthBindingTests {
             role: "operator",
             profile: .primary,
             fallbackAllowed: true))
+        #expect(IOSDashboardNativeGatewayAuthProvider.accessBindingAllowsDeviceToken(
+            legacy.entry.token,
+            principal: owner,
+            gatewayID: self.gatewayID,
+            profile: .primary,
+            store: store))
         #expect(!store.allowsStoredDeviceAuth(
             entry: memory.deviceAuth,
             principal: nonowner,
@@ -138,6 +150,12 @@ struct GatewayAccessDeviceAuthBindingTests {
             role: "operator",
             profile: .primary,
             fallbackAllowed: true))
+        #expect(!IOSDashboardNativeGatewayAuthProvider.accessBindingAllowsDeviceToken(
+            legacy.entry.token,
+            principal: nonowner,
+            gatewayID: self.gatewayID,
+            profile: .primary,
+            store: store))
         #expect(memory.values.count == 1)
         #expect(memory.values.values.allSatisfy { !$0.contains("legacy-admin-token") })
     }
@@ -339,7 +357,7 @@ struct GatewayAccessDeviceAuthBindingTests {
             bindingStore: store).allowStoredDeviceAuth)
     }
 
-    @Test func `access webview removes stale scoped device auth for an unbound principal`() throws {
+    @Test func `access webview does not seed browser auth for an unbound principal`() throws {
         let tokens = try CloudflareAccessTestTokens()
         let application = try CloudflareAccessTestTokens.application()
         let principal = try self.principal(
@@ -375,13 +393,13 @@ struct GatewayAccessDeviceAuthBindingTests {
         config.ingressAuthorization = ingress
         let script = try AuthenticatedControlUI.authUserScript(
             config: config,
-            pageURL: #require(URL(string: "https://gateway.example.test/ui")),
-            storedOperatorToken: "legacy-admin-token")
+            pageURL: #require(URL(string: "https://gateway.example.test/ui")))
 
-        #expect(script?.contains("const deviceAuthSeed = null;") == true)
+        #expect(script?.contains("\"nativeConnectAuth\":true") == true)
+        #expect(script?.contains("deviceAuthSeed") == false)
         #expect(script?.contains("legacy-admin-token") == false)
-        #expect(script?.contains("localStorage.removeItem(`openclaw.device.auth.v1:${scope}`);") == true)
-        #expect(script?.contains("localStorage.removeItem(\"openclaw-device-identity-v1\")") == false)
+        #expect(script?.contains("localStorage") == false)
+        #expect(script?.contains("privateKey") == false)
     }
 
     @Test func `principal identity includes access origin issuer audience and subject`() throws {
