@@ -15,7 +15,7 @@ import { toPublicCronJob } from "../public-job.js";
 import type { CronRuntimeAuthority } from "../runtime-authority.js";
 import type { CronScheduledToolPolicy } from "../scheduled-tool-policy.js";
 import type { CronRunReceiptHandle } from "../store/run-receipt.types.js";
-import type { QuarantinedCronConfigJob } from "../store/types.js";
+import type { QuarantinedCronConfigJob } from "../types-shared.js";
 import type {
   CronCompletionStatus,
   CronWebhookDeliveryOutcome,
@@ -261,7 +261,21 @@ export type CronServiceDeps = {
     /** Persists the transport-owned terminal fact before Gateway work admission releases. */
     onDeliverySettled: (outcome: CronFailureNotificationDelivery) => Promise<void>;
   }) => Promise<void>;
+  /**
+   * Starts one ordinary turn in the conversation that owns a failing job, as if that
+   * conversation had received `message`; its reply goes to the conversation's own route.
+   */
+  runCronFailureRepair?: (request: CronFailureRepairRequest) => Promise<void>;
   onEvent?: (evt: CronEvent, context?: CronEventContext) => void;
+};
+
+/** The scheduler's repair request for one failure incident of an owned job. */
+export type CronFailureRepairRequest = {
+  jobId: string;
+  repairId: string;
+  agentId?: string;
+  sessionKey: string;
+  message: string;
 };
 
 export type CronExecutionIdentityAdmission = {
