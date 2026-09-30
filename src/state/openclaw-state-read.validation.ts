@@ -3,6 +3,7 @@ import { Check } from "typebox/value";
 import { SKILL_LIBRARY_MAX_SELECTIONS } from "../../packages/gateway-protocol/src/schema/skill-library.js";
 import { UserChannelIdentitySchema } from "../../packages/gateway-protocol/src/schema/users.js";
 import { isChannelIngressReadCommand } from "../channels/message/ingress-queue-read-contract.js";
+import { isWorkspaceJournalReadCommand } from "../gateway/worker-environments/placement-workspace-journal.worker-contract.js";
 import { isPluginBlobReadCommand } from "../plugin-state/plugin-blob-worker-contract.js";
 import { isTuiLastSessionReadCommand } from "../tui/tui-last-session.contract.js";
 import type { OpenClawStateReadRequest } from "./openclaw-state-read.types.js";
@@ -70,6 +71,15 @@ export function isReadRequest(input: unknown): input is OpenClawStateReadRequest
           typeof input.command.conversation.parentConversationId === "string")) ||
       (input.command.type === "cron.activeReceiptOwners" &&
         typeof input.command.agentId === "string") ||
+      (input.command.type === "cron.scratch" &&
+        typeof input.command.storeKey === "string" &&
+        isRecord(input.command.selector) &&
+        ((input.command.selector.kind === "job" &&
+          typeof input.command.selector.jobId === "string" &&
+          typeof input.command.selector.createdAtMsFallback === "number" &&
+          Number.isFinite(input.command.selector.createdAtMsFallback)) ||
+          (input.command.selector.kind === "heartbeat" &&
+            typeof input.command.selector.agentId === "string"))) ||
       (input.command.type === "cron.jobNames" &&
         (input.command.storePath === undefined || typeof input.command.storePath === "string") &&
         Array.isArray(input.command.jobIds) &&
@@ -264,6 +274,7 @@ export function isReadRequest(input: unknown): input is OpenClawStateReadRequest
         (input.command.profileIds === undefined ||
           (Array.isArray(input.command.profileIds) &&
             input.command.profileIds.every((id) => typeof id === "string")))) ||
+      isWorkspaceJournalReadCommand(input.command) ||
       input.command.type === "workers.placementRecoveryCandidates" ||
       (input.command.type === "workers.placementProjection" &&
         Array.isArray(input.command.sessionIds) &&

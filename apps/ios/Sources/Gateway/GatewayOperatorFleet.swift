@@ -210,6 +210,7 @@ final class GatewayOperatorFleet {
             caps: [
                 OpenClawGatewayClientCapability.inlineWidgets,
                 OpenClawGatewayClientCapability.modelSelectionPolicy,
+                OpenClawGatewayClientCapability.ultrafast,
             ],
             commands: [],
             permissions: [:],
