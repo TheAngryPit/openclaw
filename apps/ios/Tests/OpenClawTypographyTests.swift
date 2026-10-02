@@ -22,6 +22,17 @@ struct RootSidebarTypographyTests {
 }
 
 struct OpenClawTypographyTests {
+    @Test(arguments: [
+        "Chat/SessionDashboardScreen.swift",
+        "Web/ControlUIHubScreen.swift",
+        "Settings/SettingsHubScreen.swift",
+    ])
+    func `personal sign-in fallback uses branded typography`(filename: String) throws {
+        let source = try String(contentsOf: Self.sourceURL(filename), encoding: .utf8)
+        #expect(source.contains("OpenClawType."))
+        #expect(!source.contains(".font(."))
+    }
+
     @Test(arguments: ["ChatFileAttachment.swift", "ChatMessageReactions.swift"])
     func `chat accessory controls use branded typography`(filename: String) throws {
         let source = try String(

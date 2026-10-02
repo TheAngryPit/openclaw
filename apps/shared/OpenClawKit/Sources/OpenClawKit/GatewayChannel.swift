@@ -465,7 +465,15 @@ public actor GatewayChannelActor {
         let requestedScopes = options.scopes
         let scopesAreExplicit = options.scopesAreExplicit
         let includeDeviceIdentity = options.includeDeviceIdentity
-        let allowStoredDeviceAuth = options.allowStoredDeviceAuth
+        if options.requiredAuthMethod != nil,
+           role != "operator" || self.token?.trimmedNonEmpty != nil ||
+           self.bootstrapToken?.trimmedNonEmpty != nil || self.password?.trimmedNonEmpty != nil
+        {
+            throw NSError(domain: "Gateway", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Personal sign-in requires a credentialless operator connection",
+            ])
+        }
+        let allowStoredDeviceAuth = options.requiredAuthMethod == nil && options.allowStoredDeviceAuth
         let deviceAuthGatewayID = options.deviceAuthGatewayID
         let identity = try Self.loadDeviceIdentityForConnect(
             includeDeviceIdentity: includeDeviceIdentity,
@@ -926,6 +934,14 @@ extension GatewayChannelActor {
         }
         let payloadData = try self.encoder.encode(payload)
         let ok = try decoder.decode(HelloOk.self, from: payloadData)
+        if let method = options.requiredAuthMethod,
+           ok.auth["method"]?.stringValue != method.rawValue ||
+           ok.auth["recoveryScope"]?.stringValue?.trimmedNonEmpty == nil
+        {
+            throw NSError(domain: "Gateway", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "The Gateway did not verify the selected personal sign-in",
+            ])
+        }
         if let tick = ok.policy["tickIntervalMs"]?.doubleValue {
             self.tickIntervalMs = tick
         }
@@ -974,7 +990,9 @@ extension GatewayChannelActor {
                 }
             }
         }
-        self.acceptedHTTPBearer = (connectionGeneration, selectedAuth.httpResourceBearer(hello: ok, role: role))
+        self.acceptedHTTPBearer = options.requiredAuthMethod == nil
+            ? (connectionGeneration, selectedAuth.httpResourceBearer(hello: ok, role: role))
+            : nil
         self.lastTick = Date()
         // Keep arbitrary push/lifecycle callbacks off the connect critical path.
         // Clients needing immediate hello state get a dedicated short admission.

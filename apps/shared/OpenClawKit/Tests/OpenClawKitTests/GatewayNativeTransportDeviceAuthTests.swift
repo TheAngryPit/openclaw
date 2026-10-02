@@ -43,6 +43,59 @@ extension GatewayNodeSession {
 struct GatewayNativeTransportDeviceAuthTests {
     @Test(.stateDirectoryIsolated)
     @MainActor
+    func `personal reconnect retains device proof without reusing an issued bearer`() async throws {
+        let gatewayID = "personal-native-fixture"
+        let identity = DeviceIdentityStore.loadOrCreate()
+        _ = DeviceAuthStore.storeToken(
+            deviceId: identity.deviceId, role: "operator", token: "existing-paired-token", gatewayID: gatewayID)
+        let fixture = try await NativeGatewayWebSocketFixture.start(
+            issuedDeviceTokens: ["issued-personal-token", "second-issued-token"],
+            authMethod: "tailscale", recoveryScope: "synthetic-personal-scope")
+        defer { fixture.stop() }
+        let gateway = GatewayNodeSession()
+        var options = nativeNodeConnectOptions(allowStoredDeviceAuth: true, deviceAuthGatewayID: gatewayID)
+        options.role = "operator"
+        options.clientMode = "ui"
+        options.requiredAuthMethod = .tailscale
+        try await gateway.connectThroughURLSessionForTest(fixture.url(), options: options)
+        #expect(fixture.capturedAuth(at: 0) == .init(token: nil, bootstrapToken: nil, deviceToken: nil))
+        #expect(fixture.capturedDeviceID(at: 0) == identity.deviceId)
+        let route = try #require(await gateway.currentRoute(ifGatewayID: gatewayID))
+        #expect(await gateway.currentAuthRecoveryScope(ifCurrentRoute: route) == "synthetic-personal-scope")
+        #expect(await gateway.httpResourceAuthorization(ifCurrentRoute: route)?.bearer == nil)
+        #expect(await gateway.currentDeviceAuthRoles().persisted.isEmpty)
+        fixture.closeConnection(at: 0)
+        try await waitUntil("personal credentialless reconnect") { await fixture.capturedAuth(at: 1) != nil }
+        #expect(fixture.capturedAuth(at: 1) == .init(token: nil, bootstrapToken: nil, deviceToken: nil))
+        #expect(fixture.capturedDeviceID(at: 1) == identity.deviceId)
+        #expect(DeviceAuthStore.loadToken(deviceId: identity.deviceId, role: "operator", gatewayID: gatewayID)?
+            .token == "existing-paired-token")
+        await gateway.disconnect()
+    }
+
+    @Test(.stateDirectoryIsolated, arguments: ["token", "device-token", "none", "trusted-proxy", ""])
+    @MainActor
+    func `personal mode rejects a hello that did not verify Tailscale`(method: String) async throws {
+        let fixture = try await NativeGatewayWebSocketFixture.start(
+            issuedDeviceTokens: ["must-not-persist"], authMethod: method, recoveryScope: "synthetic-scope")
+        defer { fixture.stop() }
+        let gateway = GatewayNodeSession()
+        var options = nativeNodeConnectOptions(allowStoredDeviceAuth: true, deviceAuthGatewayID: "reject-personal")
+        options.role = "operator"
+        options.requiredAuthMethod = .tailscale
+        do {
+            try await gateway.connectThroughURLSessionForTest(fixture.url(), options: options)
+            Issue.record("Expected personal admission to fail")
+        } catch {
+            #expect(error.localizedDescription.contains("personal sign-in"))
+        }
+        #expect(await gateway.currentRoute() == nil)
+        #expect(await gateway.currentDeviceAuthRoles().persisted.isEmpty)
+        await gateway.disconnect()
+    }
+
+    @Test(.stateDirectoryIsolated)
+    @MainActor
     func `legacy unscoped token rotation persists and reconnects with replacement`() async throws {
         let previousToken = "native-legacy-previous-token"
         let rotatedToken = "native-legacy-rotated-token"

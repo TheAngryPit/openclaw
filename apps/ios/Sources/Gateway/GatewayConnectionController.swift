@@ -586,6 +586,14 @@ final class GatewayConnectionController {
         return true
     }
 
+    func setPersonalTailscaleAuthentication(stableID: String, enabled: Bool) -> Bool {
+        guard GatewaySettingsStore.setPersonalTailscaleAuthentication(stableID: stableID, enabled: enabled) else {
+            return false
+        }
+        self.scheduleOperatorFleetReconcile()
+        return true
+    }
+
     @discardableResult
     func forgetGateway(stableID: String) async -> Bool {
         guard let stableID = GatewayStableIdentifier.exact(stableID),
@@ -1192,7 +1200,9 @@ extension GatewayConnectionController {
                 token: token,
                 bootstrapToken: bootstrapToken,
                 password: password,
-                nodeOptions: nodeOptions)
+                nodeOptions: nodeOptions,
+                personalTailscaleAuthentication: GatewaySettingsStore.usesPersonalTailscaleAuthentication(
+                    stableID: gatewayStableID))
             self.pendingGatewayRestoration = nil
             appModel.applyGatewayConnectConfig(
                 cfg,
@@ -1305,7 +1315,9 @@ extension GatewayConnectionController {
             token: credentials.token,
             bootstrapToken: credentials.bootstrapToken,
             password: credentials.password,
-            nodeOptions: nodeOptions)
+            nodeOptions: nodeOptions,
+            personalTailscaleAuthentication: GatewaySettingsStore.usesPersonalTailscaleAuthentication(
+                stableID: stableID))
     }
 
     private func probeTLSFingerprint(

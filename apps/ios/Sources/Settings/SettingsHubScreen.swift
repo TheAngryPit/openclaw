@@ -82,10 +82,18 @@ struct SettingsHubScreen: View {
                     }
                 }
         } else {
-            SettingsProTab(
-                registersNavigationDestinations: false,
-                headerSidebarAction: self.headerSidebarAction,
-                onApprovalNotificationsRoute: self.onApprovalNotificationsRoute)
+            VStack(spacing: 0) {
+                if config?.personalTailscaleAuthentication == true {
+                    Text("Embedded Gateway pages aren't available with personal sign-in yet.")
+                        .font(OpenClawType.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding()
+                }
+                SettingsProTab(
+                    registersNavigationDestinations: false,
+                    headerSidebarAction: self.headerSidebarAction,
+                    onApprovalNotificationsRoute: self.onApprovalNotificationsRoute)
+            }
         }
     }
 

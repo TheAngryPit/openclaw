@@ -805,6 +805,26 @@ extension SettingsProTab {
             }
         }
         .contextMenu {
+            if entry.useTLS, entry.host?.lowercased().hasSuffix(".ts.net") == true {
+                Button {
+                    Task {
+                        guard self.gatewayController.setPersonalTailscaleAuthentication(
+                            stableID: entry.stableID,
+                            enabled: entry.personalTailscaleAuthentication != true)
+                        else {
+                            self.gatewayActionStatusText = String(localized: "Could not save the sign-in choice.")
+                            return
+                        }
+                        self.refreshGatewayRegistry()
+                        if isActive { await self.reconnectGateway() }
+                    }
+                } label: {
+                    Text(entry.personalTailscaleAuthentication == true
+                        ? "Use Shared Owner" : "Use Personal Tailscale Sign-In")
+                        .font(OpenClawType.body)
+                }
+                .disabled(self.connectingGateway != nil || self.isReconnectingGateway)
+            }
             Button(role: .destructive) {
                 self.pendingForgetGateway = entry
             } label: {

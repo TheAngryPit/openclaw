@@ -71,9 +71,13 @@ struct SessionDashboardScreen: View {
     private var unavailableCard: some View {
         VStack(spacing: 12) {
             ProIconBadge(systemName: "rectangle.grid.2x2", color: OpenClawBrand.accent)
-            Text("Dashboard needs a connected gateway")
+            Text(self.appModel.activeGatewayConnectConfig?.personalTailscaleAuthentication == true
+                ? "Personal sign-in is for native chat"
+                : "Dashboard needs a connected gateway")
                 .font(OpenClawType.subheadSemiBold)
-            Text("Connect to your gateway to open this session dashboard.")
+            Text(self.appModel.activeGatewayConnectConfig?.personalTailscaleAuthentication == true
+                ? "Embedded Gateway pages aren't available with personal sign-in yet."
+                : "Connect to your gateway to open this session dashboard.")
                 .font(OpenClawType.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

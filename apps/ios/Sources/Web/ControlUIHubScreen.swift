@@ -122,9 +122,12 @@ struct ControlUIHubScreen: View {
     private var unavailableCard: some View {
         VStack(spacing: 12) {
             ProIconBadge(systemName: self.page.symbol, color: OpenClawBrand.accent)
-            self.page.unavailableTitle
+            (self.appModel.activeGatewayConnectConfig?.personalTailscaleAuthentication == true
+                ? Text("Personal sign-in is for native chat") : self.page.unavailableTitle)
                 .font(OpenClawType.subheadSemiBold)
-            self.page.unavailableDetail
+            (self.appModel.activeGatewayConnectConfig?.personalTailscaleAuthentication == true
+                ? Text("Embedded Gateway pages aren't available with personal sign-in yet.") : self.page
+                .unavailableDetail)
                 .font(OpenClawType.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

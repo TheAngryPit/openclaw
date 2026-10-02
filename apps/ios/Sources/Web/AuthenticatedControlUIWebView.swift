@@ -21,7 +21,7 @@ enum AuthenticatedControlUI {
         path: String,
         queryItems: [URLQueryItem]) -> URL?
     {
-        guard let config,
+        guard let config, !config.personalTailscaleAuthentication,
               var components = URLComponents(url: config.url, resolvingAgainstBaseURL: false)
         else {
             return nil

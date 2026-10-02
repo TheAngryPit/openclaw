@@ -73,6 +73,7 @@ enum GatewaySettingsStore {
         var useTLS: Bool
         var contextPath: String?
         var lastConnectedAtMs: Int?
+        var personalTailscaleAuthentication: Bool?
 
         var id: GatewayStableIdentifier.Key {
             GatewayStableIdentifier.Key(self.stableID)
@@ -86,6 +87,7 @@ enum GatewaySettingsStore {
                 lhs.port == rhs.port &&
                 lhs.useTLS == rhs.useTLS &&
                 lhs.contextPath == rhs.contextPath &&
+                lhs.personalTailscaleAuthentication == rhs.personalTailscaleAuthentication &&
                 lhs.lastConnectedAtMs == rhs.lastConnectedAtMs
         }
     }
@@ -453,6 +455,7 @@ enum GatewaySettingsStore {
             GatewayStableIdentifier.matches($0.stableID, normalized.stableID)
         }) {
             var replacement = normalized
+            replacement.personalTailscaleAuthentication = registry.entries[index].personalTailscaleAuthentication
             if replacement.lastConnectedAtMs == nil {
                 replacement.lastConnectedAtMs = registry.entries[index].lastConnectedAtMs
             }

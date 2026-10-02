@@ -39,8 +39,11 @@ final class NativeGatewayWebSocketFixture {
     private let listener: NWListener
     private let issuedDeviceTokens: [String?]
     private let connectFailures: [Int: ConnectFailure]
+    private let authMethod: String?
+    private let recoveryScope: String?
     private var clients: [Int: Client] = [:]
     private var connectAuth: [ConnectAuth] = []
+    private var connectDeviceIDs: [String?] = []
     private var nextConnectionIndex = 0
     private var stopped = false
     nonisolated let port: UInt16
@@ -49,12 +52,16 @@ final class NativeGatewayWebSocketFixture {
         listener: NWListener,
         port: UInt16,
         issuedDeviceTokens: [String?],
-        connectFailures: [Int: ConnectFailure])
+        connectFailures: [Int: ConnectFailure],
+        authMethod: String?,
+        recoveryScope: String?)
     {
         self.listener = listener
         self.port = port
         self.issuedDeviceTokens = issuedDeviceTokens
         self.connectFailures = connectFailures
+        self.authMethod = authMethod
+        self.recoveryScope = recoveryScope
         self.listener.newConnectionHandler = { [weak self] connection in
             Task { @MainActor [weak self] in
                 guard let self else {
@@ -70,7 +77,9 @@ final class NativeGatewayWebSocketFixture {
     @concurrent
     nonisolated static func start(
         issuedDeviceTokens: [String?],
-        connectFailures: [Int: ConnectFailure] = [:]) async throws -> NativeGatewayWebSocketFixture
+        connectFailures: [Int: ConnectFailure] = [:],
+        authMethod: String? = nil,
+        recoveryScope: String? = nil) async throws -> NativeGatewayWebSocketFixture
     {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
@@ -90,7 +99,9 @@ final class NativeGatewayWebSocketFixture {
                         listener: listener,
                         port: port.rawValue,
                         issuedDeviceTokens: issuedDeviceTokens,
-                        connectFailures: connectFailures)
+                        connectFailures: connectFailures,
+                        authMethod: authMethod,
+                        recoveryScope: recoveryScope)
                     try Task.checkCancellation()
                     return fixture
                 case let .failed(error):
@@ -123,6 +134,11 @@ final class NativeGatewayWebSocketFixture {
     func capturedAuth(at index: Int) -> ConnectAuth? {
         guard self.connectAuth.indices.contains(index) else { return nil }
         return self.connectAuth[index]
+    }
+
+    func capturedDeviceID(at index: Int) -> String? {
+        guard self.connectDeviceIDs.indices.contains(index) else { return nil }
+        return self.connectDeviceIDs[index]
     }
 
     func closeConnection(at index: Int) {
@@ -270,6 +286,7 @@ final class NativeGatewayWebSocketFixture {
 
         let params = request["params"] as? [String: Any]
         let auth = params?["auth"] as? [String: Any]
+        self.connectDeviceIDs.append((params?["device"] as? [String: Any])?["id"] as? String)
         self.connectAuth.append(ConnectAuth(
             token: auth?["token"] as? String,
             bootstrapToken: auth?["bootstrapToken"] as? String,
@@ -279,7 +296,7 @@ final class NativeGatewayWebSocketFixture {
         if let failure = self.connectFailures[index] {
             self.sendConnectFailure(id: id, failure: failure, index: index)
         } else {
-            self.sendConnectOK(id: id, index: index)
+            self.sendConnectOK(id: id, index: index, role: params?["role"] as? String ?? "node")
         }
     }
 
@@ -295,11 +312,13 @@ final class NativeGatewayWebSocketFixture {
         self.sendJSON(frame, index: index)
     }
 
-    private func sendConnectOK(id: String, index: Int) {
+    private func sendConnectOK(id: String, index: Int, role: String) {
         var auth: [String: Any] = [
-            "role": "node",
+            "role": role,
             "scopes": [],
         ]
+        auth["method"] = self.authMethod
+        auth["recoveryScope"] = self.recoveryScope
         if self.issuedDeviceTokens.indices.contains(index),
            let token = self.issuedDeviceTokens[index]
         {

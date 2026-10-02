@@ -125,6 +125,7 @@ public actor GatewayNodeSession {
     private var serverMethods: Set<String>?
     private var serverCapabilities: Set<GatewayServerCapability>?
     private var operatorScopes: Set<String>?
+    private var authRecoveryScope: String?
     var reactionAccess: GatewayReactionAccessFacts?
     private var attachmentLimits: GatewayAttachmentLimits?
     private var mainSessionKey: String?
@@ -206,6 +207,7 @@ public actor GatewayNodeSession {
             deviceIdentityProfile,
             includeDeviceIdentity,
             allowStoredDeviceAuth,
+            options.requiredAuthMethod?.rawValue ?? "",
             permissions,
         ].joined(separator: "|")
         return ConnectOptionsKey(
@@ -742,6 +744,10 @@ public actor GatewayNodeSession {
         self.currentRouteValue(self.operatorScopes, ifCurrentRoute: route)
     }
 
+    public func currentAuthRecoveryScope(ifCurrentRoute route: GatewayNodeSessionRoute) -> String? {
+        self.currentRouteValue(self.authRecoveryScope, ifCurrentRoute: route)
+    }
+
     public func currentAttachmentLimits(ifCurrentRoute route: GatewayNodeSessionRoute) -> GatewayAttachmentLimits? {
         self.currentRouteValue(self.attachmentLimits, ifCurrentRoute: route)
     }
@@ -923,6 +929,7 @@ extension GatewayNodeSession {
             self.serverCapabilities = Set(
                 GatewayServerCapability.allCases.filter { ok.supportsServerCapability($0) })
             self.operatorScopes = ok.advertisedOperatorScopes()
+            self.authRecoveryScope = ok.auth["recoveryScope"]?.stringValue
             self.reactionAccess = GatewayReactionAccessFacts(hello: ok)
             self.attachmentLimits = ok.advertisedAttachmentLimits()
             let snapshotMainSessionKey = ok.snapshot.sessiondefaults?["mainSessionKey"]?.value as? String
@@ -957,6 +964,7 @@ extension GatewayNodeSession {
         self.serverMethods = nil
         self.serverCapabilities = nil
         self.operatorScopes = nil
+        self.authRecoveryScope = nil
         self.reactionAccess = nil
         self.attachmentLimits = nil
         self.mainSessionKey = nil
