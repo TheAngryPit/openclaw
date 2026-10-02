@@ -706,20 +706,7 @@ extension GatewayChannelActor {
             suppressedDeviceTokenRetry: suppressedDeviceTokenRetry)
     }
 
-    nonisolated static func _test_requestedScopesExceedStoredToken(
-        role: String,
-        requestedScopes: [String],
-        storedToken: String?,
-        storedScopes: [String]) -> Bool
-    {
-        self.requestedScopesExceedStoredToken(
-            role: role,
-            requestedScopes: requestedScopes,
-            storedToken: storedToken,
-            storedScopes: storedScopes)
-    }
-
-    private nonisolated static func requestedScopesExceedStoredToken(
+    nonisolated static func requestedScopesExceedStoredToken(
         role: String,
         requestedScopes: [String],
         storedToken: String?,
@@ -1119,7 +1106,7 @@ extension GatewayChannelActor {
         }
         switch frame {
         case let .res(res):
-            self.finishRequest(id: res.id, result: .success(.res(res)))
+            self.finishRequest(id: res.id, result: .success(res))
         case let .event(evt):
             if evt.event == "connect.challenge" { return }
             if let seq = evt.seq {
@@ -1321,8 +1308,7 @@ extension GatewayChannelActor {
         guard let authError = error as? GatewayConnectAuthError else {
             return false
         }
-        return authError.canRetryWithDeviceToken ||
-            authError.detail == .authTokenMismatch
+        return authError.canRetryWithDeviceToken
     }
 
     private func shouldPauseReconnectAfterAuthFailure(_ error: Error) -> Bool {
@@ -1447,11 +1433,11 @@ extension GatewayChannelActor {
         let effectiveTimeout = Self.resolveRequestTimeoutMs(timeoutMs, defaultMs: self.defaultRequestTimeoutMs)
         let payload = try self.encodeRequest(method: method, params: params, kind: "request")
         let cancellationGate = GatewayRequestCancellationGate()
-        let response: GatewayFrame
+        let response: ResponseFrame
         do {
             response = try await withTaskCancellationHandler {
                 try Task.checkCancellation()
-                return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<GatewayFrame, Error>) in
+                return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<ResponseFrame, Error>) in
                     guard !cancellationGate.isCancelled else {
                         cont.resume(throwing: CancellationError())
                         return
@@ -1513,16 +1499,13 @@ extension GatewayChannelActor {
         }
         #endif
         try Task.checkCancellation()
-        guard case let .res(res) = response else {
-            throw NSError(domain: "Gateway", code: 2, userInfo: [NSLocalizedDescriptionKey: "unexpected frame"])
-        }
-        if res.ok == false {
-            let code = res.error?.code
-            let msg = res.error?.message
-            let details = gatewayErrorDetails(res.error)
+        if response.ok == false {
+            let code = response.error?.code
+            let msg = response.error?.message
+            let details = gatewayErrorDetails(response.error)
             throw GatewayResponseError(method: method, code: code, message: msg, details: details)
         }
-        if let payload = res.payload {
+        if let payload = response.payload {
             // Encode back to JSON with Swift's encoder to preserve types and avoid ObjC bridging exceptions.
             return try self.encoder.encode(payload)
         }
@@ -1640,7 +1623,7 @@ extension GatewayChannelActor {
         }
     }
 
-    private func finishRequest(id: String, result: Result<GatewayFrame, Error>) {
+    private func finishRequest(id: String, result: Result<ResponseFrame, Error>) {
         guard let request = self.pending.removeValue(forKey: id) else { return }
         // A deadline belongs to its pending request, including after caller cancellation or disconnect.
         request.timeoutTask?.cancel()

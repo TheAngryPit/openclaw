@@ -11,13 +11,20 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { formatUiError } from "../lib/format-error.ts";
 import { generateUUID } from "../lib/uuid.ts";
 
+export type NativeGatewayHelloExpectation = {
+  method: "tailscale";
+  recoveryScope: string;
+};
+
 export type NativeGatewayAuthorization = {
   client: ConnectParams["client"];
   scopes: string[];
   auth:
     | { deviceToken: string; token?: never; password?: never }
     | { token: string; deviceToken?: never; password?: never }
-    | { password: string; token?: never; deviceToken?: never };
+    | { password: string; token?: never; deviceToken?: never }
+    | Record<string, never>;
+  expectedHelloAuth?: NativeGatewayHelloExpectation;
   device: NonNullable<ConnectParams["device"]>;
 };
 
@@ -90,6 +97,23 @@ function readAuthorization(
   ) {
     throw new Error("The app returned an invalid Gateway authorization. Reconnect in the app.");
   }
+  let nativeAuth: NativeGatewayAuthorization["auth"];
+  let expectedHelloAuth: NativeGatewayHelloExpectation | undefined;
+  if (Object.keys(auth).length === 0) {
+    const recoveryScope = result.expectedRecoveryScope;
+    if (
+      !isRecord(result.auth) ||
+      result.requiredAuthMethod !== "tailscale" ||
+      typeof recoveryScope !== "string" ||
+      recoveryScope.trim().length === 0
+    ) {
+      throw new Error("The app returned an invalid Gateway credential. Reconnect in the app.");
+    }
+    nativeAuth = {};
+    expectedHelloAuth = { method: "tailscale", recoveryScope };
+  } else {
+    nativeAuth = readNativeCredential(auth);
+  }
   return {
     client: {
       id,
@@ -100,7 +124,8 @@ function readAuthorization(
       ...(typeof client.instanceId === "string" ? { instanceId: client.instanceId } : {}),
     },
     scopes: result.scopes,
-    auth: readNativeCredential(auth),
+    auth: nativeAuth,
+    ...(expectedHelloAuth ? { expectedHelloAuth } : {}),
     device: {
       id: device.id,
       publicKey: device.publicKey,

@@ -163,14 +163,19 @@ export class GatewayBrowserClient {
   private deviceTokenRetryBudgetUsed = false;
   private nativeAuthAbort: AbortController | null = null;
   private nativeAuthError: GatewayRequestError | null = null;
+  private nativeHelloAdmissionRequired = false;
+  private pendingNativeHelloTiming: GatewayConnectTiming | null = null;
   // Close/stop advances this generation before another socket can make stale hello work look active.
   private recovery = { value: "", resolved: false, generation: 0 };
   private scopeUpgradeBinding: ScopeUpgradeBinding | null = null;
   private reachabilityProbe: AbortController | null = null;
 
   constructor(private opts: GatewayBrowserClientOptions) {
+    this.nativeHelloAdmissionRequired = Boolean(opts.nativeConnectAuth);
     this.client = new GatewayProtocolClient<ConnectPlan>({
       createSocket: (handlers) => {
+        this.nativeHelloAdmissionRequired = Boolean(this.opts.nativeConnectAuth);
+        this.pendingNativeHelloTiming = null;
         this.reachabilityProbe?.abort();
         this.reachabilityProbe = null;
         this.chatEvents.clear();
@@ -271,11 +276,16 @@ export class GatewayBrowserClient {
         this.lastInboundActivityAtMs = Date.now();
       },
       onTiming: ({ plan, detail, ...timing }) => {
-        this.opts.onConnectTiming?.({
+        const payload = {
           ...timing,
           ...(plan ? this.connectPlanTimingPayload(plan) : {}),
           ...(detail && typeof detail === "object" ? detail : {}),
-        });
+        };
+        if (timing.phase === "hello" && plan?.expectedHelloAuth) {
+          this.pendingNativeHelloTiming = payload;
+          return;
+        }
+        this.publishConnectTiming(payload);
       },
       onRequestTiming: (timing) => this.opts.onRequestTiming?.(timing),
       onCallbackError: (label, error) => console.error(`[gateway] ${label} handler error:`, error),
@@ -373,6 +383,14 @@ export class GatewayBrowserClient {
     };
   }
 
+  private publishConnectTiming(timing: GatewayConnectTiming): void {
+    try {
+      this.opts.onConnectTiming?.(timing);
+    } catch (error) {
+      console.error("[gateway] connect timing handler error:", error);
+    }
+  }
+
   private async buildConnectPlan(
     connectNonce: string | null,
     connectChallengeTs: number | null | undefined,
@@ -380,6 +398,7 @@ export class GatewayBrowserClient {
     serverCapabilities: readonly string[],
   ): Promise<ConnectPlan> {
     this.nativeAuthError = null;
+    this.pendingNativeHelloTiming = null;
     this.recovery = { ...this.recovery, generation, resolved: false };
     this.nativeAuthAbort?.abort();
     this.nativeAuthAbort = new AbortController();
@@ -398,6 +417,7 @@ export class GatewayBrowserClient {
         });
       },
     });
+    this.nativeHelloAdmissionRequired = Boolean(plan.expectedHelloAuth);
     if (this.pendingDeviceTokenRetry && plan.selectedAuth.authDeviceToken) {
       this.pendingDeviceTokenRetry = false;
     }
@@ -405,6 +425,20 @@ export class GatewayBrowserClient {
   }
 
   private handleConnectHello(hello: GatewayHelloOk, plan: ConnectPlan) {
+    const expectedHelloAuth = plan.expectedHelloAuth;
+    if (
+      expectedHelloAuth &&
+      (hello.auth?.method !== expectedHelloAuth.method ||
+        hello.auth?.recoveryScope !== expectedHelloAuth.recoveryScope)
+    ) {
+      this.pendingNativeHelloTiming = null;
+      this.nativeAuthError = new GatewayRequestError({
+        code: "UNAVAILABLE",
+        message: "The Gateway did not return the app-approved Tailscale identity.",
+        retryable: false,
+      });
+      throw this.nativeAuthError;
+    }
     // Publish this connection's identity before listeners can capture recovery intent.
     // A legacy hello must not retain its predecessor while its digest is pending.
     this.recovery.value = hello.auth?.recoveryScope ?? "";
@@ -436,7 +470,13 @@ export class GatewayBrowserClient {
         scopes,
       });
     }
+    this.nativeHelloAdmissionRequired = false;
     void this.resolveRecoveryScope(hello, plan);
+    const timing = this.pendingNativeHelloTiming;
+    this.pendingNativeHelloTiming = null;
+    if (timing) {
+      this.publishConnectTiming(timing);
+    }
   }
 
   private async resolveRecoveryScope(hello: GatewayHelloOk, plan: ConnectPlan) {
@@ -570,6 +610,9 @@ export class GatewayBrowserClient {
     params?: unknown,
     options?: GatewayProtocolRequestOptions,
   ): Promise<T> {
+    if (this.nativeHelloAdmissionRequired) {
+      return Promise.reject(new Error("The native Gateway hello has not been admitted."));
+    }
     return this.chatEvents.request<T>(this.client, method, params, options);
   }
 

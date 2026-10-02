@@ -440,6 +440,123 @@ describe("GatewayBrowserClient", () => {
     expect(connectFrame.params?.scopes).toEqual(["operator.read", "operator.write"]);
   });
 
+  it.each([
+    { method: "token", recoveryScope: "tailscale-account-a" },
+    { method: "tailscale", recoveryScope: "tailscale-account-b" },
+  ])(
+    "rejects a native personal hello with $method auth and $recoveryScope before publishing or issuing requests",
+    async ({ method, recoveryScope }) => {
+      const onHello = vi.fn();
+      const onRecoveryScopeChange = vi.fn();
+      const onClose = vi.fn();
+      const connectTimings = vi.fn();
+      let client!: InstanceType<typeof GatewayBrowserClient>;
+      let reentrantRequest: Promise<unknown> | undefined;
+      client = createClient({
+        nativeConnectAuth: async ({ nonce, signedAt }) => ({
+          client: {
+            id: "openclaw-ios",
+            version: "test",
+            mode: "ui",
+            platform: "iOS",
+          },
+          scopes: ["operator.read", "operator.write"],
+          auth: {},
+          expectedHelloAuth: {
+            method: "tailscale",
+            recoveryScope: "tailscale-account-a",
+          },
+          device: {
+            id: "native-device",
+            publicKey: "synthetic-public-key",
+            signature: "synthetic-signature",
+            nonce,
+            signedAt,
+          },
+        }),
+        onHello,
+        onRecoveryScopeChange,
+        onClose,
+        onConnectTiming: (timing) => {
+          connectTimings(timing);
+          if (timing.phase === "request-sent") {
+            // This callback runs before the connect frame is written. A native
+            // connection must not permit an app RPC before its hello is admitted.
+            reentrantRequest = client.request("gateway.info").catch(() => undefined);
+          }
+        },
+      });
+      const { ws } = await startConnect(client);
+      // The buggy pre-admission callback can send its RPC before connect, so
+      // select the actual connect frame rather than whichever request was last.
+      const connectFrame = ws.sent
+        .map((frame) => JSON.parse(frame) as { id?: string; method?: string })
+        .find((frame) => frame.method === "connect");
+      expect(connectFrame?.id).toBeDefined();
+      emitHello(ws, connectFrame.id, { method, recoveryScope });
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      expect(reentrantRequest).toBeDefined();
+      expect(ws.sent.map((frame) => JSON.parse(frame).method)).toEqual(["connect"]);
+      expect(onHello).not.toHaveBeenCalled();
+      expect(onRecoveryScopeChange).not.toHaveBeenCalled();
+      expect(connectTimings.mock.calls.some(([timing]) => timing.phase === "hello")).toBe(false);
+      expect(client.recoveryScope).toBe("");
+      expect(client.recoveryScopeReady).toBe(false);
+      expect(client.connected).toBe(false);
+      expect(ws.lastClose).toEqual({ code: 4008, reason: "connect failed" });
+      ws.emitClose(4008, "connect failed");
+      expect(onClose).toHaveBeenCalledWith(expect.objectContaining({ willRetry: false }));
+    },
+  );
+
+  it("admits a native Tailscale hello only for its expected personal recovery scope", async () => {
+    const onHello = vi.fn();
+    const onConnectTiming = vi.fn();
+    const client = createClient({
+      nativeConnectAuth: async ({ nonce, signedAt }) => ({
+        client: {
+          id: "openclaw-ios",
+          version: "test",
+          mode: "ui",
+          platform: "iOS",
+        },
+        scopes: ["operator.read", "operator.write"],
+        auth: {},
+        expectedHelloAuth: {
+          method: "tailscale",
+          recoveryScope: "tailscale-account-a",
+        },
+        device: {
+          id: "native-device",
+          publicKey: "synthetic-public-key",
+          signature: "synthetic-signature",
+          nonce,
+          signedAt,
+        },
+      }),
+      onHello,
+      onConnectTiming,
+    });
+    const { ws, connectFrame } = await startConnect(client);
+    emitHello(ws, connectFrame.id, {
+      method: "tailscale",
+      recoveryScope: "tailscale-account-a",
+    });
+    await vi.waitFor(() => expect(onHello).toHaveBeenCalledOnce());
+
+    expect(connectTimingPayloads(onConnectTiming).some((timing) => timing.phase === "hello")).toBe(
+      true,
+    );
+    expect(client.recoveryScope).toBe("tailscale-account-a");
+
+    const request = client.request("gateway.info");
+    const requestFrame = JSON.parse(ws.sent.at(-1) ?? "{}") as { id?: string; method?: string };
+    expect(requestFrame.method).toBe("gateway.info");
+    ws.emitMessage({ type: "res", id: requestFrame.id, ok: true, payload: { ready: true } });
+    await expect(request).resolves.toEqual({ ready: true });
+  });
+
   it("signs device proof with Gateway time instead of browser wall-clock time", async () => {
     useNodeFakeTimers();
     vi.setSystemTime(new Date("2040-01-01T00:00:00.000Z"));

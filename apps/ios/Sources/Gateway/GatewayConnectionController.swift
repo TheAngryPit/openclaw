@@ -664,7 +664,6 @@ final class GatewayConnectionController {
         GatewaySettingsStore.deleteGatewayCredentials(instanceId: instanceID, stableID: stableID)
         _ = GatewaySettingsStore.clearGatewayCustomHeaders(gatewayStableID: stableID)
         _ = GatewayTLSStore.clearFingerprint(stableID: stableID)
-        GatewaySettingsStore.saveGatewayClientIdOverride(stableID: stableID, clientId: nil)
         GatewaySettingsStore.saveGatewaySelectedAgentId(stableID: stableID, agentId: nil)
         let shareRelayGatewayID = ShareGatewayRelaySettings.loadConfig()?.gatewayStableID
         if GatewayStableIdentifier.matches(shareRelayGatewayID, stableID) {
@@ -728,7 +727,6 @@ final class GatewayConnectionController {
 
         var refreshedConfig = cfg
         refreshedConfig.nodeOptions = await self.makeConnectOptions(
-            stableID: cfg.stableID,
             deviceAuthGatewayID: cfg.nodeOptions.deviceAuthGatewayID,
             allowStoredDeviceAuth: cfg.nodeOptions.allowStoredDeviceAuth)
         appModel.applyGatewayConnectConfig(refreshedConfig, expectedGeneration: generation)
@@ -1186,7 +1184,6 @@ extension GatewayConnectionController {
                 guard !Task.isCancelled, generation == appModel.gatewayConnectGeneration else { return }
             }
             let nodeOptions = await self.makeConnectOptions(
-                stableID: gatewayStableID,
                 deviceAuthGatewayID: GatewaySettingsStore.authenticationOwnerID(routeStableID: gatewayStableID),
                 allowStoredDeviceAuth: allowStoredDeviceAuth)
             // Permission reads above can suspend long enough for a model-owned reconnect reset
@@ -1305,7 +1302,6 @@ extension GatewayConnectionController {
             instanceId: GatewaySettingsStore.currentInstanceID(),
             gatewayStableID: stableID)
         let nodeOptions = await self.makeConnectOptions(
-            stableID: stableID,
             deviceAuthGatewayID: GatewaySettingsStore.authenticationOwnerID(routeStableID: stableID),
             allowStoredDeviceAuth: !credentials.suppressStoredDeviceAuth)
         return GatewayConnectConfig(

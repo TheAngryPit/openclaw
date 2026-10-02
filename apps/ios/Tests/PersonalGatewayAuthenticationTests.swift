@@ -1,7 +1,9 @@
 import Foundation
+import JavaScriptCore
 import OpenClawChatUI
 import OpenClawKit
 import Testing
+import WebKit
 @testable import OpenClaw
 
 @MainActor
@@ -35,12 +37,30 @@ struct PersonalGatewayAuthenticationTests {
     }
 
     @Test(arguments: [false, true])
-    func `embedded pages never load an older UI in personal mode`(personal: Bool) throws {
+    func `embedded pages preserve the selected authentication without exporting personal credentials`(
+        personal: Bool) throws
+    {
         let config = try self.config(personal: personal)
-        #expect((AuthenticatedControlUI.pageURL(config: config, path: "settings", queryItems: []) == nil) == personal)
-        #expect((ControlUIHubPage.terminal.url(config: config) == nil) == personal)
-        #expect((ControlUIHubPage.desktop(source: nil, session: nil).url(config: config) == nil) == personal)
-        #expect((SessionDashboardScreen.dashboardURL(config: config, sessionKey: "agent:main:chat") == nil) == personal)
+        let url = try #require(AuthenticatedControlUI.pageURL(config: config, path: "settings", queryItems: []))
+        #expect(ControlUIHubPage.terminal.url(config: config) != nil)
+        #expect(ControlUIHubPage.desktop(source: nil, session: nil).url(config: config) != nil)
+        #expect(SessionDashboardScreen.dashboardURL(config: config, sessionKey: "agent:main:chat") != nil)
+        let script = try #require(AuthenticatedControlUI.authUserScript(
+            config: config, pageURL: url, storedOperatorToken: "synthetic-paired-grant"))
+        let context = try #require(JSContext())
+        context.evaluateScript("var window = {}; var location = {origin: 'https://gateway.example.ts.net'};")
+        context.evaluateScript(script)
+        #expect(context.exception == nil)
+        let auth = try #require(context.evaluateScript("window.__OPENCLAW_NATIVE_CONTROL_AUTH__")?.toDictionary())
+        #expect(auth["gatewayUrl"] as? String == config.url.absoluteString)
+        if personal {
+            #expect(auth["nativeConnectAuth"] as? Bool == true)
+            #expect(auth["token"] == nil)
+            #expect(auth["password"] == nil)
+            #expect(AuthenticatedControlUI.storedOperatorToken(config: config) == nil)
+        } else {
+            #expect(auth["token"] as? String == "synthetic-shared-token")
+        }
     }
 
     @Test func `personal mode cannot create a legacy persistent transcript or outbox`() throws {
@@ -57,6 +77,50 @@ struct PersonalGatewayAuthenticationTests {
         model.adoptPersonalChatOwner(scope: "synthetic-person-b", stableID: "manual|gateway.example.ts.net|443")
         #expect(model.chatViewModelOwnerID != owner)
         #expect(model.makeChatOfflineStore() == nil)
+    }
+
+    @Test(arguments: [false, true])
+    func `native Dashboard bridge refuses foreign documents and retires lost authority`(
+        foreignOrigin: Bool) async throws
+    {
+        let config = try self.config(personal: true)
+        let url = try #require(AuthenticatedControlUI.pageURL(config: config, path: "settings", queryItems: []))
+        let fixture =
+            DashboardDocumentFixture(url: foreignOrigin ? URL(string: "https://foreign.example/settings")! : url)
+        let model = NodeAppModel(audioAdmissionInitiallyAllowed: false)
+        model.activeGatewayConnectConfig = config
+        model.setOperatorConnected(true)
+        let bridge = IOSPersonalGatewayAuthBridge(appModel: model, config: config, url: url)
+        let controller = fixture.webView.configuration.userContentController
+        controller.addScriptMessageHandler(bridge, contentWorld: .page, name: IOSPersonalGatewayAuthBridge.name)
+        bridge.attach(to: fixture.webView)
+        defer {
+            bridge.detach()
+            controller.removeScriptMessageHandler(forName: IOSPersonalGatewayAuthBridge.name, contentWorld: .page)
+        }
+        bridge.startNavigation()
+        _ = try await fixture.load(hasEmbedMarker: true)
+        bridge.commitNavigation()
+        let response = try await fixture.webView.callAsyncJavaScript(
+            """
+            try {
+              return await window.webkit.messageHandlers.OpenClawNativeGatewayAuth.postMessage({
+                id: 'synthetic-request', nonce: 'synthetic-challenge', signedAt: Date.now()
+              });
+            } catch (error) { return { rejected: String(error) }; }
+            """,
+            arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
+        let reply = try #require(response)
+        #expect(reply["result"] == nil)
+        if foreignOrigin {
+            #expect((reply["rejected"] as? String)?.contains("Invalid native Gateway") == true)
+        } else {
+            #expect(reply["error"] as? String == "Personal sign-in is unavailable. Reconnect in the app.")
+        }
+        model.setOperatorConnected(false)
+        try await waitForDashboardCondition { !fixture.webView.isLoading && fixture.webView.url?.host == nil }
+        let body = try await fixture.webView.evaluateJavaScript("document.body.textContent") as? String
+        #expect(body?.contains("Personal sign-in changed") == true)
     }
 
     @Test func `old saved gateways retain shared-owner authentication`() throws {

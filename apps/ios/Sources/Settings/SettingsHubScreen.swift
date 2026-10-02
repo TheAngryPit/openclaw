@@ -83,12 +83,6 @@ struct SettingsHubScreen: View {
                 }
         } else {
             VStack(spacing: 0) {
-                if config?.personalTailscaleAuthentication == true {
-                    Text("Embedded Gateway pages aren't available with personal sign-in yet.")
-                        .font(OpenClawType.footnote)
-                        .foregroundStyle(.secondary)
-                        .padding()
-                }
                 SettingsProTab(
                     registersNavigationDestinations: false,
                     headerSidebarAction: self.headerSidebarAction,
@@ -136,6 +130,7 @@ struct SettingsHubScreen: View {
 }
 
 struct EmbeddedDashboardContent: View {
+    let appModel: NodeAppModel
     @State private var bridge: IOSDeviceSettingsBridge
     let embedCompatibility: DashboardEmbedCompatibility?
     let url: URL
@@ -152,6 +147,7 @@ struct EmbeddedDashboardContent: View {
         embedCompatibility: DashboardEmbedCompatibility? = nil,
         openGateway: (() -> Void)? = nil)
     {
+        self.appModel = appModel
         self.url = url
         self.config = config
         self.openGateway = openGateway
@@ -183,7 +179,8 @@ struct EmbeddedDashboardContent: View {
                 embedCompatibility: self.embedCompatibility)
                 .id(AuthenticatedControlUI.webContentIdentity(
                     config: self.config,
-                    storedOperatorToken: storedOperatorToken))
+                    storedOperatorToken: storedOperatorToken,
+                    authorityGeneration: self.appModel.operatorAuthorityGeneration))
                 .accessibilityIdentifier("SettingsHub.Dashboard")
         }
     }

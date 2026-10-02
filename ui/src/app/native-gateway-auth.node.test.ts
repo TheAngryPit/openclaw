@@ -16,6 +16,7 @@ import { resolveApplicationStartupSettings } from "./startup-settings.ts";
 
 const gatewayUrl = "wss://gateway.example/work/";
 const scopes = ["operator.read", "operator.write"];
+const personalRecoveryScope = "tailscale-account-a";
 const nativeClient = {
   id: "openclaw-android",
   version: "test",
@@ -49,7 +50,7 @@ class RecordingSocket extends MockWebSocket {
 function signedAuthorization(
   challenge: Challenge,
   token = "synthetic-native-grant",
-  kind: "token" | "password" | "deviceToken" = "deviceToken",
+  kind: "token" | "password" | "deviceToken" | "credentialless" = "deviceToken",
 ) {
   const payload = buildDeviceAuthPayloadV3({
     deviceId,
@@ -59,7 +60,7 @@ function signedAuthorization(
     deviceFamily: nativeClient.deviceFamily,
     role: "operator",
     scopes,
-    token: kind === "password" ? null : token,
+    token: kind === "password" || kind === "credentialless" ? null : token,
     nonce: challenge.nonce,
     signedAtMs: challenge.signedAt,
   });
@@ -68,7 +69,13 @@ function signedAuthorization(
     result: {
       client: nativeClient,
       scopes,
-      auth: { [kind]: token },
+      auth: kind === "credentialless" ? {} : { [kind]: token },
+      ...(kind === "credentialless"
+        ? {
+            requiredAuthMethod: "tailscale",
+            expectedRecoveryScope: personalRecoveryScope,
+          }
+        : {}),
       device: {
         id: deviceId,
         publicKey: publicKeyBytes.toString("base64url"),
@@ -370,14 +377,127 @@ describe("native authenticated Control UI", () => {
     },
   );
 
+  it.each(["Android", "WebKit", "Tauri"] as const)(
+    "uses credentialless Tailscale auth over %s only with the app-approved personal recovery scope",
+    async (transport) => {
+      if (transport === "WebKit") {
+        Object.assign(window, {
+          OpenClawNativeGatewayAuth: undefined,
+          webkit: {
+            messageHandlers: {
+              OpenClawNativeGatewayAuth: {
+                postMessage: async (challenge: Challenge) =>
+                  signedAuthorization(challenge, undefined, "credentialless"),
+              },
+            },
+          },
+        });
+      } else if (transport === "Tauri") {
+        bridge.postMessage.mockImplementation((message) =>
+          Promise.resolve(signedAuthorization(JSON.parse(message), undefined, "credentialless")),
+        );
+      } else {
+        bridge.postMessage.mockImplementation((message) => {
+          bridge.onmessage?.({
+            data: JSON.stringify(
+              signedAuthorization(JSON.parse(message), undefined, "credentialless"),
+            ),
+          });
+        });
+      }
+      const socket = connect();
+      const frame = await Promise.race([
+        socket.connect.promise,
+        socket.closed.promise.then(() => {
+          throw new Error("native Tailscale authorization was rejected before connect");
+        }),
+      ]);
+      expect(frame.params.auth).toEqual({});
+      expect(frame.params.device?.id).toBe(deviceId);
+      expect(frame.params.scopes).toEqual(scopes);
+      if (transport === "WebKit") {
+        expect(bridge.postMessage).not.toHaveBeenCalled();
+      } else {
+        expect(bridge.postMessage).toHaveBeenCalledOnce();
+      }
+      expect(localStorage.getItem("openclaw-device-identity-v1")).toBeNull();
+      expect(localStorage.getItem("openclaw.device.auth.v1:wss://gateway.example/work")).toBeNull();
+
+      const device = frame.params.device!;
+      const payload = buildDeviceAuthPayloadV3({
+        deviceId: device.id,
+        clientId: frame.params.client.id,
+        clientMode: frame.params.client.mode,
+        platform: frame.params.client.platform,
+        deviceFamily: frame.params.client.deviceFamily,
+        role: frame.params.role!,
+        scopes: frame.params.scopes!,
+        token: null,
+        nonce: device.nonce!,
+        signedAtMs: device.signedAt,
+      });
+      expect(
+        verify(
+          null,
+          Buffer.from(payload),
+          keys.publicKey,
+          Buffer.from(device.signature, "base64url"),
+        ),
+      ).toBe(true);
+
+      socket.emitMessage({
+        type: "res",
+        id: frame.id,
+        ok: true,
+        payload: {
+          type: "hello-ok",
+          protocol: 3,
+          auth: {
+            role: "operator",
+            scopes,
+            method: "tailscale",
+            recoveryScope: personalRecoveryScope,
+          },
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(gateway!.snapshot.phase).toBe("connected");
+      expect(gateway!.snapshot.hello?.auth).toMatchObject({
+        method: "tailscale",
+        recoveryScope: personalRecoveryScope,
+      });
+    },
+  );
+
   it.each([
-    { bootstrapToken: "not-a-reusable-native-grant" },
-    { token: "shared", deviceToken: "ambiguous-second-method" },
-    { token: "" },
-  ])("rejects invalid or ambiguous native credentials %j", async (auth) => {
+    { auth: { bootstrapToken: "not-a-reusable-native-grant" } },
+    { auth: { token: "shared", deviceToken: "ambiguous-second-method" } },
+    { auth: { token: "" } },
+    { auth: {}, requiredAuthMethod: "token", expectedRecoveryScope: personalRecoveryScope },
+    { auth: {}, requiredAuthMethod: "tailscale", expectedRecoveryScope: "   " },
+    { requiredAuthMethod: "tailscale", expectedRecoveryScope: personalRecoveryScope },
+  ] as Array<{
+    auth?: unknown;
+    requiredAuthMethod?: unknown;
+    expectedRecoveryScope?: unknown;
+  }>)("rejects invalid or ambiguous native credentials %j", async (authorization) => {
     bridge.postMessage.mockImplementation((message) => {
       const reply = signedAuthorization(JSON.parse(message));
-      bridge.onmessage?.({ data: JSON.stringify({ ...reply, result: { ...reply.result, auth } }) });
+      bridge.onmessage?.({
+        data: JSON.stringify({
+          ...reply,
+          result: {
+            ...reply.result,
+            auth: authorization.auth,
+            ...(authorization.requiredAuthMethod
+              ? { requiredAuthMethod: authorization.requiredAuthMethod }
+              : {}),
+            ...(authorization.expectedRecoveryScope !== undefined
+              ? { expectedRecoveryScope: authorization.expectedRecoveryScope }
+              : {}),
+          },
+        }),
+      });
     });
     const socket = connect();
     await socket.closed.promise;
