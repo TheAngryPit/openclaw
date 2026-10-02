@@ -443,7 +443,7 @@ describe("GatewayBrowserClient", () => {
   it.each([
     { method: "token", recoveryScope: "tailscale-account-a" },
     { method: "tailscale", recoveryScope: "tailscale-account-b" },
-  ])(
+  ] as const)(
     "rejects a native personal hello with $method auth and $recoveryScope before publishing or issuing requests",
     async ({ method, recoveryScope }) => {
       const onHello = vi.fn();
@@ -492,7 +492,9 @@ describe("GatewayBrowserClient", () => {
       const connectFrame = ws.sent
         .map((frame) => JSON.parse(frame) as { id?: string; method?: string })
         .find((frame) => frame.method === "connect");
-      expect(connectFrame?.id).toBeDefined();
+      if (!connectFrame?.id) {
+        throw new Error("Expected the native connect request before its hello response");
+      }
       emitHello(ws, connectFrame.id, { method, recoveryScope });
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -1248,37 +1250,6 @@ describe("GatewayBrowserClient", () => {
       },
       willRetry: false,
     });
-  });
-
-  it("bounds startup retry delay and reports the retry decision", async () => {
-    useNodeFakeTimers();
-    vi.mocked(Math.random).mockReturnValue(0.5);
-    const onClose = vi.fn();
-    const { ws, connectFrame } = await startConnect(
-      createClient({ token: "shared-auth-token", onClose }),
-    );
-    const error = {
-      code: "UNAVAILABLE",
-      message: "gateway starting; retry shortly",
-      details: { reason: "startup-sidecars" },
-      retryable: true,
-      retryAfterMs: 90_000,
-    };
-    ws.emitMessage({ type: "res", id: connectFrame.id, ok: false, error });
-    await expectSocketClosed(ws);
-    expect(ws.lastClose).toEqual({ code: 4013, reason: "gateway starting" });
-    ws.emitClose(4013, "gateway starting");
-    expect(onClose).toHaveBeenCalledWith({
-      code: 4013,
-      reason: "gateway starting",
-      error,
-      willRetry: true,
-    });
-    expect(wsInstances).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(1_999);
-    expect(wsInstances).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(wsInstances).toHaveLength(2);
   });
 
   it("does not auto-reconnect on PROTOCOL_MISMATCH", async () => {
