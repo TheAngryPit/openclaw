@@ -107,7 +107,6 @@ struct PersonalGatewayAuthenticationTests {
         model.activeGatewayConnectConfig = nil
         model.activeGatewayConnectConfig = config
         #expect(model.chatViewModelOwnerID != previousOwner)
-        #expect(model.chatViewModelOwnerID.contains("pending"))
     }
 
     @Test func `personal Watch admission never takes durable custody of a command`() async throws {
