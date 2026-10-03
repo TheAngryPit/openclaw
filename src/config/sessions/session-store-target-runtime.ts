@@ -28,19 +28,22 @@ type StoreTargetReadOwner = {
 
 function prepareSessionStoreRegistryRead(
   request: Pick<SessionStoreTargetInventoryRequest, "env" | "candidates" | "registryDiscovery">,
-  unchangedBy?: Parameters<typeof prepareOpenClawAgentDatabaseRegistrySnapshotRead>[1],
 ) {
   return prepareOpenClawAgentDatabaseRegistrySnapshotRead(
     { env: request.env },
-    unchangedBy ??
-      createSessionStoreRegistryMutationFilter({
-        captured: request.candidates.map((candidate) => {
+    createSessionStoreRegistryMutationFilter({
+      captured: request.candidates.map((candidate) => {
+        try {
           const identity = readDatabasePathIdentitySync(candidate.path);
           return { candidate, identity: identity.key, birthtime: identity.birthtime };
-        }),
-        preparedSources: [],
-        registryDiscovery: request.registryDiscovery,
+        } catch {
+          // Retain path fencing; the worker owns an unreadable candidate's diagnostic.
+          return { candidate, identity: "unavailable" };
+        }
       }),
+      preparedSources: [],
+      registryDiscovery: request.registryDiscovery,
+    }),
   );
 }
 
@@ -50,10 +53,9 @@ export function prepareSessionStoreTargetInventoryRead(
   unchangedBy?: Parameters<typeof prepareOpenClawAgentDatabaseRegistrySnapshotRead>[1],
 ) {
   const { candidates, ...prepared } = request;
-  const registry = prepareOpenClawAgentDatabaseRegistrySnapshotRead(
-    { env: request.env },
-    unchangedBy,
-  );
+  const captureRegistry = () =>
+    prepareOpenClawAgentDatabaseRegistrySnapshotRead({ env: request.env }, unchangedBy);
+  let registry = captureRegistry();
   let registryStarted = false;
   const assertRegistryCurrent = () => {
     // Explicit publication scopes retain their witness before discovery; other
@@ -84,8 +86,18 @@ export function prepareSessionStoreTargetInventoryRead(
         assertCurrent();
         if (inventory.kind === "session-target-registry-required") {
           registryStarted = true;
-          const current = await registry.read();
+          let current;
+          try {
+            current = await registry.read();
+          } catch (error) {
+            if (!(error instanceof AgentDatabaseRegistryChangedError)) {
+              throw error;
+            }
+            registry = captureRegistry();
+            current = await registry.read();
+          }
           assertCurrent();
+          registry = unchangedBy ? registry : prepareSessionStoreRegistryRead(request);
           inventory = await discovery.readTargetInventory({
             ...prepared,
             registeredDatabases:

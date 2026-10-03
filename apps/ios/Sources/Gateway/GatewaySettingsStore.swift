@@ -438,9 +438,6 @@ enum GatewaySettingsStore {
         personalTailscaleAuthentication: Bool? = nil) -> Bool
     {
         guard let normalized = self.normalizedGatewayRegistryEntry(entry) else { return false }
-        guard personalTailscaleAuthentication != true ||
-            normalized.useTLS && normalized.host?.lowercased().hasSuffix(".ts.net") == true
-        else { return false }
         var registry = self.loadGatewayRegistry()
         if let index = registry.entries.firstIndex(where: {
             GatewayStableIdentifier.matches($0.stableID, normalized.stableID)
@@ -461,6 +458,11 @@ enum GatewaySettingsStore {
         {
             registry.entries[index].personalTailscaleAuthentication = personalTailscaleAuthentication ? true : nil
         }
+        guard registry.entries.first(where: {
+            GatewayStableIdentifier.matches($0.stableID, normalized.stableID)
+        })?.personalTailscaleAuthentication != true ||
+            normalized.useTLS && normalized.host?.lowercased().hasSuffix(".ts.net") == true
+        else { return false }
         if activate {
             registry.activeStableID = normalized.stableID
             if !registry.connectedStableIDs.contains(where: {

@@ -203,6 +203,8 @@ const repositoryScriptEntries = [
   "scripts/mantis/observe-request-web-ui.mts!",
   "scripts/mantis/telegram-proof-bridge.mjs!",
   "scripts/mcp-code-mode-gateway-e2e.ts!",
+  // Immutable systemd installations invoke the packaged launcher by path.
+  "scripts/openclaw-immutable-launcher.mjs!",
   // Existing explicit Linux proof driver imports the inactive capsule adapter.
   // Reachability for auditing is not registration or permission to execute it.
   "scripts/openclaw-release-clawhub-plan.ts!",
@@ -404,6 +406,8 @@ const rootEntries = [
   "src/gateway/plugin-channel-reload-targets.ts!",
   // Published-update bridges import lifecycle facts from this stable dist entry.
   "src/agents/provider-runtime-lifecycle.ts!",
+  // July and later Gateways retain this lazy entry across in-place updates.
+  "src/agents/models-config.runtime.ts!",
   // Shipped compatibility facade for statusCommand and getStatusSummary.
   "src/commands/status.ts!",
   "src/cli/daemon-cli.ts!",

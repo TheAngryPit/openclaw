@@ -710,6 +710,14 @@ private func withLastGatewaySnapshot(_ body: () -> Void) {
             #expect(GatewaySettingsStore.loadGatewayRegistry().activeEntry?.personalTailscaleAuthentication == true)
             #expect(GatewaySettingsStore.upsertGatewayRegistryEntry(entry))
             #expect(GatewaySettingsStore.usesPersonalTailscaleAuthentication(stableID: entry.stableID))
+            let personalRegistry = GatewaySettingsStore.loadGatewayRegistry()
+            for replacement in [(false, entry.host), (true, "example.test")] {
+                var invalid = entry
+                invalid.useTLS = replacement.0
+                invalid.host = replacement.1
+                #expect(!GatewaySettingsStore.upsertGatewayRegistryEntry(invalid, activate: true))
+                #expect(GatewaySettingsStore.loadGatewayRegistry() == personalRegistry)
+            }
             #expect(GatewaySettingsStore.upsertGatewayRegistryEntry(
                 entry,
                 personalTailscaleAuthentication: false))

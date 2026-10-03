@@ -12,6 +12,7 @@ export const gatewayPluginTestFiles = [
 // Native database consumers retain lifecycle cleanup within each forked process.
 export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/approval-fixture.test.ts",
+  "src/gateway/auth-token-store-ref.test.ts",
   "src/gateway/board-http.test.ts",
   "src/gateway/board-store.test.ts",
   "src/gateway/chat-display-projection.cron.test.ts",
@@ -169,6 +170,8 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/server-methods/worktrees.test.ts",
   "src/gateway/server-startup-restart-sentinel.test.ts",
   "src/gateway/server-worker-environment-startup.test.ts",
+  "src/gateway/server-worker-placement-session-evidence.test.ts",
+  "src/gateway/server-worker-placement-session-evidence.worker.test.ts",
   "src/gateway/server-worker-placement-startup-maintenance.test.ts",
   "src/gateway/server.sessions.create-worktree-spawn.test.ts",
   "src/gateway/server.sessions.create.projects.test.ts",
@@ -243,6 +246,7 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/setup-inference.first-signin.integration.test.ts",
   "src/gateway/startup-local-cli-pairing.test.ts",
   "src/gateway/talk/client-authority.test.ts",
+  "src/gateway/talk/client-spoken-confirmation.test.ts",
   "src/gateway/talk/handlers/client-native-actions.test.ts",
   "src/gateway/talk/handlers/client-native-control.test.ts",
   "src/gateway/talk/handlers/client.test.ts",
@@ -355,6 +359,7 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/worker-environments/store.test.ts",
   "src/gateway/worker-environments/transcript-commit-store.test.ts",
   "src/gateway/worker-environments/transcript-commit.lazy.test.ts",
+  "src/gateway/worker-environments/transcript-commit.lifecycle.test.ts",
   "src/gateway/worker-environments/transcript-commit.test.ts",
   "src/gateway/worker-environments/worker-portal-tool-executor.test.ts",
   "src/gateway/worker-environments/worker-session-tool-executor.send.test.ts",

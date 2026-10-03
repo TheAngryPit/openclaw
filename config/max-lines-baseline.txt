@@ -360,7 +360,6 @@ src/cli/gateway-cli/run-loop.test.ts
 src/cli/gateway-cli/run-loop.ts
 src/cli/gateway-cli/run.option-collisions.test.ts
 src/cli/gateway-cli/run.ts
-src/cli/logs-cli.ts
 src/cli/mcp-cli.ts
 src/cli/plugins-authoring-command.ts
 src/cli/plugins-cli-test-helpers.ts
@@ -522,9 +521,7 @@ src/infra/state-migrations.test.ts
 src/infra/update-global.ts
 src/infra/update-managed-service-handoff.ts
 src/infra/update-startup.test.ts
-src/infra/update-startup.ts
 src/interactive/payload.ts
-src/llm/providers/stream-wrappers/openai.ts
 src/logging/diagnostic-stability-bundle.ts
 src/logging/diagnostic-stability.ts
 src/logging/diagnostic-support-export.ts
@@ -571,7 +568,6 @@ src/plugins/marketplace.ts
 src/plugins/plugin-registry-snapshot.test.ts
 src/plugins/provider-runtime.test.ts
 src/plugins/provider-runtime.ts
-src/plugins/providers.ts
 src/plugins/schema-validator.test.ts
 src/plugins/sdk-alias.test.ts
 src/plugins/sdk-alias.ts
