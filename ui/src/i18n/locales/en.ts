@@ -47,6 +47,7 @@ export const en: TranslationMap & {
         | "linkedEmails",
         string
       >;
+    channelIdentities: TranslationMap;
   };
   connection: TranslationMap;
   configView: TranslationMap;
@@ -2576,6 +2577,7 @@ export const en: TranslationMap & {
       displayName: "Display name",
       linkedEmails: "Linked emails",
     },
+    channelIdentities: {},
     modelAccounts: {},
   },
   skillWorkshop: {},
