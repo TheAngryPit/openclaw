@@ -1,13 +1,16 @@
+import CryptoKit
 import Foundation
 import JavaScriptCore
 import OpenClawChatUI
-import OpenClawKit
 import Testing
 import WebKit
 @testable import OpenClaw
+@testable import OpenClawKit
 
 @MainActor
 struct PersonalGatewayAuthenticationTests {
+    private let personalRecoveryScope = "synthetic-personal-recovery-scope"
+
     private func config(personal: Bool) throws -> GatewayConnectConfig {
         try GatewayConnectConfig(
             url: #require(URL(string: "wss://gateway.example.ts.net")),
@@ -21,6 +24,56 @@ struct PersonalGatewayAuthenticationTests {
                 clientId: "ios", clientMode: "node", clientDisplayName: "Phone",
                 deviceAuthGatewayID: "manual|gateway.example.ts.net|443"),
             personalTailscaleAuthentication: personal)
+    }
+
+    private func personalConfig(url: URL) -> GatewayConnectConfig {
+        let stableID = "personal-auth-\(UUID().uuidString)"
+        let options = GatewayConnectOptions(
+            role: "operator", scopes: [], caps: [], commands: [], permissions: [:],
+            clientId: "ios", clientMode: "ui", clientDisplayName: "Phone",
+            includeDeviceIdentity: true, allowStoredDeviceAuth: false,
+            deviceAuthGatewayID: stableID)
+        return GatewayConnectConfig(
+            url: url, stableID: stableID, tls: nil, token: "synthetic-shared-token",
+            bootstrapToken: nil, password: nil, nodeOptions: options,
+            personalTailscaleAuthentication: true)
+    }
+
+    private func connectPersonalOperator(model: NodeAppModel, config: GatewayConnectConfig) async throws {
+        model.activeGatewayConnectConfig = config
+        try await model.operatorSession.connect(
+            url: config.url,
+            credentials: config.operatorCredentials(fallback: GatewayNodeSessionCredentials(
+                token: config.token, bootstrapToken: config.bootstrapToken, password: config.password)),
+            connectOptions: config.operatorOptions(from: config.nodeOptions),
+            sessionBox: nil,
+            onConnected: { await model.setOperatorConnected(true) },
+            onDisconnected: { _ in await model.setOperatorConnected(false) },
+            onInvoke: { BridgeInvokeResponse(id: $0.id, ok: true) })
+    }
+
+    private func withConnectedPersonalOperator(
+        model: NodeAppModel,
+        config: GatewayConnectConfig,
+        operation: () async throws -> Void) async throws
+    {
+        do {
+            try await self.connectPersonalOperator(model: model, config: config)
+            try await operation()
+            await model.operatorSession.disconnect()
+        } catch {
+            await model.operatorSession.disconnect()
+            throw error
+        }
+    }
+
+    private func decodeBase64URL(_ value: String) -> Data? {
+        var base64 = value.replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        while !base64.count.isMultiple(of: 4) {
+            base64.append("=")
+        }
+        return Data(base64Encoded: base64)
     }
 
     @Test(arguments: [false, true])
@@ -121,6 +174,172 @@ struct PersonalGatewayAuthenticationTests {
         try await waitForDashboardCondition { !fixture.webView.isLoading && fixture.webView.url?.host == nil }
         let body = try await fixture.webView.evaluateJavaScript("document.body.textContent") as? String
         #expect(body?.contains("Personal sign-in changed") == true)
+    }
+
+    @Test
+    func `personal Dashboard bridge returns a signed challenge after users self verifies the profile`() async throws {
+        let stateDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("personal-gateway-auth-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        try await DeviceIdentityStore.withStateDirectory(stateDirectory) {
+            let fixture = try await NativeGatewayWebSocketFixture.start(
+                issuedDeviceTokens: [],
+                authMethod: "tailscale",
+                recoveryScope: self.personalRecoveryScope,
+                manualResponseMethods: ["users.self"])
+            defer { fixture.stop() }
+
+            let config = self.personalConfig(url: fixture.url())
+            let model = NodeAppModel(audioAdmissionInitiallyAllowed: false)
+            try await self.withConnectedPersonalOperator(model: model, config: config) {
+                #expect(model.isOperatorGatewayConnected)
+                let route = try #require(await model.operatorSession.currentRoute(
+                    ifGatewayID: config.effectiveStableID))
+                #expect(await model.operatorSession.currentAuthRecoveryScope(ifCurrentRoute: route) ==
+                    self.personalRecoveryScope)
+
+                let url = try #require(
+                    AuthenticatedControlUI.pageURL(config: config, path: "settings", queryItems: []))
+                let document = DashboardDocumentFixture(url: url)
+                let bridge = IOSPersonalGatewayAuthBridge(appModel: model, config: config, url: url)
+                let controller = document.webView.configuration.userContentController
+                controller.addScriptMessageHandler(
+                    bridge, contentWorld: .page, name: IOSPersonalGatewayAuthBridge.name)
+                bridge.attach(to: document.webView)
+                defer {
+                    bridge.detach()
+                    controller.removeScriptMessageHandler(
+                        forName: IOSPersonalGatewayAuthBridge.name, contentWorld: .page)
+                }
+                bridge.startNavigation()
+                _ = try await document.load(hasEmbedMarker: true)
+                bridge.commitNavigation()
+
+                let requestID = "synthetic-personal-request"
+                let nonce = "synthetic-personal-challenge"
+                let signedAtMs: Int64 = 1_800_000_000_000
+                let replyDataTask = Task<Data?, Error> { @MainActor in
+                    let reply = try await document.webView.callAsyncJavaScript(
+                        """
+                        return await window.webkit.messageHandlers.OpenClawNativeGatewayAuth.postMessage({
+                          id: '\(requestID)', nonce: '\(nonce)', signedAt: \(signedAtMs)
+                        });
+                        """,
+                        arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
+                    guard let reply, JSONSerialization.isValidJSONObject(reply) else { return nil }
+                    return try JSONSerialization.data(withJSONObject: reply)
+                }
+                let rpc = try await fixture.waitForRPC(method: "users.self")
+                #expect(rpc.method == "users.self")
+                #expect(rpc.id.isEmpty == false)
+                #expect(rpc.params?.isEmpty == true)
+                #expect(fixture.capturedRPC(at: rpc.index)?.id == rpc.id)
+                #expect(fixture.respond(to: rpc, payload: ["profile": ["id": "synthetic-person-a"]]))
+
+                let replyData = try #require(try await replyDataTask.value)
+                let reply = try #require(try JSONSerialization.jsonObject(with: replyData) as? [String: Any])
+                #expect(reply["id"] as? String == requestID)
+                #expect(reply["error"] == nil)
+                let result = try #require(reply["result"] as? [String: Any])
+                #expect(result["requiredAuthMethod"] as? String == "tailscale")
+                #expect(result["expectedRecoveryScope"] as? String == self.personalRecoveryScope)
+                let scopes = try #require(await model.operatorSession.currentOperatorScopes(ifCurrentRoute: route))
+                #expect(result["scopes"] as? [String] == scopes.sorted())
+
+                let device = try #require(result["device"] as? [String: Any])
+                let deviceID = try #require(device["id"] as? String)
+                let publicKey = try #require(device["publicKey"] as? String)
+                let publicKeyData = try #require(self.decodeBase64URL(publicKey))
+                // Verify the returned ID/key/signature agree; this does not prove identity-store lineage.
+                let derivedDeviceID = SHA256.hash(data: publicKeyData)
+                    .compactMap { String(format: "%02x", $0) }
+                    .joined()
+                #expect(deviceID == derivedDeviceID)
+                #expect(device["signedAt"] as? Int == Int(signedAtMs))
+                #expect(device["nonce"] as? String == nonce)
+                let signature = try #require(self.decodeBase64URL(device["signature"] as? String ?? ""))
+                let signingKey = try Curve25519.Signing.PublicKey(rawRepresentation: publicKeyData)
+                let fields = GatewayDeviceAuthPayload.Fields(
+                    deviceId: deviceID,
+                    client: .init(id: config.nodeOptions.clientId, mode: "ui"),
+                    role: "operator",
+                    scopes: scopes.sorted(),
+                    signedAtMs: signedAtMs,
+                    token: nil,
+                    nonce: nonce)
+                let payload = GatewayDeviceAuthPayload.buildConnectCompatibilityPayload(fields: fields)
+                #expect(signingKey.isValidSignature(signature, for: Data(payload.utf8)))
+            }
+        }
+    }
+
+    @Test
+    func `personal Dashboard bridge drops a pending signed result when operator authority is revoked`() async throws {
+        let stateDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("personal-gateway-auth-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        try await DeviceIdentityStore.withStateDirectory(stateDirectory) {
+            let fixture = try await NativeGatewayWebSocketFixture.start(
+                issuedDeviceTokens: [],
+                authMethod: "tailscale",
+                recoveryScope: self.personalRecoveryScope,
+                manualResponseMethods: ["users.self"])
+            defer { fixture.stop() }
+
+            let config = self.personalConfig(url: fixture.url())
+            let model = NodeAppModel(audioAdmissionInitiallyAllowed: false)
+            try await self.withConnectedPersonalOperator(model: model, config: config) {
+                #expect(model.isOperatorGatewayConnected)
+                let route = try #require(await model.operatorSession.currentRoute(
+                    ifGatewayID: config.effectiveStableID))
+                #expect(await model.operatorSession.currentAuthRecoveryScope(ifCurrentRoute: route) ==
+                    self.personalRecoveryScope)
+
+                let url = try #require(
+                    AuthenticatedControlUI.pageURL(config: config, path: "settings", queryItems: []))
+                let document = DashboardDocumentFixture(url: url)
+                let bridge = IOSPersonalGatewayAuthBridge(appModel: model, config: config, url: url)
+                let controller = document.webView.configuration.userContentController
+                controller.addScriptMessageHandler(
+                    bridge, contentWorld: .page, name: IOSPersonalGatewayAuthBridge.name)
+                bridge.attach(to: document.webView)
+                defer {
+                    bridge.detach()
+                    controller.removeScriptMessageHandler(
+                        forName: IOSPersonalGatewayAuthBridge.name, contentWorld: .page)
+                }
+                bridge.startNavigation()
+                _ = try await document.load(hasEmbedMarker: true)
+                bridge.commitNavigation()
+
+                let hasSignedResultTask = Task { @MainActor in
+                    guard let reply = try? await document.webView.callAsyncJavaScript(
+                        """
+                        try {
+                          return await window.webkit.messageHandlers.OpenClawNativeGatewayAuth.postMessage({
+                            id: 'synthetic-revoked-request',
+                            nonce: 'synthetic-revoked-challenge',
+                            signedAt: 1800000000000
+                          });
+                        } catch (error) { return { rejected: String(error) }; }
+                        """,
+                        arguments: [:], in: nil, contentWorld: .page) as? [String: Any]
+                    else { return false }
+                    return reply["result"] != nil
+                }
+                let rpc = try await fixture.waitForRPC(method: "users.self")
+                #expect(rpc.params?.isEmpty == true)
+
+                model.setOperatorConnected(false)
+                try await waitForDashboardCondition {
+                    !document.webView.isLoading && document.webView.url?.host == nil
+                }
+                let body = try await document.webView.evaluateJavaScript("document.body.textContent") as? String
+                #expect(body?.contains("Personal sign-in changed") == true)
+                #expect(fixture.respond(to: rpc, payload: ["profile": ["id": "synthetic-person-a"]]))
+                #expect(await hasSignedResultTask.value == false)
+            }
+        }
     }
 
     @Test func `old saved gateways retain shared-owner authentication`() throws {

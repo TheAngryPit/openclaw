@@ -783,6 +783,40 @@ private func withLastGatewaySnapshot(_ body: () -> Void) {
         }
     }
 
+    @Test func `persisted personal operator authentication survives registry reload and rewrite`() {
+        withLastGatewaySnapshot {
+            let gatewayID = "manual|personal-auth.example.ts.net|443"
+            let registryJSON = (try? JSONSerialization.data(withJSONObject: [
+                "version": 1,
+                "activeStableID": gatewayID,
+                "connectedStableIDs": [gatewayID],
+                "entries": [[
+                    "stableID": gatewayID,
+                    "kind": "manual",
+                    "name": "Personal gateway",
+                    "host": "personal-auth.example.ts.net",
+                    "port": 443,
+                    "useTLS": true,
+                    "personalTailscaleAuthentication": true,
+                ]],
+            ])).flatMap { String(data: $0, encoding: .utf8) }
+            #expect(registryJSON != nil)
+            applyKeychain([
+                gatewayRegistryKeychainEntry: registryJSON,
+                lastGatewayKeychainEntry: nil,
+            ])
+
+            let restored = GatewaySettingsStore.loadGatewayRegistry()
+            #expect(restored.activeEntry?.personalTailscaleAuthentication == true)
+            #expect(GatewaySettingsStore.usesPersonalTailscaleAuthentication(stableID: gatewayID))
+            #expect(GatewaySettingsStore.saveGatewayRegistry(restored))
+
+            let relaunched = GatewaySettingsStore.loadGatewayRegistry()
+            #expect(relaunched.activeEntry?.personalTailscaleAuthentication == true)
+            #expect(GatewaySettingsStore.usesPersonalTailscaleAuthentication(stableID: gatewayID))
+        }
+    }
+
     @Test func `newer registry blocks pairing mutations without overwriting`() {
         withLastGatewaySnapshot {
             let unsupported = #"{"version":3,"future":["keep-me"]}"#
