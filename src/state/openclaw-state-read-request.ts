@@ -6,6 +6,9 @@ import type {
 } from "./openclaw-state-read.types.js";
 
 export function captureCommand(command: OpenClawStateReadCommand): OpenClawStateReadCommand {
+  if (command.type === "sessionState.versions" || command.type === "sessionState.events") {
+    return structuredClone(command);
+  }
   if (isWorkspaceJournalReadCommand(command)) {
     return command.type === "placementJournals.owners"
       ? { ...command }
@@ -202,6 +205,9 @@ export function captureCommand(command: OpenClawStateReadCommand): OpenClawState
 }
 
 function commandBytes(command: OpenClawStateReadRequest["command"]): number {
+  if (command.type === "sessionState.versions" || command.type === "sessionState.events") {
+    return Buffer.byteLength(JSON.stringify(command), "utf8");
+  }
   if (isWorkspaceJournalReadCommand(command)) {
     return Buffer.byteLength(JSON.stringify(command), "utf8");
   }
@@ -505,7 +511,10 @@ function commandBytes(command: OpenClawStateReadRequest["command"]): number {
       (input.executionLimit === undefined ? 0 : 8)
     );
   }
-  if (command.type === "workers.placementProjection") {
+  if (
+    command.type === "workers.placementProjection" ||
+    command.type === "workers.placementPendingResults"
+  ) {
     return Buffer.byteLength(JSON.stringify(command), "utf8");
   }
   if (command.type === "workerEnvironments.pruneCandidates") {

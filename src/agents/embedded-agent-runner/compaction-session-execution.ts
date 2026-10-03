@@ -154,6 +154,7 @@ export async function executePreparedCompactionSession(runtime: PreparedCompacti
       missingToolResultText: responsesApi ? "aborted" : undefined,
       allowedToolNames,
       withCompactionPersistence: params.transcriptByteCompactionPersistence,
+      withCompactionPersistenceAsync: params.transcriptByteCompactionPersistenceAsync,
     });
     compactionSessionManager = sessionManager;
     const recordUsage = accountingRecorder?.recordUsage
@@ -570,6 +571,8 @@ export async function executePreparedCompactionSession(runtime: PreparedCompacti
             sessionKey: params.sessionKey,
             sessionId: params.sessionId,
             agentId: sessionAgentId,
+            memoryAudience: params.memoryAudience,
+            sandboxed: sandbox?.enabled === true,
             sessionFile: activeSessionFile,
             assertActive,
           });

@@ -58,9 +58,11 @@ whichever is longer). These retained counts govern `/subagents list`,
 status summaries, descendant completion gating, and per-session concurrency
 checks; they are not proof that an executor is live.
 
-During a graceful restart, an already-admitted replacement run can finish
-refreshing a deferred child result before shutdown. The refresh remains tracked
-until capture and persistence finish; it does not admit a new run.
+During a graceful restart or Gateway suspension, lifecycle events from
+already-admitted runs remain tracked through restart preservation and completion
+processing. An already-admitted replacement run can finish refreshing a deferred
+child result before shutdown. The refresh remains tracked until capture and
+persistence finish; it does not admit a new run.
 
 After a Gateway restart, the parent owns continuation of the user's task.
 Interrupted sub-agents are finalized through their normal completion path instead
@@ -107,6 +109,18 @@ to identify the failing operation. Unrelated
 sub-agent completions do not restart failed cleanup or reset its retry budget.
 Descendant completion still wakes the current requester ancestors waiting on that
 work. These cleanup retries are separate from [completion delivery](/tools/subagents/announce).
+
+When required registration has an unknown outcome or retained registry state
+forbids deleting the child session, a Gateway-hosted ordinary spawn's error keeps
+the child's session and run identifiers. If the first cancellation attempt also
+fails, the error reports unconfirmed termination and whether Gateway cleanup was
+scheduled. The Gateway retains the child's admission slot while retrying and
+rechecks the exact run owner before each attempt. If database admission retires
+while that child still runs, cancellation stops but its slot stays reserved until
+the child controller retires or Gateway shutdown takes over. The child session
+stays intact. Provisional session rollback, collector FIFO cleanup, and local
+embedded cleanup remain joined. Inspect the retained child before retrying the
+spawn.
 
 <Note>
 If a sub-agent spawn fails with Gateway `PAIRING_REQUIRED` /

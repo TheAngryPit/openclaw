@@ -6,6 +6,7 @@ export const databaseWorkerExtensionTestRoots = [
 ];
 
 export const databaseWorkerExtensionTestFiles = [
+  "extensions/agentsapi/agentsapi-attempt.test.ts",
   "extensions/agentsapi/agentsapi-harness.persistence.test.ts",
   "extensions/openai/binary-transport.test.ts",
   "extensions/openai/tts.test.ts",
@@ -136,6 +137,8 @@ export const databaseWorkerExtensionTestFiles = [
   "extensions/codex/src/node-exec-server.test.ts",
   "extensions/codex/src/node-exec-server.readiness.test.ts",
   "extensions/codex/src/app-server/dynamic-tool-build.test.ts",
+  "extensions/codex/src/app-server/dynamic-tool-build.memory-audience.test.ts",
+  "extensions/codex/src/app-server/run-attempt.prompt-hook-audience.test.ts",
   "extensions/codex/src/app-server/dynamic-tool-build.prompt.test.ts",
   "extensions/codex/src/app-server/native-subagent-monitor.close.test.ts",
   "extensions/codex/src/app-server/native-subagent-monitor.completion-delivery.test.ts",
@@ -373,6 +376,7 @@ export const databaseWorkerExtensionTestFiles = [
   "extensions/telegram/src/bot-native-command-dispatch.auth.test.ts",
   "extensions/telegram/src/bot-native-command-dispatch.concurrency.test.ts",
   "extensions/telegram/src/bot-native-command-dispatch.delivery.test.ts",
+  "extensions/telegram/src/bot-native-command-dispatch.miniapp.test.ts",
   "extensions/telegram/src/bot-native-command-dispatch.routing.test.ts",
   "extensions/telegram/src/bot.create-telegram-bot.native-pipeline.test.ts",
   "extensions/telegram/src/bot.create-telegram-bot.channel-post-media.test.ts",
