@@ -1666,10 +1666,11 @@ private func waitUntil(
         #expect(appModel.activeGatewayConnectConfig?.stableID != duringResolutionConfig.stableID)
     }
 
-    @Test @MainActor func `trusted certificate keeps device auth route scoped`() async {
+    @Test(arguments: [false, true])
+    @MainActor func `trusted certificate keeps device auth route scoped`(personal: Bool) async {
         let registryIsolation = GatewayRegistryTestIsolation()
         defer { registryIsolation.restore() }
-        let host = "127.0.0.1"
+        let host = personal ? "proof.tailnet.ts.net" : "127.0.0.1"
         let stableID = "manual|\(host)|1"
         defer { GatewayTLSStore.clearFingerprint(stableID: stableID) }
         GatewayTLSStore.clearFingerprint(stableID: stableID)
@@ -1679,12 +1680,22 @@ private func waitUntil(
             appModel: appModel,
             fingerprint: "route-independent-fingerprint")
 
-        await controller.connectManual(host: host, port: 1, useTLS: true)
+        await controller.connectManual(
+            host: host,
+            port: 1,
+            useTLS: true,
+            personalTailscaleAuthentication: personal)
+        #expect(controller.pendingPersonalTailscaleAuthentication(stableID: stableID) == personal)
+        #expect(controller.pendingPersonalTailscaleAuthentication(stableID: "manual|other.tailnet.ts.net|1") == nil)
         await controller.acceptPendingTrustPrompt(controller.pendingTrustPrompt)
         await waitUntil(timeout: .seconds(1)) { appModel.activeGatewayConnectConfig != nil }
 
         #expect(appModel.activeGatewayConnectConfig?.stableID == stableID)
         #expect(appModel.activeGatewayConnectConfig?.nodeOptions.deviceAuthGatewayID == stableID)
+        #expect(appModel.activeGatewayConnectConfig?.personalTailscaleAuthentication == personal)
+        #expect(GatewaySettingsStore.usesPersonalTailscaleAuthentication(stableID: stableID) == personal)
+        await controller.connectManual(host: host, port: 1, useTLS: true)
+        #expect(GatewaySettingsStore.usesPersonalTailscaleAuthentication(stableID: stableID) == personal)
     }
 
     @Test @MainActor func `discovered connect preserves exact device auth owner bytes`() async {
@@ -1955,15 +1966,19 @@ private func waitUntil(
         case commitReplacement
     }
 
-    @Test(arguments: HeldResetOutcome.allCases)
+    @Test(arguments: HeldResetOutcome.allCases, [false, true])
     @MainActor func `held reset retains recovery until replacement commits or cancels`(
-        outcome: HeldResetOutcome) async throws
+        outcome: HeldResetOutcome, personal: Bool) async throws
     {
         let registryIsolation = GatewayRegistryTestIsolation()
         defer { registryIsolation.restore() }
         try await withUserDefaults(["gateway.autoconnect": false]) {
             let host = "replacement-\(UUID().uuidString).example.ts.net"
             let stableID = "manual|\(host.lowercased())|443"
+            defer {
+                #expect(GatewaySettingsStore.usesPersonalTailscaleAuthentication(stableID: stableID) ==
+                    (personal && outcome == .commitReplacement))
+            }
             defer { GatewayTLSStore.clearFingerprint(stableID: stableID) }
             let resetRelease = AsyncStream<Void>.makeStream()
             defer { resetRelease.continuation.finish() }
@@ -2001,7 +2016,11 @@ private func waitUntil(
                 useTLS: true,
                 stableID: currentConfig.effectiveStableID))
 
-            await controller.connectManual(host: host, port: 443, useTLS: true)
+            await controller.connectManual(
+                host: host,
+                port: 443,
+                useTLS: true,
+                personalTailscaleAuthentication: personal)
             let problem = try #require(appModel.lastGatewayProblem)
             #expect(problem.kind == .reachabilityFailed)
             #expect(appModel.unresolvedGatewayPreconnectStableID == stableID)
@@ -2472,10 +2491,11 @@ private func waitUntil(
         }
     }
 
-    @Test @MainActor func `forget gateway cancels its pending trust handoff`() async {
+    @Test(arguments: [false, true])
+    @MainActor func `forget gateway cancels its pending trust handoff`(personal: Bool) async {
         let registryIsolation = GatewayRegistryTestIsolation()
         defer { registryIsolation.restore() }
-        let host = "pending-trust.example.com"
+        let host = personal ? "pending-trust.tailnet.ts.net" : "pending-trust.example.com"
         let port = 443
         let stableID = GatewayConnectionController.ManualAuthOverride.manualStableID(host: host, port: port)
         defer { GatewayTLSStore.clearFingerprint(stableID: stableID) }
@@ -2484,12 +2504,18 @@ private func waitUntil(
         defer { appModel.disconnectGateway() }
         let controller = makeTLSProbeController(appModel: appModel, fingerprint: "forgotten-fingerprint")
 
-        await controller.connectManual(host: host, port: port, useTLS: true)
+        await controller.connectManual(
+            host: host,
+            port: port,
+            useTLS: true,
+            personalTailscaleAuthentication: personal)
         #expect(controller.pendingTrustPrompt?.stableID == stableID)
+        #expect(controller.pendingPersonalTailscaleAuthentication(stableID: stableID) == personal)
         await controller.forgetGateway(stableID: stableID)
         await controller.acceptPendingTrustPrompt(controller.pendingTrustPrompt)
 
         #expect(controller.pendingTrustPrompt == nil)
+        #expect(controller.pendingPersonalTailscaleAuthentication(stableID: stableID) == nil)
         #expect(GatewayTLSStore.loadFingerprint(stableID: stableID) == nil)
         #expect(!GatewaySettingsStore.loadGatewayRegistry().entries.contains { $0.stableID == stableID })
     }

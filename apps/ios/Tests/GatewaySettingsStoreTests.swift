@@ -692,6 +692,45 @@ private func withLastGatewaySnapshot(_ body: () -> Void) {
         }
     }
 
+    @Test func `registration persists explicit personal choice without changing omitted choice`() {
+        withLastGatewaySnapshot {
+            applyKeychain([gatewayRegistryKeychainEntry: nil, lastGatewayKeychainEntry: nil])
+            let entry = GatewaySettingsStore.GatewayRegistryEntry(
+                stableID: "manual|proof.tailnet.ts.net|443",
+                kind: .manual,
+                name: "Proof",
+                host: "proof.tailnet.ts.net",
+                port: 443,
+                useTLS: true,
+                lastConnectedAtMs: nil)
+            #expect(GatewaySettingsStore.upsertGatewayRegistryEntry(
+                entry,
+                activate: true,
+                personalTailscaleAuthentication: true))
+            #expect(GatewaySettingsStore.loadGatewayRegistry().activeEntry?.personalTailscaleAuthentication == true)
+            #expect(GatewaySettingsStore.upsertGatewayRegistryEntry(entry))
+            #expect(GatewaySettingsStore.usesPersonalTailscaleAuthentication(stableID: entry.stableID))
+            #expect(GatewaySettingsStore.upsertGatewayRegistryEntry(
+                entry,
+                personalTailscaleAuthentication: false))
+            #expect(!GatewaySettingsStore.usesPersonalTailscaleAuthentication(stableID: entry.stableID))
+            let before = GatewaySettingsStore.loadGatewayRegistry()
+            var insecure = entry
+            insecure.useTLS = false
+            #expect(!GatewaySettingsStore.upsertGatewayRegistryEntry(
+                insecure,
+                activate: true,
+                personalTailscaleAuthentication: true))
+            #expect(GatewaySettingsStore.loadGatewayRegistry() == before)
+            var otherHost = entry
+            otherHost.host = "example.test"
+            #expect(!GatewaySettingsStore.upsertGatewayRegistryEntry(
+                otherHost,
+                personalTailscaleAuthentication: true))
+            #expect(GatewaySettingsStore.loadGatewayRegistry() == before)
+        }
+    }
+
     @Test func `registry CRUD round trip persists deterministic ordering`() {
         withLastGatewaySnapshot {
             applyKeychain([gatewayRegistryKeychainEntry: nil, lastGatewayKeychainEntry: nil])
