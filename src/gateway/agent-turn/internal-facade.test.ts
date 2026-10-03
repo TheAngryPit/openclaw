@@ -21,7 +21,6 @@ const authorize = vi.hoisted(() => vi.fn(async () => ({ error: null })));
 const envelope = vi.hoisted(() => vi.fn(async (run: () => Promise<unknown>) => await run()));
 
 vi.mock("../server-methods.js", () => ({
-  authorizeGatewayRequestPreDispatch: authorize,
   createRequestGatewayMethodRegistry: () => ({
     isControlPlaneWrite: () => false,
     isObservation: (method: string) => method === "agent.wait",
@@ -31,6 +30,10 @@ vi.mock("../server-methods.js", () => ({
     _client: unknown,
     run: () => Promise<unknown>,
   ) => await envelope(run),
+}));
+
+vi.mock("../server-methods/request-authorization.js", () => ({
+  authorizeGatewayRequestPreDispatch: authorize,
 }));
 
 vi.mock("./agent-request-preflight.js", () => ({
