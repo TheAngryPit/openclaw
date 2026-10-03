@@ -3430,12 +3430,13 @@ extension NodeAppModel {
             // every cached surface so stale prompts cannot authorize work on the replacement.
             invalidateExecApprovalSurfacesForGatewayChange()
         }
-        let operatorLoopRequired = nextConfig.personalTailscaleAuthentication || shouldStartOperatorGatewayLoop(
-            token: nextConfig.token,
-            bootstrapToken: nextConfig.bootstrapToken,
-            password: nextConfig.password,
-            deviceAuthGatewayID: nextConfig.nodeOptions.deviceAuthGatewayID ?? effectiveStableID,
-            allowStoredDeviceAuth: nextConfig.nodeOptions.allowStoredDeviceAuth)
+        let operatorLoopRequired = nextConfig.personalTailscaleAuthentication ? self.gatewayConnected :
+            shouldStartOperatorGatewayLoop(
+                token: nextConfig.token,
+                bootstrapToken: nextConfig.bootstrapToken,
+                password: nextConfig.password,
+                deviceAuthGatewayID: nextConfig.nodeOptions.deviceAuthGatewayID ?? effectiveStableID,
+                allowStoredDeviceAuth: nextConfig.nodeOptions.allowStoredDeviceAuth)
         if let activeConfig = activeGatewayConnectConfig,
            activeConfig.hasSameConnectionInputs(as: nextConfig),
            nodeGatewayTask != nil,
@@ -3454,7 +3455,7 @@ extension NodeAppModel {
             stableID: effectiveStableID,
             preservingGatewayProblem: isSameGatewayTarget || preservesPreconnectProblem,
             preservingFocusedChatSession: isSameGatewayTarget && !authenticationChanged)
-        if operatorLoopRequired {
+        if operatorLoopRequired, !nextConfig.personalTailscaleAuthentication {
             startOperatorGatewayLoop(
                 config: nextConfig,
                 sessionBox: sessionBox)
@@ -4312,6 +4313,18 @@ extension NodeAppModel {
                 authRoles: authRoles,
                 nodeOptions: nodeOptions) != nil
             else { return }
+        }
+
+        guard self.isCurrentGatewayRoute(generation: routeGeneration, stableID: stableID) else { return }
+        if let config = self.activeGatewayConnectConfig,
+           config.personalTailscaleAuthentication,
+           self.operatorGatewayTask == nil
+        {
+            // Concurrent unpaired roles supersede each other's approval request.
+            // Admit the node first, then request the personal operator's authority.
+            self.startOperatorGatewayLoop(
+                config: config,
+                sessionBox: config.tls.map { WebSocketSessionBox(session: GatewayTLSPinningSession(params: $0)) })
         }
 
         self.clearGatewayConnectionProblem()

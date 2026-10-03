@@ -7,6 +7,7 @@ import Network
 @MainActor
 final class NativeGatewayWebSocketFixture {
     struct ConnectAuth: Equatable, Sendable {
+        let role: String?
         let token: String?
         let bootstrapToken: String?
         let deviceToken: String?
@@ -340,6 +341,7 @@ final class NativeGatewayWebSocketFixture {
         let auth = params?["auth"] as? [String: Any]
         self.connectDeviceIDs.append((params?["device"] as? [String: Any])?["id"] as? String)
         self.connectAuth.append(ConnectAuth(
+            role: params?["role"] as? String,
             token: auth?["token"] as? String,
             bootstrapToken: auth?["bootstrapToken"] as? String,
             deviceToken: auth?["deviceToken"] as? String))

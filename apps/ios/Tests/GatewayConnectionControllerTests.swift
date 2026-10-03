@@ -212,6 +212,51 @@ private func waitUntil(
 }
 
 @Suite(.serialized) struct GatewayConnectionControllerTests {
+    @Test @MainActor func `personal pairing retries admit node before starting personal operator`() async throws {
+        let registry = GatewayRegistryTestIsolation()
+        defer { registry.restore() }
+        let stateDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("personal-pairing-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: stateDirectory) }
+        try await DeviceIdentityStore.withStateDirectory(stateDirectory) {
+            let fixture = try await NativeGatewayWebSocketFixture.start(
+                issuedDeviceTokens: [],
+                connectFailures: [0: .pairingRequired, 1: .pairingRequired],
+                authMethod: "tailscale",
+                recoveryScope: "synthetic-personal-recovery-scope")
+            defer { fixture.stop() }
+            let stableID = "personal-pairing-\(UUID().uuidString)"
+            let config = GatewayConnectConfig(
+                url: fixture.url(), stableID: stableID, tls: nil,
+                token: "synthetic-shared-token", bootstrapToken: nil, password: nil,
+                nodeOptions: Self.makeNodeOptions(allowStoredDeviceAuth: false, deviceAuthGatewayID: stableID),
+                personalTailscaleAuthentication: true)
+            let model = NodeAppModel(audioAdmissionInitiallyAllowed: false)
+            defer { model.disconnectGateway() }
+            model.setScenePhase(.active)
+            for index in 0..<2 {
+                model.applyGatewayConnectConfig(config, forceReconnect: true)
+                try await waitForDashboardCondition { model.gatewayPairingPaused }
+                let request = try #require(fixture.capturedAuth(at: index))
+                try #require(request.role == "node")
+                #expect(request.token == "synthetic-shared-token")
+                #expect(fixture.capturedAuth(at: index + 1) == nil)
+                await model.resetGatewaySessionsForForcedReconnect()
+            }
+            model.applyGatewayConnectConfig(config, forceReconnect: true)
+            try await waitForDashboardCondition { fixture.capturedAuth(at: 3) != nil }
+            #expect(fixture.capturedAuth(at: 2)?.role == "node")
+            let personal = try #require(fixture.capturedAuth(at: 3))
+            #expect(personal.role == "operator")
+            #expect(personal.token == nil)
+            #expect(personal.bootstrapToken == nil)
+            #expect(personal.deviceToken == nil)
+            #expect(fixture.capturedDeviceID(at: 2) == fixture.capturedDeviceID(at: 3))
+            #expect(fixture.capturedAuth(at: 4) == nil)
+            await model.resetGatewaySessionsForForcedReconnect()
+        }
+    }
+
     @Test @MainActor func `background cancels operator fleet reconciliation`() {
         let appModel = NodeAppModel()
         defer { appModel.disconnectGateway() }
