@@ -312,16 +312,8 @@ public enum GatewayTLSStore {
         }
     }
 
-    private static var usesDefaultKeychainService: Bool {
-        self.keychainServiceLock.withLock { (self.keychainNamespace.suffix ?? "").isEmpty }
-    }
-
     private static let keychainAccountPrefix = "fingerprint.v3."
     private static let legacyCanonicalAccountPrefix = "fingerprint.v2."
-
-    // Legacy UserDefaults location used before Keychain migration.
-    private static let legacySuiteName = "ai.openclaw.shared"
-    private static let legacyKeyPrefix = "gateway.tls."
     private static let firstUseClaims = GatewayTLSFirstUseClaims()
 
     /// The macOS app profile is immutable for the process lifetime. Configure its
@@ -425,7 +417,6 @@ public enum GatewayTLSStore {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: self.keychainService,
         ] as CFDictionary)
-        self.clearAllLegacyFingerprints()
         let removed = removedKeychain == errSecSuccess || removedKeychain == errSecItemNotFound
         if removed {
             self.firstUseClaims.clearAll()
@@ -474,17 +465,6 @@ public enum GatewayTLSStore {
         guard self.canSafelyReadLegacyRawStorageKey(stableID) else { return .missing }
 
         switch self.readLegacyKeychainFingerprint(account: stableID) {
-        case let .value(fingerprint):
-            return self.migrateLegacyFingerprint(
-                fingerprint,
-                stableID: stableID,
-                account: account)
-        case .unavailable:
-            return .unavailable
-        case .missing:
-            break
-        }
-        switch self.readLegacyDefaultsFingerprint(stableID: stableID) {
         case let .value(fingerprint):
             return self.migrateLegacyFingerprint(
                 fingerprint,
@@ -558,17 +538,6 @@ public enum GatewayTLSStore {
               let data = result as? Data,
               let value = String(data: data, encoding: .utf8),
               let fingerprint = self.normalizedFingerprint(value)
-        else { return .unavailable }
-        return .value(fingerprint)
-    }
-
-    private static func readLegacyDefaultsFingerprint(stableID: String) -> FingerprintRead {
-        guard self.usesDefaultKeychainService else { return .missing }
-        guard let defaults = UserDefaults(suiteName: self.legacySuiteName) else { return .unavailable }
-        let key = self.legacyKeyPrefix + stableID
-        guard let value = defaults.object(forKey: key) else { return .missing }
-        guard let raw = value as? String,
-              let fingerprint = self.normalizedFingerprint(raw)
         else { return .unavailable }
         return .value(fingerprint)
     }
@@ -660,10 +629,6 @@ public enum GatewayTLSStore {
         } ?? true
         guard self.canSafelyReadLegacyRawStorageKey(stableID) else { return removedV2 }
         let removedRaw = self.deleteFingerprint(account: stableID)
-        if self.usesDefaultKeychainService {
-            UserDefaults(suiteName: self.legacySuiteName)?
-                .removeObject(forKey: self.legacyKeyPrefix + stableID)
-        }
         return removedRaw && removedV2
     }
 
@@ -675,14 +640,6 @@ public enum GatewayTLSStore {
         ]
         let status = self.keychainOperations.delete(query as CFDictionary)
         return status == errSecSuccess || status == errSecItemNotFound
-    }
-
-    private static func clearAllLegacyFingerprints() {
-        guard self.usesDefaultKeychainService else { return }
-        guard let defaults = UserDefaults(suiteName: self.legacySuiteName) else { return }
-        for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(self.legacyKeyPrefix) {
-            defaults.removeObject(forKey: key)
-        }
     }
 }
 
@@ -899,15 +856,19 @@ public final class GatewayTLSPinningSession: NSObject, WebSocketSessioning, URLS
         // Task delegates forward unimplemented authentication callbacks to the session owner.
         task.delegate = delegate
         defer { task.cancel() }
-        return try await withTaskCancellationHandler {
-            try Task.checkCancellation()
-            task.resume()
-            var responses = delegate.responses.stream.makeAsyncIterator()
-            guard let response = try await responses.next() else { throw CancellationError() }
-            try Task.checkCancellation()
-            return response
-        } onCancel: {
-            task.cancel()
+        do {
+            return try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                task.resume()
+                var responses = delegate.responses.stream.makeAsyncIterator()
+                guard let response = try await responses.next() else { throw CancellationError() }
+                try Task.checkCancellation()
+                return response
+            } onCancel: {
+                task.cancel()
+            }
+        } catch {
+            throw self.consumeHTTPFailure(error)
         }
     }
 

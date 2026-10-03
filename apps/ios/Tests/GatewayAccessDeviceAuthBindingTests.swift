@@ -368,6 +368,7 @@ struct GatewayAccessDeviceAuthBindingTests {
             origin: application.origin,
             principal: principal,
             revision: 1,
+            registrationID: UUID(),
             headers: { _ in [:] },
             isCurrent: { true },
             dashboardCookie: { _ in nil },

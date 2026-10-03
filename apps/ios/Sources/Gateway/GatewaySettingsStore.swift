@@ -38,17 +38,10 @@ enum GatewaySettingsStore {
     }
     #endif
     private static let nodeService = "ai.openclawfoundation.app.node"
-    private static let talkService = "ai.openclawfoundation.app.talk"
 
     private static let instanceIdDefaultsKey = "node.instanceId"
     private static let preferredGatewayStableIDDefaultsKey = "gateway.preferredStableID"
     private static let lastDiscoveredGatewayStableIDDefaultsKey = "gateway.lastDiscoveredStableID"
-    private static let lastGatewayKindDefaultsKey = "gateway.last.kind"
-    private static let lastGatewayHostDefaultsKey = "gateway.last.host"
-    private static let lastGatewayPortDefaultsKey = "gateway.last.port"
-    private static let lastGatewayTlsDefaultsKey = "gateway.last.tls"
-    private static let lastGatewayStableIDDefaultsKey = "gateway.last.stableID"
-    private static let clientIdOverrideDefaultsPrefix = "gateway.clientIdOverride."
     private static let selectedAgentDefaultsPrefix = "gateway.selectedAgentId."
 
     private static let instanceIdAccount = "instanceId"
@@ -395,14 +388,6 @@ enum GatewaySettingsStore {
         var port: Int?
     }
 
-    static func loadTalkProviderApiKey(provider: String) -> String? {
-        guard let providerId = self.normalizedTalkProviderID(provider) else { return nil }
-        let account = self.talkProviderApiKeyAccount(providerId: providerId)
-        return self.normalizedCredential(GenericPasswordKeychainStore.loadString(
-            service: self.talkService,
-            account: account))
-    }
-
     static func loadGatewayRegistry() -> GatewayRegistry {
         guard let json = GenericPasswordKeychainStore.loadString(
             service: self.gatewayService,
@@ -578,7 +563,7 @@ enum GatewaySettingsStore {
         return normalized
     }
 
-    private static func migrateGatewayRegistryIfNeeded(defaults: UserDefaults = .standard) {
+    private static func migrateGatewayRegistryIfNeeded() {
         if let json = GenericPasswordKeychainStore.loadString(
             service: self.gatewayService,
             account: self.gatewayRegistryAccount)
@@ -591,11 +576,10 @@ enum GatewaySettingsStore {
             _ = GenericPasswordKeychainStore.delete(
                 service: self.gatewayService,
                 account: self.lastGatewayConnectionAccount)
-            self.removeLastGatewayDefaults(defaults)
             return
         }
 
-        let legacy = self.loadLegacyLastGatewayConnection(defaults: defaults)
+        let legacy = self.loadLegacyLastGatewayConnection()
         guard let entry = legacy.flatMap(self.gatewayRegistryEntry(from:)) else { return }
         let registry = GatewayRegistry(
             activeStableID: entry.stableID,
@@ -605,32 +589,15 @@ enum GatewaySettingsStore {
         _ = GenericPasswordKeychainStore.delete(
             service: self.gatewayService,
             account: self.lastGatewayConnectionAccount)
-        self.removeLastGatewayDefaults(defaults)
     }
 
-    private static func loadLegacyLastGatewayConnection(
-        defaults: UserDefaults) -> LegacyLastGatewayConnectionData?
-    {
-        if let json = GenericPasswordKeychainStore.loadString(
+    private static func loadLegacyLastGatewayConnection() -> LegacyLastGatewayConnectionData? {
+        guard let json = GenericPasswordKeychainStore.loadString(
             service: self.gatewayService,
             account: self.lastGatewayConnectionAccount),
-            let data = json.data(using: .utf8),
-            let stored = try? JSONDecoder().decode(LegacyLastGatewayConnectionData.self, from: data)
-        {
-            return stored
-        }
-        guard let stableID = GatewayStableIdentifier.exact(
-            defaults.string(forKey: self.lastGatewayStableIDDefaultsKey))
+            let data = json.data(using: .utf8)
         else { return nil }
-        let kindRaw = defaults.string(forKey: self.lastGatewayKindDefaultsKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let kind = GatewayRegistryEntry.Kind(rawValue: kindRaw) ?? .manual
-        return LegacyLastGatewayConnectionData(
-            kind: kind,
-            stableID: stableID,
-            useTLS: defaults.bool(forKey: self.lastGatewayTlsDefaultsKey),
-            host: kind == .manual ? defaults.string(forKey: self.lastGatewayHostDefaultsKey) : nil,
-            port: kind == .manual ? defaults.object(forKey: self.lastGatewayPortDefaultsKey) as? Int : nil)
+        return try? JSONDecoder().decode(LegacyLastGatewayConnectionData.self, from: data)
     }
 
     private static func gatewayRegistryEntry(
@@ -646,14 +613,6 @@ enum GatewaySettingsStore {
             port: legacy.port,
             useTLS: legacy.useTLS,
             lastConnectedAtMs: nil))
-    }
-
-    private static func removeLastGatewayDefaults(_ defaults: UserDefaults) {
-        defaults.removeObject(forKey: self.lastGatewayKindDefaultsKey)
-        defaults.removeObject(forKey: self.lastGatewayHostDefaultsKey)
-        defaults.removeObject(forKey: self.lastGatewayPortDefaultsKey)
-        defaults.removeObject(forKey: self.lastGatewayTlsDefaultsKey)
-        defaults.removeObject(forKey: self.lastGatewayStableIDDefaultsKey)
     }
 
     static func deleteGatewayCredentials(instanceId: String, stableID: String) {
@@ -697,14 +656,6 @@ enum GatewaySettingsStore {
             deletedAll = false
         }
         return deletedAll
-    }
-
-    static func loadGatewayClientIdOverride(stableID: String) -> String? {
-        self.loadGatewayDefault(prefix: self.clientIdOverrideDefaultsPrefix, stableID: stableID)
-    }
-
-    static func saveGatewayClientIdOverride(stableID: String, clientId: String?) {
-        self.saveGatewayDefault(clientId, prefix: self.clientIdOverrideDefaultsPrefix, stableID: stableID)
     }
 
     static func loadGatewaySelectedAgentId(stableID: String) -> String? {
@@ -881,15 +832,6 @@ enum GatewaySettingsStore {
             account: "gateway-credential-metadata.\(instanceId)")
     }
 
-    private static func talkProviderApiKeyAccount(providerId: String) -> String {
-        self.talkProviderApiKeyAccountPrefix + providerId
-    }
-
-    private static func normalizedTalkProviderID(_ provider: String) -> String? {
-        let trimmed = provider.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
     private static func ensureStableInstanceID() {
         let defaults = UserDefaults.standard
 
@@ -932,7 +874,7 @@ extension GatewaySettingsStore {
     /// Invalidates read-only UI projections after the registry owner commits a mutation.
     static let gatewayRegistryDidChange = Notification.Name("GatewaySettingsStore.gatewayRegistryDidChange")
 
-    static func clearGatewayRegistry(defaults: UserDefaults = .standard) {
+    static func clearGatewayRegistry() {
         let registryRemoved = GenericPasswordKeychainStore.delete(
             service: self.gatewayService,
             account: self.gatewayRegistryAccount)
@@ -942,7 +884,6 @@ extension GatewaySettingsStore {
         _ = GenericPasswordKeychainStore.delete(
             service: self.gatewayService,
             account: self.lastGatewayConnectionAccount)
-        self.removeLastGatewayDefaults(defaults)
     }
 
     static func saveGatewayRegistry(_ registry: GatewayRegistry) -> Bool {

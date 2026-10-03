@@ -5,6 +5,7 @@ import {
   readSqliteTranscriptPayload,
   sqliteTranscriptPayloadColumns,
 } from "../../../lib/sqlite-transcript-payload.mjs";
+import { assert, readJson, write, writeJson } from "../fixtures/common.mjs";
 import {
   assertUpgradeVolumeSharedState,
   seedUpgradeVolumeSharedState,
@@ -30,27 +31,8 @@ const PREEXISTING_SESSION_FIXTURES = [
   },
 ];
 
-function assert(condition, message) {
-  if (!condition) {
-    throw new Error(message);
-  }
-}
-
 function assertJsonEqual(actual, expected, message) {
   assert(JSON.stringify(actual) === JSON.stringify(expected), message);
-}
-
-function readJson(file) {
-  return JSON.parse(fs.readFileSync(file, "utf8"));
-}
-
-function write(file, contents) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, contents);
-}
-
-function writeJson(file, value) {
-  write(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 function readPositiveIntegerEnv(name, fallback) {
@@ -238,7 +220,7 @@ function seedUpgradeVolumeSessions(stateDir) {
     store[sessionKey] = {
       sessionId,
       ...(metadataOnly ? {} : { sessionFile: path.join(sessionsDir, `${sessionId}.jsonl`) }),
-      provider: "openai",
+      modelProvider: "openai",
       model: "gpt-5.5",
       updatedAt: baseUpdatedAt + index,
       label,
@@ -401,8 +383,8 @@ export function assertUpgradeVolumeMigrated(stateDir, stage) {
         assert(entry?.sessionId === fixture.sessionId, `volume entry changed: ${fixture.index}`);
         assert(entry?.label === fixture.label, `volume label changed: ${fixture.index}`);
         assert(
-          entry?.provider === "openai" || entry?.delivery?.origin?.provider === "openai",
-          `volume provider changed: ${fixture.index}`,
+          entry?.modelProvider === "openai",
+          `volume model provider changed: ${fixture.index}`,
         );
         assert(entry?.model === "gpt-5.5", `volume model changed: ${fixture.index}`);
         assert(

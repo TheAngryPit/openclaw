@@ -3,6 +3,7 @@ import { expect, it, vi } from "vitest";
 import {
   createChangedNodeTestShards,
   hasControlUiPerformanceAffectingChange,
+  resolveChangedNodeTestTargets,
 } from "../../scripts/lib/ci-changed-node-test-plan.mts";
 import {
   createNodeTestShardBundles,
@@ -30,6 +31,32 @@ function selectedFiles(shards: ReturnType<typeof createChangedNodeTestShards>) {
     ),
   );
 }
+
+it("keeps the aggressive fixed smoke within two Node rows", () => {
+  let smoke: string[] = [];
+  resolveChangedNodeTestTargets(["src/infra/new-unlisted-module.ts"], {
+    selectionMode: "aggressive",
+    onSelection: ({ rule, targets }) => {
+      if (rule === "fixed-smoke") {
+        smoke = targets;
+      }
+    },
+  });
+  expect(smoke).toEqual([
+    "src/config/io.load-async.test.ts",
+    "src/plugins/loader.runtime-registry.test.ts",
+  ]);
+  const rows = createChangedNodeTestShards(["src/infra/new-unlisted-module.ts"], {
+    selectedTestTargets: smoke,
+    selectionMode: "aggressive",
+    runnerBackend: "hybrid",
+    dedicatedBuildArtifacts: false,
+    dedicatedUiTests: true,
+    dedicatedUiE2e: true,
+  });
+  expect(selectedFiles(rows).toSorted()).toEqual(smoke.toSorted());
+  expect(rows?.filter((row) => !row.requiresDist).length).toBeLessThanOrEqual(2);
+});
 
 it("keeps the hybrid hourly plan within the main-tier cap", () => {
   const hourly = createNodeTestShardBundles({
@@ -180,6 +207,7 @@ it("keeps UI and core changes with exact owners and direct consumers", () => {
       "src/agents/live-model-dynamic-candidates.test.ts",
       "src/agents/live-target-matcher.test.ts",
       "src/agents/model-compat.test.ts",
+      "test/scripts/pr-worktree-provision.test.ts",
     ]),
   );
   // These whole-UI and transitive consumers belonged to the old broad fallback.
@@ -189,7 +217,6 @@ it("keeps UI and core changes with exact owners and direct consumers", () => {
     "src/audit/execution-decision-facts.test.ts",
     "src/auto-reply/reply/commands-export-session.test.ts",
     "src/gateway/server-methods/session-change-event.fallback.test.ts",
-    "test/scripts/pr-worktree-provision.test.ts",
     "test/scripts/pr-merge-recovery.test.ts",
     "test/scripts/mobile-release-ci.test.ts",
   ]) {
@@ -425,6 +452,15 @@ it("keeps new-plugin, core, and manifest changes within the complete PR matrix c
   expect(new Set(shards.map((shard) => shard.checkName)).size).toBe(shards.length);
   const files = selectedFiles(shards);
   expect(files).toContain("src/plugins/official-external-plugin-catalog.test.ts");
+  // Global inputs keep protection for suites split out of protected owners.
+  for (const split of [
+    "src/cli/run-main.bare-root.test.ts",
+    "src/cli/run-main.command-dispatch.test.ts",
+    "src/cli/run-main.gateway-startup.test.ts",
+    "src/plugins/official-external-plugin-catalog.hosted.test.ts",
+  ]) {
+    expect(files, split).toContain(split);
+  }
   expect(files).toContain("src/plugins/bundled-plugin-metadata.test.ts");
   expect(files).toContain("test/scripts/bundled-plugin-build-entries.test.ts");
   expect(shards.some((shard) => shard.checkName.startsWith("checks-node-changed-extensions"))).toBe(

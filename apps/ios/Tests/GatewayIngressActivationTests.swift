@@ -10,7 +10,7 @@ import Testing
 extension GatewayIngressControllerTests {
     @Test(arguments: [false, true]) @MainActor
     func `pre-TLS reservation and trust acceptance retain Access sign-out authority`(ordinary: Bool) async throws {
-        let isolation = GatewayRegistryTestIsolation()
+        let isolation = await GatewayRegistryTestIsolation()
         defer { isolation.restore() }
         let state = try TemporaryOpenClawState(instanceID: "access-reservation-\(UUID().uuidString)")
         defer { state.restore() }
@@ -72,7 +72,7 @@ extension GatewayIngressControllerTests {
 
     @Test @MainActor
     func `sign out revokes queued handoff before its blocked reset drain completes`() async throws {
-        let isolation = GatewayRegistryTestIsolation()
+        let isolation = await GatewayRegistryTestIsolation()
         defer { isolation.restore() }
         let state = try TemporaryOpenClawState(instanceID: "access-reset-reservation-\(UUID().uuidString)")
         defer { state.restore() }
@@ -122,7 +122,7 @@ extension GatewayIngressControllerTests {
     func `fleet reservation survives endpoint resolution without borrowing a signed-out grant`(
         ordinary: Bool) async throws
     {
-        let isolation = GatewayRegistryTestIsolation()
+        let isolation = await GatewayRegistryTestIsolation()
         defer { isolation.restore() }
         let state = try TemporaryOpenClawState(instanceID: "access-fleet-reservation-\(UUID().uuidString)")
         defer { state.restore() }
@@ -185,7 +185,7 @@ extension GatewayIngressControllerTests {
 
     @Test @MainActor
     func `QR setup reservation survives route choice and bootstrap reset without renewed Access authority`() async throws {
-        let isolation = GatewayRegistryTestIsolation()
+        let isolation = await GatewayRegistryTestIsolation()
         defer { isolation.restore() }
         let state = try TemporaryOpenClawState(instanceID: "access-qr-reservation-\(UUID().uuidString)")
         defer { state.restore() }
@@ -240,7 +240,7 @@ extension GatewayIngressControllerTests {
     func `background gateway attention retries its target without switching the active gateway`(
         probeFails: Bool) async throws
     {
-        let isolation = GatewayRegistryTestIsolation()
+        let isolation = await GatewayRegistryTestIsolation()
         defer { isolation.restore() }
         let state = try TemporaryOpenClawState(instanceID: "access-target-\(UUID().uuidString)")
         defer { state.restore() }
@@ -296,7 +296,7 @@ extension GatewayIngressControllerTests {
     func `common recovery restores the desired active profile sharing background attention`(
         action: String) async throws
     {
-        let isolation = GatewayRegistryTestIsolation()
+        let isolation = await GatewayRegistryTestIsolation()
         defer { isolation.restore() }
         let instanceID = "access-shared-recovery-\(UUID().uuidString)"
         let state = try TemporaryOpenClawState(instanceID: instanceID)
@@ -335,9 +335,9 @@ extension GatewayIngressControllerTests {
         fixture.persisted = try String(data: JSONEncoder().encode(fixture.nextSession), encoding: .utf8)
         let model = NodeAppModel()
         defer { model.disconnectGateway() }
-        let ingress = fixture.controller(useSavedProfiles: true) { origin in
+        let ingress = fixture.controller(useSavedProfiles: true, retirement: { origin in
             await model.retireGatewayIngress(for: origin)
-        }
+        })
         var resetEntered = 0
         var resetCompleted = 0
         let controller = GatewayConnectionController(
@@ -440,7 +440,7 @@ extension GatewayIngressControllerTests {
 
     @Test @MainActor
     func `automatic discovered admission never presents a browser despite suppression ownership`() async throws {
-        let isolation = GatewayRegistryTestIsolation()
+        let isolation = await GatewayRegistryTestIsolation()
         defer { isolation.restore() }
         let state = try TemporaryOpenClawState(instanceID: "access-discovery-\(UUID().uuidString)")
         defer { state.restore() }
@@ -489,7 +489,7 @@ extension GatewayIngressControllerTests {
 
     @Test @MainActor
     func `QR expiry during browser sign-in preserves Access and rejects the first Gateway handoff`() async throws {
-        let isolation = GatewayRegistryTestIsolation()
+        let isolation = await GatewayRegistryTestIsolation()
         defer { isolation.restore() }
         let instanceID = "access-qr-\(UUID().uuidString)"
         let state = try TemporaryOpenClawState(instanceID: instanceID)
@@ -565,7 +565,7 @@ extension GatewayIngressControllerTests {
 
     @Test @MainActor
     func `capability refresh retains ingress and certificate rotation reacquires TLS`() async throws {
-        let isolation = GatewayRegistryTestIsolation()
+        let isolation = await GatewayRegistryTestIsolation()
         defer { isolation.restore() }
         let state = try TemporaryOpenClawState(instanceID: "access-refresh-\(UUID().uuidString)")
         defer { state.restore() }
@@ -617,7 +617,7 @@ extension GatewayIngressControllerTests {
 
     @Test @MainActor
     func `retirement drains real node operator and fleet admission without losing Gateway credentials`() async throws {
-        let isolation = GatewayRegistryTestIsolation()
+        let isolation = await GatewayRegistryTestIsolation()
         defer { isolation.restore() }
         let instanceID = "access-drain-\(UUID().uuidString)"
         let state = try TemporaryOpenClawState(instanceID: instanceID)
@@ -632,10 +632,10 @@ extension GatewayIngressControllerTests {
         defer { model.disconnectGateway()
             fleet.stopAll()
         }
-        let ingress = fixture.controller { origin in
+        let ingress = fixture.controller(retirement: { origin in
             await fleet.retire(origin: origin)
             await model.retireGatewayIngress(for: origin)
-        }
+        })
         let admitted = try await ingress.prepare(
             route: fixture.route,
             userInitiated: false,
@@ -719,7 +719,7 @@ extension GatewayIngressControllerTests {
 
     @Test(arguments: [false, true]) @MainActor
     func `background sign-in and sign-out preserve an ordinary active profile`(savedAssociation: Bool) async throws {
-        let isolation = GatewayRegistryTestIsolation()
+        let isolation = await GatewayRegistryTestIsolation()
         defer { isolation.restore() }
         let state = try TemporaryOpenClawState(instanceID: "access-ordinary-owner-\(UUID().uuidString)")
         defer { state.restore() }
@@ -741,9 +741,9 @@ extension GatewayIngressControllerTests {
             lastConnectedAtMs: nil)))
         let model = NodeAppModel()
         defer { model.disconnectGateway() }
-        let ingress = fixture.controller(useSavedProfiles: true) { origin in
+        let ingress = fixture.controller(useSavedProfiles: true, retirement: { origin in
             await model.retireGatewayIngress(for: origin)
-        }
+        })
         let ordinary = try await ingress.prepare(
             route: fixture.route,
             userInitiated: false,
@@ -780,7 +780,7 @@ extension GatewayIngressControllerTests {
     func `pending Forget excludes fresh and suspended fleet admissions`(scenario: String) async throws {
         let capturedBeforeForget = scenario == "suspended"
         let cleanupSucceeds = scenario != "failed cleanup"
-        let isolation = GatewayRegistryTestIsolation()
+        let isolation = await GatewayRegistryTestIsolation()
         defer { isolation.restore() }
         let state = try TemporaryOpenClawState(instanceID: "access-forget-fleet-\(UUID().uuidString)")
         defer { state.restore() }
@@ -905,5 +905,54 @@ extension GatewayIngressControllerTests {
         #expect(controller.operatorFleet._test_runtimeStableIDs().isEmpty)
         #expect(fixture.requestRoutes.filter { $0.stableID == fixture.stableID }.count == priorRequests)
         try await ingress.forget(origin: fixture.application.origin)
+    }
+}
+
+extension GatewayIngressControllerTests {
+    @Test @MainActor
+    func `canceling website preparation leaves friendly ingress guidance without a network failure`() async throws {
+        let isolation = await GatewayRegistryTestIsolation()
+        defer { isolation.restore() }
+        let state = try TemporaryOpenClawState(instanceID: "access-cancel-preparation-\(UUID().uuidString)")
+        defer { state.restore() }
+        let fixture = try IngressTestHarness()
+        let previousPin = GatewayTLSStore.loadFingerprint(stableID: fixture.stableID)
+        defer {
+            _ = GatewayTLSStore.clearFingerprint(stableID: fixture.stableID)
+            if let previousPin {
+                GatewayTLSStore.saveFingerprint(previousPin, stableID: fixture.stableID)
+            }
+        }
+        let gate = IngressTestGate()
+        fixture.browser.preparationGate = gate
+        let ingress = fixture.controller()
+        let model = NodeAppModel()
+        defer { model.disconnectGateway() }
+        let controller = GatewayConnectionController(
+            appModel: model,
+            startDiscovery: false,
+            tcpReachabilityProbe: { _, _, _, _ in true },
+            tlsFingerprintProbe: { _ in .fingerprint(String(repeating: "ab", count: 32)) },
+            ingress: ingress)
+        defer {
+            gate.release()
+            fixture.release.continuation.finish()
+            ingress.cancelSignIn()
+        }
+        #expect(await controller.connectManual(host: "gateway.example.test", port: 8443, useTLS: true) == .accepted)
+        if let prompt = controller.pendingTrustPrompt {
+            await controller.acceptPendingTrustPrompt(prompt)
+        }
+        await gate.waitUntilStarted()
+        #expect(model.activeGatewayConnectConfig == nil)
+        fixture.browser.cancel?()
+        gate.release()
+        try await waitForIngress { !controller._test_pendingAutoConnectState().pending }
+        #expect(model.activeGatewayConnectConfig == nil)
+        #expect(model.lastGatewayProblem == nil)
+        #expect(model.gatewayStatusText == "Offline")
+        #expect(ingress.attention?.message == "Sign-in was canceled. Choose Sign in to try again.")
+        #expect(fixture.browser.presented.isEmpty)
+        #expect(fixture.persisted == nil)
     }
 }

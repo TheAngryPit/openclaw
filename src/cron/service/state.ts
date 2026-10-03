@@ -11,6 +11,7 @@ import { LEGACY_IMPLICIT_AGENT_ID } from "../../routing/session-key.js";
 import type { OpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.types.js";
 import type { DeliveryContext } from "../../utils/delivery-context.types.js";
 import type { CronAgentAvailability } from "../agent-availability.js";
+import type { CronCompletionDeliveryFence } from "../delivery-attempt-fence.js";
 import { toPublicCronJob } from "../public-job.js";
 import type { CronRuntimeAuthority } from "../runtime-authority.js";
 import type { CronScheduledToolPolicy } from "../scheduled-tool-policy.js";
@@ -125,6 +126,7 @@ export type CronServiceDeps = {
   /** List enabled, configured channel ids without exposing channel machinery to cron core. */
   listConfiguredChannels?: () => readonly string[] | Promise<readonly string[]>;
   evaluateCronTrigger?: (params: {
+    deliveryAttemptFence: CronCompletionDeliveryFence | null;
     job: CronStoredJob;
     script: string;
     state: unknown;
@@ -136,7 +138,6 @@ export type CronServiceDeps = {
   defaultAgentId?: string;
   /** Resolve the current default when runtime config can change after startup. */
   resolveDefaultAgentId?: () => string | undefined;
-  legacyDefaultAgentId?: string;
   /** Resolve configured or persisted owners whose session stores need periodic cleanup. */
   resolveSessionStoreAgentIds?: () => string[];
   /** Revalidate resident policy using the supplied transaction or worker deletion facts. */
@@ -194,6 +195,7 @@ export type CronServiceDeps = {
     opts: HeartbeatWakeRequest & { agentId: string },
   ) => number | undefined;
   runIsolatedAgentJob: (params: {
+    deliveryAttemptFence: CronCompletionDeliveryFence | null;
     job: CronJob;
     admissionSource?: AdmittedRunContext["admissionSource"];
     message: string;
@@ -212,10 +214,12 @@ export type CronServiceDeps = {
       }
   >;
   runCommandJob?: (params: {
+    deliveryAttemptFence: CronCompletionDeliveryFence | null;
     job: CronJob;
     abortSignal?: AbortSignal;
   }) => Promise<CronRunOutcome & CronRunDeliveryResult>;
   runScriptJob?: (params: {
+    deliveryAttemptFence: CronCompletionDeliveryFence | null;
     job: CronStoredJob;
     streamBatch?: string;
     abortSignal?: AbortSignal;
@@ -236,6 +240,7 @@ export type CronServiceDeps = {
     event: CronEvent;
     abortSignal: AbortSignal;
     onDeliveryState: (outcome: CronWebhookDeliveryOutcome) => void;
+    assertCurrent?: () => void;
   }) => Promise<CronWebhookDeliveryOutcome>;
   cleanupTimedOutAgentRun?: (params: {
     job: CronJob;
@@ -343,6 +348,8 @@ export type CronServiceState = {
   /** Owns scheduled-tick exclusion until startup catch-up publishes deferred slots. */
   startupCatchup?: object;
   activeManualRunJobIds: Set<string>;
+  /** Accepted manual runs until their terminal history row is written, keyed by runId. */
+  queuedManualRuns: Map<string, Promise<unknown>>;
   manualSetupTimeoutNotified: boolean;
   /** Bounds scheduled, manual, and on-exit work with one shared cron limit. */
   runAdmission: CronRunAdmission;
@@ -378,6 +385,7 @@ export function createCronServiceState(deps: CronServiceDeps): CronServiceState 
     schedulingPaused: false,
     schedulerStarted: false,
     activeManualRunJobIds: new Set<string>(),
+    queuedManualRuns: new Map<string, Promise<unknown>>(),
     manualSetupTimeoutNotified: false,
     runAdmission: { active: 0, waiters: [], capacityListener: null },
     queuedRunReservationsByJobId: new Map<string, QueuedCronRunReservation>(),

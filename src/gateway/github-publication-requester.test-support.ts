@@ -65,7 +65,7 @@ async function createRequesterPolicySources(
   await setCanonicalUserProfileRole(maintainerProfile, "maintainer");
   invalidateOperatorRolePolicy(maintainerProfile);
   const config: OpenClawConfig = {
-    agents: { list: [{ id: "main", default: true, workspace }] },
+    agents: { entries: { main: { workspace } } },
     session: { maintenance: { mode: "warn" } },
     gateway: {
       roles: {
@@ -370,8 +370,8 @@ export async function prepareVisitorPublicationFixture(f: {
   const unexpectedSubagent = () => {
     throw new Error("Visitor publication fixtures must not dispatch subagent work");
   };
-  const register = () => {
-    const registry = loadAndActivateRootPluginRegistry({
+  const register = async () => {
+    const registry = await loadAndActivateRootPluginRegistry({
       config,
       env,
       workspaceDir,
@@ -445,7 +445,7 @@ export async function prepareVisitorPublicationFixture(f: {
       },
     };
   };
-  let active = register();
+  let active = await register();
   return {
     get store() {
       return active.store;
@@ -467,7 +467,7 @@ export async function prepareVisitorPublicationFixture(f: {
       await closeOpenClawAgentDatabasesAsync();
       await closeOpenClawStateDatabaseAsync();
       resetPluginStateStoreForTests();
-      active = register();
+      active = await register();
     },
     async close() {
       try {

@@ -299,16 +299,15 @@ extension GatewayConnectionController {
         let route: (URL, GatewayTLSParams?)
         switch entry.kind {
         case .manual:
-            guard let host = entry.host, let port = entry.port else { return nil }
-            let useTLS = resolveManualUseTLS(host: host, useTLS: entry.useTLS)
-            let tls = resolveManualTLSParams(stableID: stableID, tlsEnabled: useTLS)
-            guard let url = buildGatewayURL(
-                host: host,
-                port: port,
-                useTLS: tls?.required == true,
-                contextPath: entry.contextPath)
+            guard let host = entry.host, let port = entry.port,
+                  let manualRoute = self.manualGatewayRoute(
+                      host: host,
+                      port: port,
+                      useTLS: entry.useTLS,
+                      stableID: stableID,
+                      contextPath: entry.contextPath)
             else { return nil }
-            route = (url, tls)
+            route = manualRoute
         case .discovered:
             guard let gateway = gateways.first(where: {
                 GatewayStableIdentifier.matches($0.stableID, stableID)
@@ -335,7 +334,6 @@ extension GatewayConnectionController {
             instanceId: GatewaySettingsStore.currentInstanceID(),
             gatewayStableID: stableID)
         let nodeOptions = await makeConnectOptions(
-            stableID: stableID,
             deviceAuthGatewayID: GatewaySettingsStore.authenticationOwnerID(routeStableID: stableID),
             allowStoredDeviceAuth: !credentials.suppressStoredDeviceAuth)
         // Endpoint and permission work may outlive Forget's initial invalidation.

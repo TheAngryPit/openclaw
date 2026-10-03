@@ -6,9 +6,13 @@ enum GatewaySetupRouteProbeBudget {
 }
 
 struct GatewaySetupAttempt: Equatable {
-    // periphery:ignore - Synthesized Equatable compares this ID to reject stale setup attempts.
     private let id = UUID()
     let admissionCheckpoint: UInt64
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        // The UUID identifies the attempt; its admission checkpoint is immutable payload.
+        lhs.id == rhs.id
+    }
 }
 
 struct GatewayPendingTrustConnect {
