@@ -1544,6 +1544,7 @@ struct GatewayIngressControllerTests {
         else { try await ingress.forget(stableID: fixture.stableID) }
         #expect(ingress.attention == nil)
     }
+
     @Test(arguments: [false, true]) @MainActor
     func `committed grant remains discoverable when browser dismissal is canceled or superseded`(
         replace: Bool) async throws
@@ -1712,9 +1713,9 @@ struct GatewayIngressControllerTests {
         await signOut.value
         #expect(storage.values[fixture.application.origin] == nil)
         #expect(storage.values[replacementOrigin] == replacementBytes)
-        #expect(storage.deleted == [fixture.application.origin])
         #expect(ingress.attention?.origin == fixture.application.origin)
         #expect(try await replacement.value == nil)
+        #expect(storage.deleted == [fixture.application.origin, fixture.application.origin])
         if case .success = await download.result { Issue.record("Retired media returned a result") }
         // Once replacement settles, lookup follows P and sees only P's preexisting grant.
         #expect(ingress.hasSession(stableID: fixture.stableID) == replacementHasGrant)

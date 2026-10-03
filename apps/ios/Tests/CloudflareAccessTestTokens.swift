@@ -33,8 +33,8 @@ struct CloudflareAccessTestTokens {
         components.host = "gateway.example.test"
         if port != 443 { components.port = port }
         return try CloudflareAccessApplication(
-            origin: CloudflareAccessOrigin(#require(components.url)),
-            issuer: #require(URL(string: "https://example.cloudflareaccess.com")),
+            origin: CloudflareAccessOrigin(Self.unwrap(components.url)),
+            issuer: Self.unwrap(URL(string: "https://example.cloudflareaccess.com")),
             audience: "test-audience")
     }
 

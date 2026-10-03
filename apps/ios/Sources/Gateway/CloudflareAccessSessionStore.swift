@@ -238,9 +238,6 @@ final class CloudflareAccessSessionStore {
             }
             await self.retireTransports(origin)
             guard self.persistence.delete(origin) else {
-                if self.states[origin]?.retirement?.id == id {
-                    self.states[origin]?.retirement = nil
-                }
                 throw CloudflareAccessError.storageFailed
             }
         }

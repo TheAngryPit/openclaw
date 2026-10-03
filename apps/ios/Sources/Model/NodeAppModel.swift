@@ -4411,10 +4411,8 @@ extension NodeAppModel {
                     token: reconnectAuth.token,
                     bootstrapToken: reconnectAuth.bootstrapToken,
                     password: reconnectAuth.password)
-                let effectiveClientId = GatewaySettingsStore.loadGatewayClientIdOverride(stableID: stableID)
-                    ?? reconnectOptions.clientId
                 let operatorOptions = self.reconnectOperatorOptions(
-                    clientId: effectiveClientId,
+                    clientId: reconnectOptions.clientId,
                     reconnectOptions: reconnectOptions,
                     gatewayID: deviceAuthGatewayID,
                     credentials: reconnectCredentials,
@@ -4835,28 +4833,34 @@ extension NodeAppModel {
                         routeGeneration: context.routeGeneration,
                         nodeOptions: connectedOptions,
                         auth: reconnectAuth)
-                    else { break }
-                    options = reconnectOptions
-                    attempt = 0
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                } catch {
-                    guard !Task.isCancelled,
-                          self.isCurrentGatewayRoute(generation: routeGeneration, stableID: stableID)
-                    else { break }
-                    attempt += 1
-                    let mappedProblem = self.mapNodeGatewayConnectionError(error)
-                    let problem = self.isLocalGatewayFixtureEnabled ? nil : mappedProblem
-                    if !self.isLocalGatewayFixtureEnabled {
-                        self.recordNodeGatewayConnectionError(problem, error: error)
+                },
+                onDisconnected: { [weak self] reason in
+                    guard let self else { return }
+                    await MainActor.run {
+                        guard !self.isLocalGatewayFixtureEnabled,
+                              self.isCurrentGatewayRoute(
+                                  generation: context.routeGeneration,
+                                  stableID: context.stableID)
+                        else { return }
+                        if let problem = self.currentGatewayProblemToKeep(forDisconnectReason: reason) {
+                            self.gatewayStatusText = problem.statusText
+                        } else {
+                            self.gatewayStatusText = "Disconnected: \(reason)"
+                        }
+                        self.gatewayServerName = nil
+                        self.gatewayRemoteAddress = nil
+                        self.gatewayConnected = false
                     }
-                    GatewayDiagnostics.log("gateway connect error: \(error.localizedDescription)")
-                    if problem?.needsPairingApproval == true {
-                        // Pairing owns its status until explicit recovery; stop both watchdogs.
-                        self.operatorGatewayTask?.cancel()
-                        self.operatorGatewayTask = nil
-                        await self.operatorGateway.disconnect()
-                        await self.nodeGateway.disconnect()
-                        return
+                    GatewayDiagnostics.log("gateway disconnected reason: \(reason)")
+                },
+                onInvoke: { [weak self] req in
+                    guard let self else {
+                        return BridgeInvokeResponse(
+                            id: req.id,
+                            ok: false,
+                            error: OpenClawNodeError(
+                                code: .unavailable,
+                                message: "UNAVAILABLE: node not ready"))
                     }
                     return await self.handleInvoke(req, gatewayStableID: context.stableID)
                 },
@@ -4887,6 +4891,38 @@ extension NodeAppModel {
                 context: context,
                 state: state)
         }
+    }
+
+    private func handleNodeGatewayConnectionError(
+        _ error: Error,
+        context: NodeGatewayLoopContext,
+        state: NodeGatewayLoopState) async -> NodeGatewayLoopStep
+    {
+        guard !Task.isCancelled,
+              self.isCurrentGatewayRoute(
+                  generation: context.routeGeneration,
+                  stableID: context.stableID)
+        else { return .stop }
+        var nextState = state
+        nextState.attempt += 1
+        let mappedProblem = self.mapNodeGatewayConnectionError(error)
+        let problem = self.isLocalGatewayFixtureEnabled ? nil : mappedProblem
+        if !self.isLocalGatewayFixtureEnabled {
+            self.recordNodeGatewayConnectionError(problem, error: error)
+        }
+        GatewayDiagnostics.log("gateway connect error: \(error.localizedDescription)")
+        if problem?.needsPairingApproval == true {
+            // Pairing owns its status until explicit recovery; stop both watchdogs.
+            self.operatorGatewayTask?.cancel()
+            self.operatorGatewayTask = nil
+            await self.operatorGateway.disconnect()
+            await self.nodeGateway.disconnect()
+            return .stopPreservingStatus
+        }
+        if problem?.pauseReconnect == true { return .retry(nextState) }
+        let sleepSeconds = min(8.0, 0.5 * pow(1.7, Double(nextState.attempt)))
+        try? await Task.sleep(nanoseconds: UInt64(sleepSeconds * 1_000_000_000))
+        return .retry(nextState)
     }
 
     private func recordNodeGatewayConnectionError(

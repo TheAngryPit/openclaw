@@ -2304,7 +2304,7 @@ private func pendingHandoffDiagnostic(
     }
 
     @Test @MainActor func `legacy manual auto connect registers route before Access admission`() async {
-        let registryIsolation = GatewayRegistryTestIsolation()
+        let registryIsolation = await GatewayRegistryTestIsolation()
         defer { registryIsolation.restore() }
         let host = "legacy-access-\(UUID().uuidString).example.invalid"
         let stableID = "manual|\(host.lowercased())|443"
