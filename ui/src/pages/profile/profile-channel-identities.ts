@@ -6,7 +6,7 @@ import type {
   UsersListChannelIdentitiesResult,
   UsersUnlinkChannelIdentityResult,
 } from "../../../../packages/gateway-protocol/src/index.ts";
-import { GATEWAY_OWNER_PROFILE_ID } from "../../../../packages/gateway-protocol/src/index.ts";
+import { GATEWAY_OWNER_PROFILE_ID } from "../../../../packages/gateway-protocol/src/schema/user-profile-constants.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import {
   applicationContext,
@@ -392,18 +392,15 @@ export class ProfileChannelIdentities extends OpenClawLightDomContentsElement {
     this.error = null;
     this.status = null;
     try {
-      const result = await client.request<UsersUnlinkChannelIdentityResult>(
-        "users.unlinkChannelIdentity",
-        { profileId, identity: link.identity },
-      );
+      await client.request<UsersUnlinkChannelIdentityResult>("users.unlinkChannelIdentity", {
+        profileId,
+        identity: link.identity,
+      });
       if (
         mutationId !== this.mutationId ||
         !this.isCurrentTarget(client, profileId, identityGeneration, targetGeneration)
       ) {
         return;
-      }
-      if (!result.removed) {
-        throw new Error(t("profilePage.channelIdentities.unlinkFailed"));
       }
       this.links = (this.links ?? []).filter(
         (candidate) => !sameChannelIdentity(candidate.identity, link.identity),
