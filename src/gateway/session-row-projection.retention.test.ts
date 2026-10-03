@@ -15,7 +15,7 @@ function createCollectionControl() {
 
 it("collects superseded resident rows and their materializations after metadata refreshes", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
-    const cfg = { agents: { list: [{ id: "main", default: true }] } };
+    const cfg = { agents: { entries: { main: {} } } };
     setRuntimeConfigSnapshot(cfg);
     const keys = Array.from({ length: 4 }, (_, index) => `agent:main:retention-${index}`);
     const write = (key: string, revision: number) =>
@@ -44,7 +44,11 @@ it("collects superseded resident rows and their materializations after metadata 
       for (const opts of [{}, { agentId: "main" }, { configuredAgentsOnly: true }]) {
         for (const activeOnly of [false, true]) {
           selections.push(
-            new WeakRef(prepareSessionRowSelection(projection, { ...opts, activeOnly }).entries),
+            ...prepareSessionRowSelection(
+              projection,
+              { ...opts, activeOnly },
+              { ordered: true },
+            ).entries.map((pair) => new WeakRef(pair)),
           );
         }
       }
@@ -105,7 +109,7 @@ it("collects superseded resident rows and their materializations after metadata 
 
 it("does not retain a superseded child entry through a held parent display row", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
-    const cfg = { agents: { list: [{ id: "main", default: true }] } };
+    const cfg = { agents: { entries: { main: {} } } };
     setRuntimeConfigSnapshot(cfg);
     const parent = "agent:main:compact-parent";
     const child = "agent:main:compact-child";

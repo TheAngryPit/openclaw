@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Security
+import Synchronization
 
 public struct GatewayTLSParams: Equatable, Sendable {
     public let required: Bool
@@ -233,35 +234,6 @@ public enum GatewayTLSServerTrust {
     }
 }
 
-final class GatewayTLSFirstUseClaims: @unchecked Sendable {
-    private let lock = NSLock()
-    private var fingerprints: [String: String] = [:]
-
-    func record(_ fingerprint: String, stableID: String) {
-        self.lock.lock()
-        self.fingerprints[stableID] = fingerprint
-        self.lock.unlock()
-    }
-
-    func fingerprint(stableID: String) -> String? {
-        self.lock.lock()
-        defer { self.lock.unlock() }
-        return self.fingerprints[stableID]
-    }
-
-    func clear(stableID: String) {
-        self.lock.lock()
-        self.fingerprints[stableID] = nil
-        self.lock.unlock()
-    }
-
-    func clearAll() {
-        self.lock.lock()
-        self.fingerprints.removeAll()
-        self.lock.unlock()
-    }
-}
-
 struct GatewayTLSKeychainOperations: @unchecked Sendable {
     let copyMatching: (CFDictionary, UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus
     let add: (CFDictionary) -> OSStatus
@@ -304,25 +276,20 @@ public enum GatewayTLSStore {
     }
 
     private static let baseKeychainService = "ai.openclaw.tls-pinning"
-    private static let keychainServiceLock = NSLock()
-    private nonisolated(unsafe) static var keychainNamespace = GatewayTLSKeychainNamespaceState()
+    private static let keychainNamespace = Mutex(GatewayTLSKeychainNamespaceState())
     private static var keychainService: String {
-        self.keychainServiceLock.withLock {
-            self.keychainNamespace.service(base: self.baseKeychainService)
-        }
+        self.keychainNamespace.withLock { $0.service(base: self.baseKeychainService) }
     }
 
     private static let keychainAccountPrefix = "fingerprint.v3."
     private static let legacyCanonicalAccountPrefix = "fingerprint.v2."
-    private static let firstUseClaims = GatewayTLSFirstUseClaims()
+    private static let firstUseClaims = Mutex<[String: String]>([:])
 
     /// The macOS app profile is immutable for the process lifetime. Configure its
     /// Keychain namespace before constructing any Gateway connection.
     @discardableResult
     public static func configureKeychainServiceSuffix(_ suffix: String) -> Bool {
-        self.keychainServiceLock.withLock {
-            self.keychainNamespace.configure(suffix: suffix)
-        }
+        self.keychainNamespace.withLock { $0.configure(suffix: suffix) }
     }
 
     static func resolvedKeychainService(suffix: String) -> String {
@@ -345,7 +312,7 @@ public enum GatewayTLSStore {
         guard let account = self.keychainAccount(stableID: stableID) else { return nil }
         switch self.loadFingerprintResult(stableID: stableID) {
         case let .value(existing):
-            self.firstUseClaims.record(existing, stableID: stableID)
+            self.firstUseClaims.withLock { $0[stableID] = existing }
             return existing
         case .unavailable:
             return nil
@@ -358,13 +325,13 @@ public enum GatewayTLSStore {
             _ = self.clearSafeLegacyFingerprint(stableID: stableID)
         }
         if let claimed {
-            self.firstUseClaims.record(claimed, stableID: stableID)
+            self.firstUseClaims.withLock { $0[stableID] = claimed }
         }
         return claimed
     }
 
     public static func claimedFirstUseFingerprint(stableID: String) -> String? {
-        self.firstUseClaims.fingerprint(stableID: stableID)
+        self.firstUseClaims.withLock { $0[stableID] }
     }
 
     @discardableResult
@@ -406,7 +373,7 @@ public enum GatewayTLSStore {
         let removedLegacy = self.clearSafeLegacyFingerprint(stableID: stableID)
         let removed = removedCanonical && removedLegacy
         if removed {
-            self.firstUseClaims.clear(stableID: stableID)
+            self.firstUseClaims.withLock { $0[stableID] = nil }
         }
         return removed
     }
@@ -419,7 +386,7 @@ public enum GatewayTLSStore {
         ] as CFDictionary)
         let removed = removedKeychain == errSecSuccess || removedKeychain == errSecItemNotFound
         if removed {
-            self.firstUseClaims.clearAll()
+            self.firstUseClaims.withLock { $0.removeAll() }
         }
         return removed
     }
