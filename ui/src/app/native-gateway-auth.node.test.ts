@@ -89,6 +89,7 @@ function signedAuthorization(
 
 describe("native authenticated Control UI", () => {
   let gateway: ReturnType<typeof createApplicationGateway> | undefined;
+  let releaseAuthorizationParser: (() => void) | undefined;
   const ports: MessagePort[] = [];
   let bridge: {
     onmessage: ((event: { data: string }) => void) | null;
@@ -134,10 +135,15 @@ describe("native authenticated Control UI", () => {
     vi.stubGlobal("window", host);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     gateway?.stop();
     gateway = undefined;
     window.dispatchEvent(new Event("pagehide"));
+    releaseAuthorizationParser?.();
+    releaseAuthorizationParser = undefined;
+    await vi.dynamicImportSettled();
+    vi.doUnmock("./native-gateway-authorization.ts");
+    vi.resetModules();
     for (const port of ports.splice(0)) {
       port.close();
     }
@@ -147,6 +153,29 @@ describe("native authenticated Control UI", () => {
     vi.unstubAllGlobals();
     wsInstances.length = 0;
   });
+
+  function deferAuthorizationParserImport() {
+    const started = createDeferred();
+    const release = createDeferred();
+    const parserCalls: unknown[][] = [];
+    releaseAuthorizationParser = release.resolve;
+    vi.resetModules();
+    vi.doMock("./native-gateway-authorization.ts", async () => {
+      const actual = await vi.importActual<typeof import("./native-gateway-authorization.ts")>(
+        "./native-gateway-authorization.ts",
+      );
+      started.resolve();
+      await release.promise;
+      return {
+        ...actual,
+        readAuthorization: (...args: Parameters<typeof actual.readAuthorization>) => {
+          parserCalls.push(args);
+          return actual.readAuthorization(...args);
+        },
+      };
+    });
+    return { started, release, parserCalls };
+  }
 
   function connect(
     target = gatewayUrl,
@@ -668,6 +697,106 @@ describe("native authenticated Control UI", () => {
     expect(localStorage.getItem("openclaw-device-identity-v1")).toBeNull();
     gateway!.stop();
     expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(wsInstances).toHaveLength(1);
+  });
+
+  it("does not parse a successful reply after stop while the authorization parser is loading", async () => {
+    const parserImport = deferAuthorizationParserImport();
+    let request: Challenge | undefined;
+    bridge.postMessage.mockImplementation((message) => {
+      request = JSON.parse(message);
+    });
+    const socket = connect();
+    expect(request).toBeDefined();
+    bridge.onmessage?.({ data: JSON.stringify(signedAuthorization(request!)) });
+    await parserImport.started.promise;
+
+    gateway!.stop();
+    await socket.closed.promise;
+    parserImport.release.resolve();
+    await vi.dynamicImportSettled();
+
+    expect(parserImport.parserCalls).toEqual([]);
+    expect(socket.sent).toEqual([]);
+  });
+
+  it("keeps the native authorization deadline active while the parser is loading", async () => {
+    const parserImport = deferAuthorizationParserImport();
+    let request: Challenge | undefined;
+    bridge.postMessage.mockImplementation((message) => {
+      request = JSON.parse(message);
+    });
+    const socket = connect();
+    expect(request).toBeDefined();
+    bridge.onmessage?.({ data: JSON.stringify(signedAuthorization(request!)) });
+    await parserImport.started.promise;
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_PREAUTH_HANDSHAKE_TIMEOUT_MS / 2);
+    await socket.closed.promise;
+    socket.emitClose(4008, "native authorization unavailable");
+    expect(gateway!.snapshot.lastError).toContain("did not authorize this dashboard in time");
+    parserImport.release.resolve();
+    await vi.dynamicImportSettled();
+
+    expect(parserImport.parserCalls).toEqual([]);
+    expect(socket.sent).toEqual([]);
+  });
+
+  it("does not let a late parser import outlive native document retirement", async () => {
+    const parserImport = deferAuthorizationParserImport();
+    Reflect.deleteProperty(window, "__OPENCLAW_NATIVE_CONTROL_AUTH__");
+    Object.assign(window, { OpenClawNativeGatewayAuth: undefined });
+    window.location.hash = `nativeControlAuth=${encodeURIComponent(gatewayUrl)}`;
+    const channel = new MessageChannel();
+    ports.push(channel.port1, channel.port2);
+    channel.port1.on("message", (message: string) => {
+      channel.port1.postMessage(JSON.stringify(signedAuthorization(JSON.parse(message))));
+    });
+    const socket = connect();
+    window.dispatchEvent(
+      Object.assign(new Event("message"), {
+        data: JSON.stringify({ type: "openclaw.native-control-auth", gatewayUrl }),
+        source: null,
+        origin: "",
+        ports: [channel.port2],
+      }),
+    );
+    await parserImport.started.promise;
+
+    window.dispatchEvent(new Event("pagehide"));
+    await socket.closed.promise;
+    socket.emitClose(4008, "native authorization unavailable");
+    expect(gateway!.snapshot.lastError).toContain("Native dashboard document closed");
+    parserImport.release.resolve();
+    await vi.dynamicImportSettled();
+
+    expect(parserImport.parserCalls).toEqual([]);
+    expect(socket.sent).toEqual([]);
+  });
+
+  it("treats an authorization parser import failure as terminal", async () => {
+    const importStarted = createDeferred();
+    vi.resetModules();
+    vi.doMock("./native-gateway-authorization.ts", () => {
+      importStarted.resolve();
+      throw new Error("Synthetic native authorization parser chunk failed");
+    });
+    let request: Challenge | undefined;
+    bridge.postMessage.mockImplementation((message) => {
+      request = JSON.parse(message);
+    });
+    const socket = connect();
+    expect(request).toBeDefined();
+    bridge.onmessage?.({ data: JSON.stringify(signedAuthorization(request!)) });
+    await importStarted.promise;
+    await socket.closed.promise;
+    socket.emitClose(4008, "native authorization unavailable");
+
+    expect(gateway!.snapshot.lastError).toContain(
+      "Synthetic native authorization parser chunk failed",
+    );
+    expect(socket.sent).toEqual([]);
     await vi.advanceTimersByTimeAsync(30_000);
     expect(wsInstances).toHaveLength(1);
   });
