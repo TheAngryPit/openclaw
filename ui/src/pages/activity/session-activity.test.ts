@@ -7,6 +7,7 @@ import {
   canonicalSessionActivityLocation,
   projectSessionActivity,
   sessionActivityLocation,
+  sessionActivityOwner,
 } from "./session-activity.ts";
 
 const people: NonNullable<SessionsListResult["people"]> = [
@@ -27,6 +28,23 @@ function result(sessions: GatewaySessionRow[]): SessionsListResult {
 }
 
 describe("session activity projection", () => {
+  it.each([
+    ["gateway-owner", undefined, undefined],
+    ["gateway-owner", "  ", undefined],
+    ["gateway-owner", "Alex", "Alex"],
+    ["profile-ada", undefined, undefined],
+    [undefined, undefined, "main"],
+  ])("keeps actor %s names separate from the session agent", (id, label, name) => {
+    expect(
+      sessionActivityOwner({
+        key: "agent:main:work",
+        kind: "direct",
+        agentId: "main",
+        createdActor: id ? { type: "human", id, label } : undefined,
+      }),
+    ).toMatchObject({ id: id ?? "main", name });
+  });
+
   it("refreshes decorative names while retaining exact references, longer prefixes, filters and anchors", () => {
     const personId = "12345678-abcd-4123-8123-123456789abc";
     const legacy = {
