@@ -14,6 +14,7 @@ import type { WorkerWorkspacePendingResult } from "./placement-workspace-result.
 import type { WorkerEnvironmentServiceContract } from "./service-contract.js";
 
 export type WorkerSessionPlacementReader = {
+  prepareRuntimeRefresh?: import("./placement-store.js").WorkerSessionPlacementStore["prepareRuntimeRefresh"];
   getMany(sessionIds: readonly string[]): ReadonlyMap<string, WorkerSessionPlacementRecord>;
   /** @deprecated Await getWorkspaceResultReconcilingSessionIdsAsync. */
   getWorkspaceResultReconcilingSessionIds?(sessionIds: readonly string[]): ReadonlySet<string>;

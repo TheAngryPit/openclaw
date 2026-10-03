@@ -146,15 +146,15 @@ export class ProfileChannelIdentities extends OpenClawLightDomContentsElement {
   }
 
   protected override updated() {
-    const state = this.busyState;
-    const key = `${state.loading}:${state.mutation}`;
+    const busyState = this.busyState;
+    const key = `${busyState.loading}:${busyState.mutation}`;
     if (key === this.lastReportedBusy) {
       return;
     }
     this.lastReportedBusy = key;
     this.dispatchEvent(
       new CustomEvent<ProfileChannelIdentityBusyState>("profile-channel-identities-busy-changed", {
-        detail: state,
+        detail: busyState,
         bubbles: true,
         composed: true,
       }),
@@ -536,6 +536,7 @@ export class ProfileChannelIdentities extends OpenClawLightDomContentsElement {
                 .value=${this[field]}
                 ?disabled=${formDisabled}
                 @input=${(event: Event) => {
+                  // SAFETY: This listener is attached directly to the rendered input; currentTarget is that input during dispatch.
                   this[field] = (event.currentTarget as HTMLInputElement).value;
                 }}
               />`,

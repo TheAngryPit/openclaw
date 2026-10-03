@@ -14,7 +14,8 @@ import { formatChannelAllowFrom } from "../../channels/account-summary.js";
 import { resolveChannelDefaultAccountId } from "../../channels/plugins/helpers.js";
 import { resolveReadOnlyChannelPluginsForConfig } from "../../channels/plugins/read-only.js";
 import { formatChannelStatusState } from "../../channels/plugins/status-state.js";
-import type { ChannelId, ChannelPlugin } from "../../channels/plugins/types.public.js";
+import type { AnyChannelPlugin as ChannelPlugin } from "../../channels/plugins/types.plugin.js";
+import type { ChannelId } from "../../channels/plugins/types.public.js";
 import {
   getRuntimeChannelAccounts,
   hasRuntimeCredentialAvailable,
