@@ -1,4 +1,6 @@
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { DuplicateAgentError } from "../agents/agent-create-error.js";
+import { AuthProfileStoreUnreadableError } from "../agents/auth-profiles/store-unreadable-error.js";
 import { McpOAuthStoreCorruptionError } from "../agents/mcp-oauth-store-error.js";
 import { WorkspaceAliasRepointedError } from "../agents/workspace-state-identity.js";
 import {
@@ -6,7 +8,13 @@ import {
   SessionGoalOperationError,
   type SessionGoalOperationErrorCode,
 } from "../config/sessions/goals-operations.types.js";
+import { SessionCanonicalKeyMigrationRequiredError } from "../config/sessions/session-canonical-key-error.js";
+import {
+  SessionEntryLifecycleUpsertConflictError,
+  SqliteSessionMutationConflictError,
+} from "../config/sessions/session-mutation-conflict-error.js";
 import { SessionPendingInputCustodyError } from "../config/sessions/session-pending-input-custody-error.js";
+import { ModelAccountConnectAuthorityError } from "../gateway/model-account-connect-errors.js";
 import { WorkerSessionAlreadyAttachedError } from "../gateway/worker-environments/session-attachment.js";
 import { GatewayStateOwnerContentionError } from "../infra/gateway-state-owner.js";
 import {
@@ -21,10 +29,12 @@ import {
   StartupMaintenanceRequiredError,
 } from "../infra/startup-maintenance-required.js";
 import { PluginBlobStoreError } from "../plugin-state/plugin-blob-store.types.js";
+import { PluginStateStoreError } from "../plugin-state/plugin-state-error.js";
 import {
   SecretStoreValidationError,
   isSecretStoreValidationCode,
 } from "../secrets/store/secret-store-validation-error.js";
+import { ModelSelectionLockedError } from "../sessions/model-selection-error.js";
 import { SkillUploadRequestError } from "../skills/lifecycle/upload-store-error.js";
 import { SkillLibraryError, type SkillLibraryErrorCode } from "../skills/skill-library-error.js";
 import { OpenClawAgentDatabaseMediaMigrationRequiredError } from "./openclaw-agent-db-migration-required.js";
@@ -42,7 +52,10 @@ type StateMigrationKind = ConstructorParameters<
 >[0];
 
 const MESSAGE_ONLY_ERRORS = {
+  "model-account-authority": ModelAccountConnectAuthorityError,
   "duplicate-agent": DuplicateAgentError,
+  "model-selection-locked": ModelSelectionLockedError,
+  "session-canonical-key-migration": SessionCanonicalKeyMigrationRequiredError,
   "session-pending-input-custody": SessionPendingInputCustodyError,
   "skill-upload-request": SkillUploadRequestError,
   coordinator: SqliteCoordinatorError,
@@ -63,6 +76,8 @@ export type ErrorIdentity =
   | { type: "secret-store-validation"; secretCode: SecretStoreValidationError["code"] }
   | MessageOnlyErrorIdentity
   | { type: "session-goal-operation"; goalCode: SessionGoalOperationErrorCode }
+  | { type: "session-mutation-conflict"; operationLabel: string }
+  | { type: "session-lifecycle-upsert-conflict"; sessionKey: string }
   | { type: "worker-session-already-attached"; sessionId: string; environmentId: string }
   | {
       type: "workspace-alias-repointed";
@@ -71,6 +86,7 @@ export type ErrorIdentity =
       currentWorkspacePath: string;
     }
   | { type: "error" | "aggregate" | "mcp-oauth-corruption" }
+  | { type: "auth-profile-store-unreadable"; databasePath: string }
   | { type: "state-owner-contention"; databasePath: string }
   | { type: "ownership-metadata"; databasePath: string }
   | { type: "external-ownership"; databasePath: string; managerId: string }
@@ -83,6 +99,13 @@ export type ErrorIdentity =
       path?: string;
     }
   | { type: "maintenance"; kind: MaintenanceKind }
+  | {
+      type: "plugin-state";
+      stateCode: PluginStateStoreError["code"];
+      operation: PluginStateStoreError["operation"];
+      path?: string;
+      owner: PluginStateStoreError["owner"];
+    }
   | { type: "state-migration"; kind: StateMigrationKind; pathname: string }
   | {
       type: "session-metadata";
@@ -92,6 +115,18 @@ export type ErrorIdentity =
   | { type: "agent-media-migration"; pathname: string; schemaVersion: number };
 
 export function identifyError(error: Error): ErrorIdentity {
+  if (error instanceof AuthProfileStoreUnreadableError) {
+    return { type: "auth-profile-store-unreadable", databasePath: error.databasePath };
+  }
+  if (error instanceof PluginStateStoreError) {
+    return {
+      type: "plugin-state",
+      stateCode: error.code,
+      operation: error.operation,
+      path: error.path,
+      owner: error.owner,
+    };
+  }
   if (error instanceof SkillLibraryError) {
     return {
       type: "skill-library",
@@ -130,6 +165,12 @@ export function identifyError(error: Error): ErrorIdentity {
   }
   if (error instanceof SessionGoalOperationError) {
     return { type: "session-goal-operation", goalCode: error.code };
+  }
+  if (error instanceof SessionEntryLifecycleUpsertConflictError) {
+    return { type: "session-lifecycle-upsert-conflict", sessionKey: error.sessionKey };
+  }
+  if (error instanceof SqliteSessionMutationConflictError) {
+    return { type: "session-mutation-conflict", operationLabel: error.operationLabel };
   }
   if (error instanceof SessionMetadataUnavailableError) {
     return {
@@ -223,6 +264,50 @@ export function parseIdentity(node: Record<string, unknown>): ErrorIdentity | un
     return { type: node.type };
   }
   switch (node.type) {
+    case "plugin-state": {
+      const codes: readonly PluginStateStoreError["code"][] = [
+        "PLUGIN_STATE_SQLITE_UNAVAILABLE",
+        "PLUGIN_STATE_OPEN_FAILED",
+        "PLUGIN_STATE_WRITE_FAILED",
+        "PLUGIN_STATE_READ_FAILED",
+        "PLUGIN_STATE_CORRUPT",
+        "PLUGIN_STATE_LIMIT_EXCEEDED",
+        "PLUGIN_STATE_INVALID_INPUT",
+      ];
+      const operations: readonly PluginStateStoreError["operation"][] = [
+        "load-sqlite",
+        "open",
+        "ensure-schema",
+        "register",
+        "lookup",
+        "consume",
+        "delete",
+        "entries",
+        "count",
+        "clear",
+        "sweep",
+        "probe",
+        "close",
+      ];
+      const stateCode = codes.find((code) => code === node.stateCode && code === node.code);
+      const operation = operations.find((candidate) => candidate === node.operation);
+      const owner = node.owner;
+      return stateCode &&
+        operation &&
+        isRecord(owner) &&
+        typeof owner.pid === "number" &&
+        typeof owner.threadId === "number" &&
+        typeof owner.version === "string" &&
+        (node.path === undefined || typeof node.path === "string")
+        ? {
+            type: node.type,
+            stateCode,
+            operation,
+            owner: { pid: owner.pid, threadId: owner.threadId, version: owner.version },
+            ...(typeof node.path === "string" ? { path: node.path } : {}),
+          }
+        : undefined;
+    }
     case "skill-library":
       return isSkillLibraryCode(node.libraryCode) &&
         node.code === node.libraryCode &&
@@ -262,12 +347,21 @@ export function parseIdentity(node: Record<string, unknown>): ErrorIdentity | un
       const goalCode = SESSION_GOAL_OPERATION_ERROR_CODES.find((code) => code === node.goalCode);
       return goalCode && node.code === goalCode ? { type: node.type, goalCode } : undefined;
     }
+    case "session-lifecycle-upsert-conflict":
+      return typeof node.sessionKey === "string"
+        ? { type: node.type, sessionKey: node.sessionKey }
+        : undefined;
+    case "session-mutation-conflict":
+      return typeof node.operationLabel === "string"
+        ? { type: node.type, operationLabel: node.operationLabel }
+        : undefined;
     case "session-metadata":
       return (node.reason === "schema-missing" || node.reason === "table-missing") &&
         Array.isArray(node.missingTables) &&
         node.missingTables.every((table: unknown) => typeof table === "string")
         ? { type: node.type, reason: node.reason, missingTables: [...node.missingTables] }
         : undefined;
+    case "auth-profile-store-unreadable":
     case "state-owner-contention":
     case "ownership-metadata":
       return typeof node.databasePath === "string"
@@ -324,6 +418,13 @@ export function createError(node: ErrorIdentity & { message: string }): Error {
     return new ErrorType(node.message);
   }
   switch (node.type) {
+    case "plugin-state":
+      return new PluginStateStoreError(node.message, {
+        code: node.stateCode,
+        operation: node.operation,
+        path: node.path,
+        owner: node.owner,
+      });
     case "skill-library":
       return new SkillLibraryError(node.libraryCode, node.message, node.currentRevision);
     case "secret-store-validation":
@@ -334,6 +435,10 @@ export function createError(node: ErrorIdentity & { message: string }): Error {
       return new WorkspaceAliasRepointedError(node);
     case "session-goal-operation":
       return new SessionGoalOperationError(node.goalCode, node.message);
+    case "session-lifecycle-upsert-conflict":
+      return new SessionEntryLifecycleUpsertConflictError(node.sessionKey);
+    case "session-mutation-conflict":
+      return new SqliteSessionMutationConflictError(node.operationLabel);
     case "session-metadata":
       return new SessionMetadataUnavailableError(node.reason, undefined, node.missingTables);
     case "error":
@@ -342,6 +447,8 @@ export function createError(node: ErrorIdentity & { message: string }): Error {
       return new McpOAuthStoreCorruptionError("", "");
     case "aggregate":
       return new AggregateError([], node.message);
+    case "auth-profile-store-unreadable":
+      return new AuthProfileStoreUnreadableError(node.databasePath);
     case "state-owner-contention":
       return new GatewayStateOwnerContentionError(node.databasePath);
     case "ownership-metadata":

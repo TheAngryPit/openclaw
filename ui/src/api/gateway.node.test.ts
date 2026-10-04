@@ -186,16 +186,6 @@ const REQUEST_FRAME_ID = "2:00000000-0000-4000-8000-000000000000";
 type RequestTimingPayload = Parameters<
   NonNullable<GatewayBrowserClientOptions["onRequestTiming"]>
 >[0];
-type ConnectTimingPayload = Parameters<
-  NonNullable<GatewayBrowserClientOptions["onConnectTiming"]>
->[0];
-
-function connectTimingPayloads(
-  mock: ReturnType<typeof vi.fn<(timing: ConnectTimingPayload) => void>>,
-) {
-  return mock.mock.calls.map(([payload]) => payload);
-}
-
 function stubInsecureCrypto() {
   // Real insecure contexts keep randomUUID/getRandomValues; only crypto.subtle
   // is gated to secure contexts.
@@ -342,11 +332,9 @@ describe("GatewayBrowserClient", () => {
     useNodeFakeTimers();
     const onHello = vi.fn();
     const onClose = vi.fn();
-    const onConnectTiming = vi.fn<(timing: ConnectTimingPayload) => void>();
     const client = createClient({
       onHello,
       onClose,
-      onConnectTiming,
       onRequestTiming: ({ method }) => {
         if (method === "connect") {
           client.forceReconnect("response observer closed");
@@ -368,9 +356,6 @@ describe("GatewayBrowserClient", () => {
     expect(onHello).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
     expect(loadDeviceAuthToken()?.token).toBe(STORED_CRED);
-    expect(connectTimingPayloads(onConnectTiming).some(({ phase }) => phase === "hello")).toBe(
-      false,
-    );
     ws.emitClose(4000, "response observer closed");
     expect(onClose).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -379,7 +364,6 @@ describe("GatewayBrowserClient", () => {
         willRetry: true,
       }),
     );
-    expect(connectTimingPayloads(onConnectTiming).at(-1)?.phase).toBe("failed");
     await vi.advanceTimersByTimeAsync(800);
     expect(getLatestWebSocket()).not.toBe(ws);
   });
@@ -444,13 +428,13 @@ describe("GatewayBrowserClient", () => {
     { method: "token", recoveryScope: "tailscale-account-a" },
     { method: "tailscale", recoveryScope: "tailscale-account-b" },
   ] as const)(
-    "rejects a native personal hello with $method auth and $recoveryScope before publishing or issuing requests",
+    "rejects a native personal hello with $method auth and $recoveryScope before publishing events or requests",
     async ({ method, recoveryScope }) => {
       const onHello = vi.fn();
+      const onEvent = vi.fn();
+      const onListenerEvent = vi.fn();
       const onRecoveryScopeChange = vi.fn();
       const onClose = vi.fn();
-      const connectTimings = vi.fn();
-      let reentrantRequest: Promise<unknown> | undefined;
       const client = createClient({
         nativeConnectAuth: async ({ nonce, signedAt }) => ({
           client: {
@@ -474,48 +458,41 @@ describe("GatewayBrowserClient", () => {
           },
         }),
         onHello,
+        onEvent,
         onRecoveryScopeChange,
         onClose,
-        onConnectTiming: (timing) => {
-          connectTimings(timing);
-          if (timing.phase === "request-sent") {
-            // This callback runs before the connect frame is written. A native
-            // connection must not permit an app RPC before its hello is admitted.
-            reentrantRequest = client.request("gateway.info").catch(() => undefined);
-          }
-        },
       });
-      const { ws } = await startConnect(client);
-      // The buggy pre-admission callback can send its RPC before connect, so
-      // select the actual connect frame rather than whichever request was last.
-      const connectFrame = ws.sent
-        .map((frame) => JSON.parse(frame) as { id?: string; method?: string })
-        .find((frame) => frame.method === "connect");
-      if (!connectFrame?.id) {
-        throw new Error("Expected the native connect request before its hello response");
-      }
-      emitHello(ws, connectFrame.id, { method, recoveryScope });
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, 0);
-      });
-
-      expect(reentrantRequest).toBeDefined();
+      const { ws, connectFrame } = await startConnect(client);
+      const removeListener = client.addEventListener(onListenerEvent);
+      const earlyRequest = client.request("gateway.info").catch(() => undefined);
+      ws.emitMessage({ type: "event", event: "chat", payload: { state: "delta" }, seq: 1 });
       expect(ws.sent.map((frame) => JSON.parse(frame).method)).toEqual(["connect"]);
+      expect(onEvent).not.toHaveBeenCalled();
+      expect(onListenerEvent).not.toHaveBeenCalled();
+
+      emitHello(ws, connectFrame.id, { method, recoveryScope });
+      await Promise.resolve();
+      await Promise.resolve();
+
       expect(onHello).not.toHaveBeenCalled();
       expect(onRecoveryScopeChange).not.toHaveBeenCalled();
-      expect(connectTimings.mock.calls.some(([timing]) => timing.phase === "hello")).toBe(false);
+      expect(onEvent).not.toHaveBeenCalled();
+      expect(onListenerEvent).not.toHaveBeenCalled();
       expect(client.recoveryScope).toBe("");
       expect(client.recoveryScopeReady).toBe(false);
       expect(client.connected).toBe(false);
       expect(ws.lastClose).toEqual({ code: 4008, reason: "connect failed" });
       ws.emitClose(4008, "connect failed");
+      await earlyRequest;
+      removeListener();
       expect(onClose).toHaveBeenCalledWith(expect.objectContaining({ willRetry: false }));
     },
   );
 
   it("admits a native Tailscale hello only for its expected personal recovery scope", async () => {
     const onHello = vi.fn();
-    const onConnectTiming = vi.fn();
+    const onEvent = vi.fn();
+    const onListenerEvent = vi.fn();
     const client = createClient({
       nativeConnectAuth: async ({ nonce, signedAt }) => ({
         client: {
@@ -539,25 +516,37 @@ describe("GatewayBrowserClient", () => {
         },
       }),
       onHello,
-      onConnectTiming,
+      onEvent,
     });
     const { ws, connectFrame } = await startConnect(client);
+    const removeListener = client.addEventListener(onListenerEvent);
+    const earlyRequest = client.request("gateway.info").catch(() => undefined);
+    ws.emitMessage({ type: "event", event: "chat", payload: { state: "delta" }, seq: 1 });
+    expect(ws.sent.map((frame) => JSON.parse(frame).method)).toEqual(["connect"]);
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(onListenerEvent).not.toHaveBeenCalled();
+
     emitHello(ws, connectFrame.id, {
       method: "tailscale",
       recoveryScope: "tailscale-account-a",
     });
-    await vi.waitFor(() => expect(onHello).toHaveBeenCalledOnce());
+    await Promise.resolve();
+    await Promise.resolve();
 
-    expect(connectTimingPayloads(onConnectTiming).some((timing) => timing.phase === "hello")).toBe(
-      true,
-    );
+    expect(onHello).toHaveBeenCalledOnce();
     expect(client.recoveryScope).toBe("tailscale-account-a");
+    ws.emitMessage({ type: "event", event: "chat", payload: { state: "delta" }, seq: 2 });
+    expect(onEvent).toHaveBeenCalledOnce();
+    expect(onListenerEvent).toHaveBeenCalledOnce();
 
     const request = client.request("gateway.info");
     const requestFrame = JSON.parse(ws.sent.at(-1) ?? "{}") as { id?: string; method?: string };
     expect(requestFrame.method).toBe("gateway.info");
     ws.emitMessage({ type: "res", id: requestFrame.id, ok: true, payload: { ready: true } });
     await expect(request).resolves.toEqual({ ready: true });
+    removeListener();
+    client.stop();
+    await earlyRequest;
   });
 
   it("signs device proof with Gateway time instead of browser wall-clock time", async () => {
@@ -736,34 +725,9 @@ describe("GatewayBrowserClient", () => {
     );
   });
 
-  it("keeps credentials and nonce values out of connect timing", async () => {
-    const onConnectTiming = vi.fn<(timing: ConnectTimingPayload) => void>();
-    vi.stubGlobal("performance", {
-      now: vi.fn().mockReturnValueOnce(10).mockReturnValueOnce(35).mockReturnValue(40),
-    });
-    const client = createClient({ token: "shared-auth-token", onConnectTiming });
-
-    const { ws, connectFrame } = await startConnect(client, "nonce-secret");
-    const sentPayloads = connectTimingPayloads(onConnectTiming);
-    for (const payload of sentPayloads) {
-      expect(payload).not.toHaveProperty("token");
-      expect(payload).not.toHaveProperty("passwordValue");
-      expect(payload).not.toHaveProperty("nonce");
-      expect(JSON.stringify(payload)).not.toContain("shared-auth-token");
-      expect(JSON.stringify(payload)).not.toContain("nonce-secret");
-    }
-
-    emitHello(ws, connectFrame.id);
-
-    await vi.waitFor(() => {
-      expect(connectTimingPayloads(onConnectTiming).at(-1)?.phase).toBe("hello");
-    });
-  });
-
-  it("marks fallback connect timing when no challenge arrives", async () => {
+  it("signs a fallback connect with browser time when no challenge arrives", async () => {
     useNodeFakeTimers();
-    const onConnectTiming = vi.fn<(timing: ConnectTimingPayload) => void>();
-    const client = createClient({ token: "shared-auth-token", onConnectTiming });
+    const client = createClient({ token: "shared-auth-token" });
 
     client.start();
     const ws = getLatestWebSocket();
@@ -771,14 +735,6 @@ describe("GatewayBrowserClient", () => {
     await vi.advanceTimersByTimeAsync(750);
 
     expect(parseLatestConnectFrame(ws).params?.device?.signedAt).toBe(Date.now());
-    expect(connectTimingPayloads(onConnectTiming).map((payload) => payload.phase)).toContain(
-      "fallback",
-    );
-    expect(connectTimingPayloads(onConnectTiming).at(-1)).toMatchObject({
-      phase: "request-sent",
-      hasChallenge: false,
-      usedFallback: true,
-    });
   });
 
   it.each([0, -1])("enforces the UTF-8 payload limit with %d bytes remaining", async (delta) => {

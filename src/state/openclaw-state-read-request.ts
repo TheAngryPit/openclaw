@@ -7,10 +7,12 @@ import type {
 
 export function captureCommand(command: OpenClawStateReadCommand): OpenClawStateReadCommand {
   if (
+    command.type === "pairing.allowFrom" ||
     command.type === "secrets.metadata" ||
     command.type === "secrets.execEnvironment" ||
     command.type === "secrets.value" ||
     command.type === "sessionState.versions" ||
+    command.type === "sessionState.ambientTargets" ||
     command.type === "sessionState.events" ||
     command.type === "operatorApprovals.history" ||
     command.type === "diagnostic.latest" ||
@@ -208,9 +210,11 @@ function stringBytes(values: readonly (string | undefined)[]): number {
 
 function commandBytes(command: OpenClawStateReadRequest["command"]): number {
   if (
+    command.type === "pairing.allowFrom" ||
     command.type === "secrets.execEnvironment" ||
     command.type === "secrets.value" ||
     command.type === "sessionState.versions" ||
+    command.type === "sessionState.ambientTargets" ||
     command.type === "sessionState.events" ||
     command.type === "workers.placementProjection" ||
     command.type === "workers.placementPendingResults" ||
@@ -219,6 +223,9 @@ function commandBytes(command: OpenClawStateReadRequest["command"]): number {
     return Buffer.byteLength(JSON.stringify(command), "utf8");
   }
   let bytes = Buffer.byteLength(command.type, "utf8");
+  if (command.type === "generatedHtmlProvenance.read") {
+    return bytes + Buffer.byteLength(command.input, "utf8");
+  }
   if (command.type === "diagnostic.latest") {
     return bytes + Buffer.byteLength(command.input.scope, "utf8") + 16;
   }
@@ -241,12 +248,7 @@ function commandBytes(command: OpenClawStateReadRequest["command"]): number {
     return command.entries.reduce(
       (total, input) =>
         total +
-        stringBytes([
-          ...input.keys,
-          input.legacyKey,
-          input.entry?.lifecycleRevision,
-          input.entry?.sessionId,
-        ]) +
+        stringBytes([...input.keys, input.entry?.lifecycleRevision, input.entry?.sessionId]) +
         (input.entry?.sessionStartedAt === undefined ? 0 : 8),
       bytes,
     );
