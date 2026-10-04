@@ -27,9 +27,11 @@ struct OpenClawTypographyTests {
         for label in ["Cancel sign-in", "Sign in to Cloudflare Access", "Sign out of Cloudflare Access"] {
             #expect(settings.contains("Text(\"\(label)\").font(OpenClawType.body)"))
         }
-        let dashboard = try String(contentsOf: Self.sourceURL("Settings/DashboardPageScreen.swift"), encoding: .utf8)
-        #expect(dashboard.contains("Text(\"Open Gateway settings\")"))
-        #expect(dashboard.contains(".font(OpenClawType.body)"))
+        let embeddedDashboard = try String(
+            contentsOf: Self.sourceURL("Settings/SettingsHubScreen.swift"),
+            encoding: .utf8)
+        #expect(embeddedDashboard.contains("Text(\"Open Gateway settings\")"))
+        #expect(embeddedDashboard.contains(".font(OpenClawType.subheadSemiBold)"))
     }
 
     @Test(arguments: ["ChatFileAttachment.swift", "ChatMessageReactions.swift"])

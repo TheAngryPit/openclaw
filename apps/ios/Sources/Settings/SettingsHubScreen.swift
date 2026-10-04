@@ -23,7 +23,7 @@ struct SettingsHubScreen: View {
 
     @ViewBuilder private var root: some View {
         let config = self.appModel.activeGatewayConnectConfig
-        if config?.ingressAuthorization == nil, Self.usesDashboard(
+        if Self.usesDashboard(
             isOperatorConnected: self.appModel.isOperatorGatewayConnected,
             hasOperatorAdminScope: self.appModel.hasOperatorAdminScope,
             isDemoMode: self.appModel.isAppleReviewDemoModeEnabled,
@@ -171,6 +171,7 @@ struct EmbeddedDashboardContent: View {
             authorizationRevision: authorization?.revision)
         VStack(spacing: 0) {
             self.gatewayUpgradeBanner
+            self.ingressSignInGuidance
             if let authorization {
                 if let cookie = authorization.dashboardCookie(self.url) {
                     if self.failedAccessBoundaryIdentity == webContentIdentity {
@@ -249,6 +250,29 @@ struct EmbeddedDashboardContent: View {
         }
         .padding()
         .accessibilityIdentifier("SettingsHub.AccessUnavailable")
+    }
+
+    @ViewBuilder private var ingressSignInGuidance: some View {
+        if self.config?.ingressAuthorization != nil {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(
+                    "This Dashboard requires a Gateway UI that supports native app sign-in. " +
+                        "If it cannot connect, update the Gateway. " +
+                        "Native chat and settings remain available.")
+                    .font(OpenClawType.footnote)
+                    .accessibilityIdentifier("SettingsHub.NativeSignInGuidance")
+                if let openGateway {
+                    Button(action: openGateway) {
+                        Text("Open Gateway settings")
+                            .font(OpenClawType.subheadSemiBold)
+                    }
+                    .accessibilityIdentifier("SettingsHub.NativeSignInGuidance.OpenGateway")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+            .background(OpenClawBrand.warn.opacity(0.12))
+        }
     }
 
     @ViewBuilder private var gatewayUpgradeBanner: some View {

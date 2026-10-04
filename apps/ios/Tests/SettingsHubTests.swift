@@ -482,6 +482,223 @@ private func waitForDashboardCondition(_ condition: () -> Bool) async throws {
 
 @MainActor
 final class SettingsHubVisualProofTests: XCTestCase {
+    @MainActor
+    func testIngressAuthorizedDashboardEntryPointsLoadTheSelectedGatewayPage() async throws {
+        let registryIsolation = await GatewayRegistryTestIsolation()
+        defer { registryIsolation.restore() }
+        let instanceID = "settings-ingress-\(UUID().uuidString)"
+        let state = try TemporaryOpenClawState(instanceID: instanceID)
+        defer { state.restore() }
+        let previousAutoConnect = UserDefaults.standard.object(forKey: "gateway.autoconnect")
+        defer { UserDefaults.standard.set(previousAutoConnect, forKey: "gateway.autoconnect") }
+        UserDefaults.standard.set(false, forKey: "gateway.autoconnect")
+
+        let gateway = try await NativeGatewayWebSocketFixture.start(issuedDeviceTokens: [], tls: true)
+        defer { gateway.stop() }
+        let bodyMarker = "Clawsweeper ingress settings fixture"
+        let html = """
+        <!doctype html><html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+        <body><main>\(bodyMarker)</main></body></html>
+        """
+        gateway.httpResponse = { request in
+            guard request.target == "/settings" else { return .init(status: 404) }
+            return .init(
+                headers: ["Content-Type": "text/html; charset=utf-8"],
+                body: Data(html.utf8))
+        }
+
+        let origin = try CloudflareAccessOrigin(gateway.url())
+        let baseApplication = try CloudflareAccessTestTokens.application()
+        let application = CloudflareAccessApplication(
+            origin: origin,
+            issuer: baseApplication.issuer,
+            audience: baseApplication.audience)
+        let session = try CloudflareAccessTestTokens().session(
+            subject: "settings-ingress-fixture",
+            application: application)
+        let principal = try CloudflareAccessPrincipal.verified(from: session)
+        let stableID = "manual|127.0.0.1|\(gateway.port)"
+        let tls = try GatewayTLSParams(
+            required: true,
+            expectedFingerprint: XCTUnwrap(gateway.fingerprint),
+            allowTOFU: false,
+            storeKey: nil)
+        var config = GatewayConnectConfig(
+            url: gateway.url(),
+            stableID: stableID,
+            tls: tls,
+            token: nil,
+            bootstrapToken: nil,
+            password: nil,
+            nodeOptions: GatewayConnectOptions(
+                role: "node",
+                scopes: [],
+                caps: [],
+                commands: [],
+                permissions: [:],
+                clientId: "openclaw-ios",
+                clientMode: "node",
+                clientDisplayName: "Settings fixture",
+                includeDeviceIdentity: true,
+                allowStoredDeviceAuth: true,
+                deviceAuthGatewayID: stableID),
+            ingressAuthorization: nil)
+        let expectedURL = try XCTUnwrap(AuthenticatedControlUI.pageURL(
+            config: config,
+            path: "settings",
+            queryItems: []))
+        let dashboardCookie = try XCTUnwrap(session.dashboardCookie(for: expectedURL))
+        config.ingressAuthorization = GatewayIngressAuthorization(
+            origin: origin,
+            principal: principal,
+            revision: 1,
+            registrationID: UUID(),
+            headers: { _ in [:] },
+            isCurrent: { true },
+            dashboardCookie: { url in url == expectedURL ? dashboardCookie : nil },
+            checkResponse: { response in
+                guard response.statusCode == 200 else { throw URLError(.badServerResponse) }
+            },
+            load: { request, operation in try await operation(request) })
+
+        let identity = try XCTUnwrap(DeviceIdentityStore.loadOrCreatePersisted(profile: .primary))
+        let operatorToken = "synthetic-settings-operator-\(UUID().uuidString)"
+        defer {
+            DeviceAuthStore.clearToken(
+                deviceId: identity.deviceId,
+                role: "operator",
+                gatewayID: stableID,
+                profile: .primary)
+        }
+        XCTAssertTrue(DeviceAuthStore.storeTokenPersisted(
+            deviceId: identity.deviceId,
+            role: "operator",
+            token: operatorToken,
+            scopes: ["operator.read", "operator.admin"],
+            gatewayID: stableID,
+            profile: .primary))
+        XCTAssertEqual(
+            DeviceAuthStore.loadToken(
+                deviceId: identity.deviceId,
+                role: "operator",
+                gatewayID: stableID,
+                profile: .primary)?.token,
+            operatorToken)
+        let bindingStore = GatewayAccessDeviceAuthBindingStore.shared
+        let storedOperatorAuth = try XCTUnwrap(
+            bindingStore.storedDeviceAuth(role: "operator", gatewayID: stableID, profile: .primary),
+            "The synthetic operator token must be visible to the shared native-auth store")
+        XCTAssertEqual(storedOperatorAuth.entry.token, operatorToken)
+        guard bindingStore.bindGatewayIssuedToken(
+            principal: principal,
+            gatewayID: stableID,
+            role: "operator",
+            profile: .primary,
+            persistedRoles: ["operator"])
+        else {
+            throw NSError(
+                domain: "SettingsHubVisualProofTests",
+                code: 1,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "The synthetic operator token could not be bound to the verified Access principal",
+                ])
+        }
+
+        let model = NodeAppModel(audioAdmissionInitiallyAllowed: false)
+        model.activeGatewayConnectConfig = config
+        model.setOperatorConnected(true)
+        guard model.isOperatorGatewayConnected, model.hasOperatorAdminScope else {
+            throw NSError(
+                domain: "SettingsHubVisualProofTests",
+                code: 2,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "The synthetic fixture must satisfy the existing connected operator-admin admission gate",
+                ])
+        }
+        let appearanceModel = AppAppearanceModel()
+        let gatewayController = GatewayConnectionController(appModel: model, startDiscovery: false)
+        let entryPoints: [(String, AnyView)] = [
+            ("settings-hub", AnyView(SettingsHubScreen(navigationPath: .constant([]))
+                    .environment(model)
+                    .environment(appearanceModel)
+                    .environment(gatewayController)
+                    .preferredColorScheme(.light))),
+            ("dashboard-page", AnyView(DashboardPageScreen(path: "settings", title: "Settings")
+                    .environment(model)
+                    .environment(appearanceModel)
+                    .environment(gatewayController)
+                    .preferredColorScheme(.light))),
+        ]
+
+        var failures: [String] = []
+        for (name, rootView) in entryPoints {
+            do {
+                try await self.assertIngressDashboardLoaded(
+                    rootView: rootView,
+                    expectedURL: expectedURL,
+                    bodyMarker: bodyMarker,
+                    gateway: gateway,
+                    attachmentName: "settings-ingress-\(name)")
+            } catch {
+                failures.append("\(name): \(error)")
+            }
+        }
+        XCTAssertTrue(failures.isEmpty, failures.joined(separator: "; "))
+    }
+
+    @MainActor
+    private func assertIngressDashboardLoaded(
+        rootView: AnyView,
+        expectedURL: URL,
+        bodyMarker: String,
+        gateway: NativeGatewayWebSocketFixture,
+        attachmentName: String) async throws
+    {
+        let controller = UIHostingController(rootView: rootView)
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first)
+        let previousKeyWindow = scene.windows.first(where: \.isKeyWindow)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 393, height: 852)
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer {
+            window.rootViewController = nil
+            window.isHidden = true
+            previousKeyWindow?.makeKeyAndVisible()
+        }
+        controller.view.setNeedsLayout()
+        controller.view.layoutIfNeeded()
+
+        do {
+            try await waitForDashboardCondition {
+                guard let webView = Self.findWebView(in: controller.view) else { return false }
+                return webView.url == expectedURL && !webView.isLoading
+            }
+            let webView = try XCTUnwrap(Self.findWebView(in: controller.view))
+            guard webView.url == expectedURL else {
+                throw URLError(.badURL)
+            }
+            let body = try await webView.evaluateJavaScript("document.body.textContent") as? String ?? ""
+            guard body.contains(bodyMarker) else {
+                throw URLError(.cannotParseResponse)
+            }
+            guard let request = gateway.requests.first(where: { $0.target == "/settings" }),
+                  request.headers["cookie"]?.contains("CF_Authorization=") == true
+            else {
+                throw URLError(.userAuthenticationRequired)
+            }
+            try await self.attach(controller.view, named: attachmentName, webView: webView)
+        } catch {
+            try? await self.attach(
+                controller.view,
+                named: "\(attachmentName)-failure",
+                webView: Self.findWebView(in: controller.view))
+            throw error
+        }
+    }
+
     func testOlderDashboardShowsNativeGatewayUpgradeBanner() async throws {
         let html = """
         <!doctype html><html><meta name="viewport" content="width=device-width, initial-scale=1">
