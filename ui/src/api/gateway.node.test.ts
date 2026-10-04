@@ -450,9 +450,8 @@ describe("GatewayBrowserClient", () => {
       const onRecoveryScopeChange = vi.fn();
       const onClose = vi.fn();
       const connectTimings = vi.fn();
-      let client!: InstanceType<typeof GatewayBrowserClient>;
       let reentrantRequest: Promise<unknown> | undefined;
-      client = createClient({
+      const client = createClient({
         nativeConnectAuth: async ({ nonce, signedAt }) => ({
           client: {
             id: "openclaw-ios",
@@ -496,7 +495,9 @@ describe("GatewayBrowserClient", () => {
         throw new Error("Expected the native connect request before its hello response");
       }
       emitHello(ws, connectFrame.id, { method, recoveryScope });
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
 
       expect(reentrantRequest).toBeDefined();
       expect(ws.sent.map((frame) => JSON.parse(frame).method)).toEqual(["connect"]);

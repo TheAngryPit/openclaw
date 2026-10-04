@@ -58,7 +58,8 @@ struct GatewayNativeTransportDeviceAuthTests {
         options.clientMode = "ui"
         options.requiredAuthMethod = .tailscale
         try await gateway.connectThroughURLSessionForTest(fixture.url(), options: options)
-        #expect(fixture.capturedAuth(at: 0) == .init(token: nil, bootstrapToken: nil, deviceToken: nil))
+        #expect(fixture.capturedAuth(at: 0) == .init(
+            role: "operator", token: nil, bootstrapToken: nil, deviceToken: nil))
         #expect(fixture.capturedDeviceID(at: 0) == identity.deviceId)
         let route = try #require(await gateway.currentRoute(ifGatewayID: gatewayID))
         #expect(await gateway.currentAuthRecoveryScope(ifCurrentRoute: route) == "synthetic-personal-scope")
@@ -66,7 +67,8 @@ struct GatewayNativeTransportDeviceAuthTests {
         #expect(await gateway.currentDeviceAuthRoles().persisted.isEmpty)
         fixture.closeConnection(at: 0)
         try await waitUntil("personal credentialless reconnect") { await fixture.capturedAuth(at: 1) != nil }
-        #expect(fixture.capturedAuth(at: 1) == .init(token: nil, bootstrapToken: nil, deviceToken: nil))
+        #expect(fixture.capturedAuth(at: 1) == .init(
+            role: "operator", token: nil, bootstrapToken: nil, deviceToken: nil))
         #expect(fixture.capturedDeviceID(at: 1) == identity.deviceId)
         #expect(DeviceAuthStore.loadToken(deviceId: identity.deviceId, role: "operator", gatewayID: gatewayID)?
             .token == "existing-paired-token")
@@ -114,6 +116,7 @@ struct GatewayNativeTransportDeviceAuthTests {
         try await gateway.connectThroughURLSessionForTest(fixture.url(), options: options)
 
         #expect(fixture.capturedAuth(at: 0) == .init(
+            role: "node",
             token: previousToken,
             bootstrapToken: nil,
             deviceToken: nil))
@@ -128,6 +131,7 @@ struct GatewayNativeTransportDeviceAuthTests {
             await fixture.capturedAuth(at: 1) != nil
         }
         #expect(fixture.capturedAuth(at: 1) == .init(
+            role: "node",
             token: rotatedToken,
             bootstrapToken: nil,
             deviceToken: nil))
@@ -162,6 +166,7 @@ struct GatewayNativeTransportDeviceAuthTests {
         try await gateway.connectThroughURLSessionForTest(fixture.url(), options: options)
 
         #expect(fixture.capturedAuth(at: 0) == .init(
+            role: "node",
             token: nil,
             bootstrapToken: nil,
             deviceToken: nil))
@@ -177,6 +182,7 @@ struct GatewayNativeTransportDeviceAuthTests {
             await fixture.capturedAuth(at: 1) != nil
         }
         #expect(fixture.capturedAuth(at: 1) == .init(
+            role: "node",
             token: issuedToken,
             bootstrapToken: nil,
             deviceToken: nil))
@@ -210,6 +216,7 @@ struct GatewayNativeTransportDeviceAuthTests {
             credentials: .init(token: gatewayASharedToken),
             options: options)
         #expect(fixture.capturedAuth(at: 0) == .init(
+            role: "node",
             token: gatewayASharedToken,
             bootstrapToken: nil,
             deviceToken: nil))
@@ -226,6 +233,7 @@ struct GatewayNativeTransportDeviceAuthTests {
         try await gateway.connectThroughURLSessionForTest(fixture.url(), options: options)
 
         #expect(fixture.capturedAuth(at: 1) == .init(
+            role: "node",
             token: gatewayAScopedToken,
             bootstrapToken: nil,
             deviceToken: nil))
@@ -238,6 +246,7 @@ struct GatewayNativeTransportDeviceAuthTests {
             await fixture.capturedAuth(at: 2) != nil
         }
         #expect(fixture.capturedAuth(at: 2) == .init(
+            role: "node",
             token: gatewayAScopedToken,
             bootstrapToken: nil,
             deviceToken: nil))
@@ -278,6 +287,7 @@ struct GatewayNativeTransportDeviceAuthTests {
         }
 
         #expect(fixture.capturedAuth(at: 0) == .init(
+            role: "node",
             token: nil,
             bootstrapToken: nil,
             deviceToken: nil))
@@ -311,6 +321,7 @@ struct GatewayNativeTransportDeviceAuthTests {
         try await gateway.connectThroughURLSessionForTest(fixture.url(), options: options)
 
         #expect(fixture.capturedAuth(at: 0) == .init(
+            role: "node",
             token: nil,
             bootstrapToken: nil,
             deviceToken: nil))
@@ -325,6 +336,7 @@ struct GatewayNativeTransportDeviceAuthTests {
             await fixture.capturedAuth(at: 1) != nil
         }
         #expect(fixture.capturedAuth(at: 1) == .init(
+            role: "node",
             token: nil,
             bootstrapToken: nil,
             deviceToken: nil))
