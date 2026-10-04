@@ -6,6 +6,7 @@ struct SessionDashboardScreen: View {
     @Environment(NodeAppModel.self) private var appModel
     @Environment(\.dismiss) private var dismiss
     @State private var showsDesktop = false
+    @State private var failedAccessBoundaryIdentity: Int?
     let sessionKey: String
     let agentId: String?
 
@@ -13,12 +14,19 @@ struct SessionDashboardScreen: View {
         let config = self.appModel.activeGatewayConnectConfig
         let storedOperatorToken = AuthenticatedControlUI.storedOperatorToken(config: config)
         let nativeAuthProvider = IOSDashboardNativeGatewayAuthProvider(appModel: self.appModel, config: config)
+        let authorization = config?.ingressAuthorization
+        let webContentIdentity = AuthenticatedControlUI.webContentIdentity(
+            config: config,
+            storedOperatorToken: storedOperatorToken,
+            authorizationRevision: authorization?.revision)
         ZStack {
             OpenClawProBackground()
             if let url = Self.dashboardURL(
                 config: config,
                 sessionKey: self.sessionKey,
-                agentId: self.agentId)
+                agentId: self.agentId),
+                authorization == nil || authorization?.dashboardCookie(url) != nil,
+                self.failedAccessBoundaryIdentity != webContentIdentity
             {
                 AuthenticatedControlUIWebView(
                     url: url,
@@ -39,10 +47,14 @@ struct SessionDashboardScreen: View {
                     allowedMainFramePathPrefix: Self.dashboardPathPrefix(config: config),
                     onMainFrameNavigationOutsideScope: {
                         self.dismiss()
-                    })
-                    .id(AuthenticatedControlUI.webContentIdentity(
-                        config: config,
-                        storedOperatorToken: storedOperatorToken))
+                    },
+                    accessCookie: authorization?.dashboardCookie(url),
+                    accessAdmissionIsCurrent: authorization.map { authorization in
+                        { authorization.isCurrent() }
+                    },
+                    accessResponseCheck: authorization?.checkResponse,
+                    onAccessCookieBoundaryFailure: { self.failedAccessBoundaryIdentity = webContentIdentity })
+                    .id(webContentIdentity)
                     .ignoresSafeArea(.container, edges: .bottom)
             } else {
                 self.unavailableCard

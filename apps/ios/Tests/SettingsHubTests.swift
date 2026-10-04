@@ -501,7 +501,11 @@ final class SettingsHubVisualProofTests: XCTestCase {
         <body><main>\(bodyMarker)</main></body></html>
         """
         gateway.httpResponse = { request in
-            guard request.target == "/settings" else { return .init(status: 404) }
+            guard ["/settings", "/focus/dashboard/main/~key/native-proof", "/focus/desktop", "/focus/terminal"]
+                .contains(request.target) else { return .init(status: 404) }
+            guard request.headers["cookie"]?.contains("CF_Authorization=") == true else {
+                return .init(status: 401)
+            }
             return .init(
                 headers: ["Content-Type": "text/html; charset=utf-8"],
                 body: Data(html.utf8))
@@ -547,7 +551,7 @@ final class SettingsHubVisualProofTests: XCTestCase {
             config: config,
             path: "settings",
             queryItems: []))
-        let dashboardCookie = try XCTUnwrap(session.dashboardCookie(for: expectedURL))
+        _ = try XCTUnwrap(session.dashboardCookie(for: expectedURL))
         config.ingressAuthorization = GatewayIngressAuthorization(
             origin: origin,
             principal: principal,
@@ -555,7 +559,7 @@ final class SettingsHubVisualProofTests: XCTestCase {
             registrationID: UUID(),
             headers: { _ in [:] },
             isCurrent: { true },
-            dashboardCookie: { url in url == expectedURL ? dashboardCookie : nil },
+            dashboardCookie: { url in session.dashboardCookie(for: url) },
             checkResponse: { response in
                 guard response.statusCode == 200 else { throw URLError(.badServerResponse) }
             },
@@ -617,25 +621,39 @@ final class SettingsHubVisualProofTests: XCTestCase {
         }
         let appearanceModel = AppAppearanceModel()
         let gatewayController = GatewayConnectionController(appModel: model, startDiscovery: false)
-        let entryPoints: [(String, AnyView)] = [
-            ("settings-hub", AnyView(SettingsHubScreen(navigationPath: .constant([]))
+        let sessionURL = try XCTUnwrap(SessionDashboardScreen.dashboardURL(
+            config: config, sessionKey: "agent:main:native-proof"))
+        let desktopURL = try XCTUnwrap(ControlUIHubPage.desktop(source: nil, session: nil).url(config: config))
+        let terminalURL = try XCTUnwrap(ControlUIHubPage.terminal.url(config: config))
+        let entryPoints: [(String, URL, AnyView)] = [
+            ("settings-hub", expectedURL, AnyView(SettingsHubScreen(navigationPath: .constant([]))
                     .environment(model)
                     .environment(appearanceModel)
                     .environment(gatewayController)
                     .preferredColorScheme(.light))),
-            ("dashboard-page", AnyView(DashboardPageScreen(path: "settings", title: "Settings")
+            ("dashboard-page", expectedURL, AnyView(DashboardPageScreen(path: "settings", title: "Settings")
                     .environment(model)
                     .environment(appearanceModel)
                     .environment(gatewayController)
+                    .preferredColorScheme(.light))),
+            ("session-dashboard", sessionURL, AnyView(SessionDashboardScreen(
+                sessionKey: "agent:main:native-proof", agentId: "main")
+                .environment(model)
+                .preferredColorScheme(.light))),
+            ("desktop", desktopURL, AnyView(ControlUIHubScreen(page: .desktop(source: nil, session: nil))
+                    .environment(model)
+                    .preferredColorScheme(.light))),
+            ("terminal", terminalURL, AnyView(ControlUIHubScreen(page: .terminal)
+                    .environment(model)
                     .preferredColorScheme(.light))),
         ]
 
         var failures: [String] = []
-        for (name, rootView) in entryPoints {
+        for (name, pageURL, rootView) in entryPoints {
             do {
                 try await self.assertIngressDashboardLoaded(
                     rootView: rootView,
-                    expectedURL: expectedURL,
+                    expectedURL: pageURL,
                     bodyMarker: bodyMarker,
                     gateway: gateway,
                     attachmentName: "settings-ingress-\(name)")
@@ -684,7 +702,7 @@ final class SettingsHubVisualProofTests: XCTestCase {
             guard body.contains(bodyMarker) else {
                 throw URLError(.cannotParseResponse)
             }
-            guard let request = gateway.requests.first(where: { $0.target == "/settings" }),
+            guard let request = gateway.requests.first(where: { $0.target == expectedURL.path }),
                   request.headers["cookie"]?.contains("CF_Authorization=") == true
             else {
                 throw URLError(.userAuthenticationRequired)
