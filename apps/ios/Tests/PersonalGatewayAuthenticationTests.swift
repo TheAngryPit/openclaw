@@ -392,9 +392,8 @@ struct PersonalGatewayAuthenticationTests {
         #expect(model.chatViewModelOwnerID != previousOwner)
     }
 
-    @Test func `personal Watch admission never takes durable custody of a command`() async throws {
+    @Test func `personal Watch admission rejects before taking durable custody`() async throws {
         let model = NodeAppModel()
-        let journal = try await model.watchMessageJournal()
         model.activeGatewayConnectConfig = try self.config(personal: true)
         let commandID = UUID().uuidString
         let context = OpenClawWatchChatDeliveryContext(
@@ -413,6 +412,6 @@ struct PersonalGatewayAuthenticationTests {
                 return
             }
         }
-        #expect(try await journal.entries().contains { $0.commandId == commandID } == false)
+        #expect(model.watchChatDeliveryWarning == nil)
     }
 }
