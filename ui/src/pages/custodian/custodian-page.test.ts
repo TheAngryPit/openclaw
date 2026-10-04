@@ -141,6 +141,43 @@ describe("custodian page", () => {
     });
   });
 
+  it("preserves a newer same-profile name when the onboarding save settles", async () => {
+    const pendingWrite = createDeferred<{ profile: UserProfile }>();
+    const request = pageRequest(() => pendingWrite.promise);
+    const harness = createContext(request);
+    harness.setGatewaySnapshot({
+      selfUser: {
+        id: "profile-1",
+        identity: { type: "profile", id: "profile-1" },
+      },
+    });
+    harness.context.gateway.loadSelfProfile = vi.fn().mockResolvedValue(profile(null));
+    const { page } = await mountPage(harness.context);
+    await fill(page, "#custodian-onboarding-display-name", "First name");
+    button(page, ".custodian__name-actions button[type='submit']").click();
+    await waitForFast(() =>
+      expect(request.mock.calls.some(([method]) => method === "users.setDisplayName")).toBe(true),
+    );
+
+    harness.setGatewaySnapshot({
+      selfUser: {
+        id: "profile-1",
+        identity: { type: "profile", id: "profile-1" },
+        name: "Later name",
+      },
+    });
+    await page.updateComplete;
+
+    pendingWrite.resolve({ profile: profile("First name") });
+    await waitForFast(() => expect(page.querySelector(".custodian__name-prompt")).toBeNull());
+
+    expect(harness.context.gateway.snapshot.selfUser).toMatchObject({
+      id: "profile-1",
+      name: "Later name",
+    });
+    expect(harness.context.gateway.updateSelfUser).not.toHaveBeenCalled();
+  });
+
   it("keeps Skip local to this page visit and never writes the name", async () => {
     const request = pageRequest();
     const { context } = createContext(request);

@@ -265,6 +265,7 @@ export class CustodianPage extends OpenClawLightDomElement {
     ) {
       return;
     }
+    const selfUserAtSaveStart = this.context.gateway.snapshot.selfUser;
     const requestEpoch = this.onboardingNameRequestEpoch;
     const isCurrentRequest = () =>
       this.isCurrentOnboardingOwner(owner) && this.onboardingNameRequestEpoch === requestEpoch;
@@ -280,9 +281,17 @@ export class CustodianPage extends OpenClawLightDomElement {
       if (!isCurrent()) {
         return;
       }
-      this.onboardingNameProfile = result.profile;
-      this.onboardingNameDraft = result.profile.displayName ?? "";
-      this.context.gateway.updateSelfUser?.({ name: result.profile.displayName ?? undefined });
+      const currentSelfUser = this.context.gateway.snapshot.selfUser;
+      const hasNewerDisplayName =
+        currentSelfUser?.id === profile.id && currentSelfUser.name !== selfUserAtSaveStart?.name;
+      const savedProfile = hasNewerDisplayName
+        ? { ...result.profile, displayName: currentSelfUser.name ?? null }
+        : result.profile;
+      this.onboardingNameProfile = savedProfile;
+      this.onboardingNameDraft = savedProfile.displayName ?? "";
+      if (!hasNewerDisplayName) {
+        this.context.gateway.updateSelfUser?.({ name: result.profile.displayName ?? undefined });
+      }
     } catch (error) {
       if (isCurrent()) {
         this.onboardingNameError = formatUiError(error, t("custodian.onboardingName.saveFailed"));
