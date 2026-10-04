@@ -2,7 +2,7 @@ import type { webhook } from "@line/bot-sdk";
 import { createPluginRuntimeMock } from "openclaw/plugin-sdk/channel-test-helpers";
 import { MediaFetchError } from "openclaw/plugin-sdk/media-runtime";
 import type { HistoryEntry } from "openclaw/plugin-sdk/reply-history";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { setLineRuntime } from "./runtime.js";
 import type { LineAccountConfig } from "./types.js";
 import { createTestMessageEvent } from "./webhook-spool.test-support.js";
@@ -115,10 +115,6 @@ vi.mock("openclaw/plugin-sdk/reply-history", () => ({
     },
   }),
 }));
-vi.mock("openclaw/plugin-sdk/routing", () => ({
-  resolveAgentRoute: () => ({ agentId: "default" }),
-}));
-
 const { readAllowFromStoreMock, upsertPairingRequestMock } = vi.hoisted(() => ({
   readAllowFromStoreMock: vi.fn(async () => [] as string[]),
   upsertPairingRequestMock: vi.fn(async (_args: unknown) => ({ code: "CODE", created: true })),
@@ -181,23 +177,14 @@ vi.mock("./bot-message-context.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./bot-message-context.js")>()),
   buildLineMessageContext: buildLineMessageContextMock,
   buildLinePostbackContext: buildLinePostbackContextMock,
-  getLineSourceInfo: (source: {
-    type?: string;
-    userId?: string;
-    groupId?: string;
-    roomId?: string;
-  }) => ({
-    userId: source.userId,
-    groupId: source.type === "group" ? source.groupId : undefined,
-    roomId: source.type === "room" ? source.roomId : undefined,
-    isGroup: source.type === "group" || source.type === "room",
-  }),
+  prepareLineInboundRoute: async () => ({ mentionAgentId: "default" }),
 }));
 
-let handleLineWebhookEvents: typeof import("./bot-handlers.js").handleLineWebhookEvents;
+// Cold module transforms belong to collection, not a timed lifecycle hook.
+const { handleLineWebhookEvents } = await import("./bot-handlers.js");
 // Loaded through the same registry epoch as the module under test so both share
 // one instance of the sent-id record.
-let recordLineSentMessages: typeof import("./outbound-message-log.js").recordLineSentMessages;
+const { recordLineSentMessages } = await import("./outbound-message-log.js");
 type LineWebhookContext = Parameters<typeof import("./bot-handlers.js").handleLineWebhookEvents>[1];
 
 const createRuntime = () => ({ log: vi.fn(), error: vi.fn(), exit: vi.fn() });
@@ -317,11 +304,6 @@ async function expectGroupMessageBlocked(params: {
 }
 
 describe("handleLineWebhookEvents", () => {
-  beforeAll(async () => {
-    ({ handleLineWebhookEvents } = await import("./bot-handlers.js"));
-    ({ recordLineSentMessages } = await import("./outbound-message-log.js"));
-  });
-
   afterAll(() => {
     vi.doUnmock("openclaw/plugin-sdk/channel-inbound");
     vi.doUnmock("openclaw/plugin-sdk/channel-pairing");
@@ -329,7 +311,6 @@ describe("handleLineWebhookEvents", () => {
     vi.doUnmock("openclaw/plugin-sdk/runtime-group-policy");
     vi.doUnmock("openclaw/plugin-sdk/runtime-env");
     vi.doUnmock("openclaw/plugin-sdk/reply-history");
-    vi.doUnmock("openclaw/plugin-sdk/routing");
     vi.doUnmock("openclaw/plugin-sdk/conversation-runtime");
     vi.doUnmock("./download.js");
     vi.doUnmock("./send.js");

@@ -11,6 +11,7 @@ import type { RuntimeEnv } from "../../runtime.js";
 import {
   isSystemAgentNavigationOperation,
   type SystemAgentNavigationOperation,
+  type SystemAgentOperation,
 } from "../../system-agent/operation-types.js";
 import {
   executeSystemAgentOperation,
@@ -18,7 +19,6 @@ import {
   SYSTEM_AGENT_OPERATOR_APPROVAL_HANDOFF,
   SYSTEM_AGENT_OPERATOR_NAVIGATION_HANDOFF,
   secretStoreNameForConfigPath,
-  type SystemAgentOperation,
 } from "../../system-agent/operations.js";
 import {
   hashSystemAgentOperation,
@@ -263,16 +263,16 @@ function createCaptureRuntime(): RuntimeEnv & { read: () => string } {
 
 function requireParam(params: Record<string, unknown>, name: string): string {
   const value = readToolStringParam(params, name);
-  if (!value?.trim()) {
+  if (!value) {
     throw new ToolInputError(`openclaw: "${name}" is required for this action`);
   }
-  return value.trim();
+  return value;
 }
 
 function readSetupTarget(
   params: Record<string, unknown>,
 ): "guided" | "classic" | "channels" | "search" | "gateway" {
-  const target = readToolStringParam(params, "target")?.trim() ?? "guided";
+  const target = readToolStringParam(params, "target") ?? "guided";
   if (
     target === "guided" ||
     target === "classic" ||
@@ -287,29 +287,33 @@ function readSetupTarget(
 
 function operationForAction(params: Record<string, unknown>): SystemAgentOperation {
   const action = readToolStringParam(params, "action", { required: true });
+  const optionalStrings = <K extends string>(...keys: K[]): Partial<Record<K, string>> => {
+    const fields: Partial<Record<K, string>> = {};
+    for (const key of keys) {
+      const value = readToolStringParam(params, key);
+      if (value) {
+        fields[key] = value;
+      }
+    }
+    return fields;
+  };
   switch (action) {
     case "status":
-      return { kind: "status" };
     case "models":
-      return { kind: "models" };
     case "agents":
-      return { kind: "agents" };
+    case "audit":
+    case "doctor":
+      return { kind: action };
     case "channels":
       return { kind: "channel-list" };
     case "channel_info":
       return { kind: "channel-info", channel: requireParam(params, "channel").toLowerCase() };
-    case "audit":
-      return { kind: "audit" };
     case "validate_config":
       return { kind: "config-validate" };
-    case "doctor":
-      return { kind: "doctor" };
     case "config_get":
       return { kind: "config-get", path: requireParam(params, "path") };
-    case "config_schema": {
-      const configPath = readToolStringParam(params, "path")?.trim();
-      return { kind: "config-schema", ...(configPath ? { path: configPath } : {}) };
-    }
+    case "config_schema":
+      return { kind: "config-schema", ...optionalStrings("path") };
     case "gateway_status":
       return { kind: "gateway-status" };
     case "plugin_list":
@@ -324,24 +328,15 @@ function operationForAction(params: Record<string, unknown>): SystemAgentOperati
       return { kind: "gateway-config-setup" };
     case "import_memory":
       return { kind: "memory-import" };
-    case "configure_model_provider": {
-      const workspace = readToolStringParam(params, "workspace")?.trim();
-      return { kind: "model-setup", ...(workspace ? { workspace } : {}) };
-    }
+    case "configure_model_provider":
+      return { kind: "model-setup", ...optionalStrings("workspace") };
     case "manage_model_accounts":
       return { kind: "model-accounts" };
-    case "open_agent": {
-      const agentId = readToolStringParam(params, "agentId")?.trim();
-      const workspace = readToolStringParam(params, "workspace")?.trim();
-      return {
-        kind: "open-tui",
-        ...(agentId ? { agentId } : {}),
-        ...(workspace ? { workspace } : {}),
-      };
-    }
+    case "open_agent":
+      return { kind: "open-tui", ...optionalStrings("agentId", "workspace") };
     case "open_setup": {
       const target = readSetupTarget(params);
-      const channel = readToolStringParam(params, "channel")?.trim().toLowerCase();
+      const channel = readToolStringParam(params, "channel")?.toLowerCase();
       return {
         kind: "open-setup",
         target,
@@ -381,21 +376,14 @@ function operationForAction(params: Record<string, unknown>): SystemAgentOperati
       }
       return { kind: "plugin-activate-artifact", path: artifactPath, sha256 };
     }
-    case "setup": {
-      const workspace = readToolStringParam(params, "workspace")?.trim();
-      const model = readToolStringParam(params, "model")?.trim();
-      return {
-        kind: "setup",
-        ...(workspace ? { workspace } : {}),
-        ...(model ? { model } : {}),
-      };
-    }
+    case "setup":
+      return { kind: "setup", ...optionalStrings("workspace", "model") };
     case "set_default_model": {
-      const agentId = readToolStringParam(params, "agentId")?.trim();
+      const optional = optionalStrings("agentId");
       return {
         kind: "set-default-model",
         model: requireParam(params, "model"),
-        ...(agentId ? { agentId } : {}),
+        ...optional,
       };
     }
     case "create_agent": {
@@ -403,31 +391,23 @@ function operationForAction(params: Record<string, unknown>): SystemAgentOperati
       if (params.role !== undefined && !role) {
         throw new ToolInputError(`openclaw: unknown role; choose ${listAgentRoles().join(", ")}`);
       }
-      const workspace = readToolStringParam(params, "workspace")?.trim();
-      const name = readToolStringParam(params, "name")?.trim();
-      const purpose = readToolStringParam(params, "purpose")?.trim();
-      const model = readToolStringParam(params, "model")?.trim();
+      const workspace = optionalStrings("workspace");
+      const identity = optionalStrings("name", "purpose");
+      const model = optionalStrings("model");
       return {
         kind: "create-agent",
         agentId: requireParam(params, "agentId"),
-        ...(name ? { name } : {}),
-        ...(purpose ? { purpose } : {}),
+        ...identity,
         ...(role ? { role } : {}),
-        ...(workspace ? { workspace } : {}),
-        ...(model ? { model } : {}),
+        ...workspace,
+        ...model,
       };
     }
-    case "create_team": {
-      const coordinatorId = readToolStringParam(params, "coordinatorId")?.trim();
-      const prefix = readToolStringParam(params, "prefix")?.trim();
-      const workspaceRoot = readToolStringParam(params, "workspaceRoot")?.trim();
+    case "create_team":
       return {
         kind: "create-team",
-        ...(coordinatorId ? { coordinatorId } : {}),
-        ...(prefix ? { prefix } : {}),
-        ...(workspaceRoot ? { workspaceRoot } : {}),
+        ...optionalStrings("coordinatorId", "prefix", "workspaceRoot"),
       };
-    }
     case "config_unset":
       return { kind: "config-unset", path: requireParam(params, "path") };
     case "config_set":

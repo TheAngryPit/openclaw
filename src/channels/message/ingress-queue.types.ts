@@ -2,11 +2,8 @@ import type { Selectable } from "kysely";
 import type { ChannelIngressEvents } from "../../state/openclaw-state-db.generated.js";
 
 /** Pending or retryable inbound channel event stored in the durable ingress queue. */
-export type ChannelIngressQueueRecord<TPayload, TMetadata = unknown> = {
+export type ChannelIngressQueueRecord<TPayload, TMetadata = unknown> = ChannelIngressScope & {
   id: string;
-  channelId: string;
-  accountId: string;
-  queueName: string;
   payload: TPayload;
   metadata?: TMetadata;
   receivedAt: number;
@@ -38,29 +35,20 @@ export type ChannelIngressQueueClaimRef = {
 };
 
 /** Claim identity available when a stale row's payload cannot be decoded. */
-export type ChannelIngressQueueCorruptClaim = {
+export type ChannelIngressQueueCorruptClaim = ChannelIngressScope & {
   id: string;
-  channelId: string;
-  accountId: string;
-  queueName: string;
   laneKey?: string;
   reason: "corrupt_payload";
-  claim: {
-    token: string;
-    ownerId: string;
-    claimedAt: number;
-  };
+  claim: ChannelIngressQueueClaim<unknown>["claim"];
 };
 
 /** Completed ingress event tombstone retained for duplicate detection. */
-export type ChannelIngressQueueCompletedRecord<TCompletedMetadata = unknown> = {
-  id: string;
-  channelId: string;
-  accountId: string;
-  queueName: string;
-  completedAt: number;
-  metadata?: TCompletedMetadata;
-};
+export type ChannelIngressQueueCompletedRecord<TCompletedMetadata = unknown> =
+  ChannelIngressScope & {
+    id: string;
+    completedAt: number;
+    metadata?: TCompletedMetadata;
+  };
 
 /** Retention options for pending, completed, and failed ingress queue rows. */
 export type ChannelIngressQueuePruneOptions = {
@@ -75,11 +63,8 @@ export type ChannelIngressQueuePruneOptions = {
 };
 
 /** Failed ingress event tombstone retained for duplicate detection. */
-type ChannelIngressQueueFailedRecord = {
+type ChannelIngressQueueFailedRecord = ChannelIngressScope & {
   id: string;
-  channelId: string;
-  accountId: string;
-  queueName: string;
   failedAt: number;
   reason: string;
   message?: string;
@@ -122,7 +107,7 @@ type ChannelIngressQueueResubmitResult<
     };
 
 /** Result of enqueueing a possibly duplicate ingress event id. */
-export type ChannelIngressQueueEnqueueResult<TPayload, TMetadata, TCompletedMetadata> =
+type ChannelIngressQueueEnqueueResult<TPayload, TMetadata, TCompletedMetadata> =
   | {
       kind: "accepted";
       duplicate: false;
@@ -165,6 +150,11 @@ export type ChannelIngressQueue<TPayload, TMetadata = unknown, TCompletedMetadat
     orderBy?: "received" | "id";
   }): Promise<Array<ChannelIngressQueueRecord<TPayload, TMetadata>>>;
   listClaims(): Promise<Array<ChannelIngressQueueClaim<TPayload, TMetadata>>>;
+  /** Coherent lane state; optional for existing external queue implementations. */
+  listUnsettled?(options?: { orderBy?: "received" | "id" }): Promise<{
+    pending: Array<ChannelIngressQueueRecord<TPayload, TMetadata>>;
+    claims: Array<ChannelIngressQueueClaim<TPayload, TMetadata>>;
+  }>;
   /** Additive SDK seam; optional so existing external queue test doubles remain compatible. */
   listFailed?(options?: {
     limit?: number | "all";
@@ -227,8 +217,9 @@ export type ChannelIngressQueue<TPayload, TMetadata = unknown, TCompletedMetadat
   /**
    * Delete all rows after callers stop the account's producers and drain.
    * Optional for existing plugin-supplied queue inputs; core queues implement it.
+   * Cancellation before commit admission preserves every row.
    */
-  purge?(): Promise<number>;
+  purge?(options?: { signal?: AbortSignal }): Promise<number>;
 };
 
 /** Construction options for a channel/account-scoped ingress queue. */
@@ -238,19 +229,35 @@ export type CreateChannelIngressQueueOptions = {
   stateDir?: string;
   now?: () => number;
   /**
-   * `read-only` reads through the existing-database read-only opener, which never
-   * creates, migrates, chmods or configures the shared state file. Callers that must
-   * not touch durable state before they own it - Doctor detection runs before the
-   * exclusive maintenance lock - use it so listing cannot take a write path.
+   * Read-only inspection never creates, migrates, chmods, or configures the shared
+   * state file. Read-write listings retain canonical database admission.
    */
   access?: "read-write" | "read-only";
 };
 
 export type ChannelIngressRow = Selectable<ChannelIngressEvents>;
+export type ChannelIngressScope = { channelId: string; accountId: string; queueName: string };
 
 export type ChannelIngressListInput = {
   queueName: string;
-  status: "pending" | "claimed" | "failed";
+  status: "pending" | "claimed" | "failed" | "unsettled";
   limit?: number | "all";
   orderBy?: "received" | "id";
+};
+export type ChannelIngressClaimRequest = {
+  queueName: string;
+  candidateIds?: string[];
+  blockedLaneKeys: string[];
+  deriveLaneKey: boolean;
+  scanLimit?: number;
+  orderBy?: "received" | "id";
+};
+export type ChannelIngressClaimSnapshot = {
+  pending: ChannelIngressRow[];
+  claimed: ChannelIngressRow[];
+};
+
+export type ChannelIngressClaimSelection = {
+  corruptIds: string[];
+  selected?: { id: string; laneKey?: string };
 };

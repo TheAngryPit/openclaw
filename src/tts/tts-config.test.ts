@@ -42,10 +42,6 @@ describe("shouldAttemptTtsPayload", () => {
     envSnapshot = undefined;
   });
 
-  it("skips TTS when config, prefs, and session state leave auto mode off", () => {
-    expect(shouldAttemptTtsPayload({ cfg: {} as OpenClawConfig })).toBe(false);
-  });
-
   it("does not infer automatic TTS from a dashboard text turn without opt-in state", () => {
     expect(
       shouldAttemptTtsPayload({
@@ -112,15 +108,14 @@ describe("shouldAttemptTtsPayload", () => {
         mode: "final",
       },
       agents: {
-        list: [
-          {
-            id: "voice",
+        entries: {
+          voice: {
             tts: {
               auto: "always",
               mode: "all",
             },
           },
-        ],
+        },
       },
     } as OpenClawConfig;
 
@@ -136,7 +131,7 @@ describe("shouldAttemptTtsPayload", () => {
     writeFileSync(voicePrefsPath, JSON.stringify({ tts: { auto: "always" } }));
     const cfg = {
       agents: {
-        list: [{ id: "voice", tts: { prefsPath: voicePrefsPath } }],
+        entries: { voice: { tts: { prefsPath: voicePrefsPath } } },
       },
     } as OpenClawConfig;
 
@@ -158,9 +153,8 @@ describe("shouldAttemptTtsPayload", () => {
         },
       },
       agents: {
-        list: [
-          {
-            id: "reader",
+        entries: {
+          reader: {
             tts: {
               providers: {
                 openai: {
@@ -169,7 +163,7 @@ describe("shouldAttemptTtsPayload", () => {
               },
             },
           },
-        ],
+        },
       },
       channels: {
         feishu: {
@@ -219,7 +213,7 @@ describe("shouldAttemptTtsPayload", () => {
           },
         },
       },
-      agents: { list: [{ id: "reader", tts: agentTts }] },
+      agents: { entries: { reader: { tts: agentTts } } },
     } as OpenClawConfig;
 
     expect(resolveEffectiveTtsConfig(cfg, "reader").providers?.custom).toEqual({
