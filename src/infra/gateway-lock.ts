@@ -15,7 +15,6 @@ import {
   createOpenClawDatabaseMaintenanceScope,
   getOpenClawDatabaseMaintenanceScope,
 } from "../state/openclaw-state-db-async-lifecycle.js";
-import { openDoctorStateSchemaReadAdmission } from "../state/openclaw-state-db-doctor-schema.js";
 import { acquireWithWait } from "./acquire-with-wait.js";
 import { resolveIdentityPathViaExistingAncestorSync } from "./boundary-path.js";
 import { sha256HexPrefixCore } from "./crypto-digest.js";
@@ -547,10 +546,10 @@ export async function acquireGatewayLock(
               projection = previousOwner.retainProjection();
             }
             await assertHistoricalGatewayOwnerStopped(paths, opts, projection);
-            owner.run(() =>
+            await owner.run(() =>
               assertGatewayOwnerLeaseStopped(
                 env,
-                role === "sqlite-maintenance" ? openDoctorStateSchemaReadAdmission : undefined,
+                role === "sqlite-maintenance" ? owner : undefined,
               ),
             );
             await previousOwner?.release();
