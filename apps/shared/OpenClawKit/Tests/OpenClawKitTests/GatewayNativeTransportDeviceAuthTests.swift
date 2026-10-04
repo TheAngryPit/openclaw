@@ -59,7 +59,10 @@ struct GatewayNativeTransportDeviceAuthTests {
         options.requiredAuthMethod = .tailscale
         try await gateway.connectThroughURLSessionForTest(fixture.url(), options: options)
         #expect(fixture.capturedAuth(at: 0) == .init(
-            role: "operator", token: nil, bootstrapToken: nil, deviceToken: nil))
+            role: "operator",
+            token: nil,
+            bootstrapToken: nil,
+            deviceToken: nil))
         #expect(fixture.capturedDeviceID(at: 0) == identity.deviceId)
         let route = try #require(await gateway.currentRoute(ifGatewayID: gatewayID))
         #expect(await gateway.currentAuthRecoveryScope(ifCurrentRoute: route) == "synthetic-personal-scope")
@@ -68,7 +71,10 @@ struct GatewayNativeTransportDeviceAuthTests {
         fixture.closeConnection(at: 0)
         try await waitUntil("personal credentialless reconnect") { await fixture.capturedAuth(at: 1) != nil }
         #expect(fixture.capturedAuth(at: 1) == .init(
-            role: "operator", token: nil, bootstrapToken: nil, deviceToken: nil))
+            role: "operator",
+            token: nil,
+            bootstrapToken: nil,
+            deviceToken: nil))
         #expect(fixture.capturedDeviceID(at: 1) == identity.deviceId)
         #expect(DeviceAuthStore.loadToken(deviceId: identity.deviceId, role: "operator", gatewayID: gatewayID)?
             .token == "existing-paired-token")
