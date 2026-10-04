@@ -50,7 +50,6 @@ enum GatewaySettingsStore {
     private static let gatewayRegistryAccount = "gateway-registry"
     private static let lastGatewayConnectionAccount = "lastConnection"
     private static let gatewayCustomHeadersService = "ai.openclawfoundation.app.gateway.custom-headers"
-    private static let talkProviderApiKeyAccountPrefix = "provider.apiKey." // pragma: allowlist secret
 
     struct GatewayCredentialMetadata: Codable, Equatable {
         let gatewayStableID: String
@@ -426,17 +425,6 @@ enum GatewaySettingsStore {
             }
         }
         return self.saveGatewayRegistry(registry)
-    }
-
-    static func upsertLegacyManualGateway(_ stableID: String, _ host: String, _ port: Int, _ useTLS: Bool) -> Bool {
-        self.upsertGatewayRegistryEntry(.init(
-            stableID: stableID,
-            kind: .manual,
-            name: "\(host):\(port)",
-            host: host,
-            port: port,
-            useTLS: useTLS,
-            lastConnectedAtMs: nil), activate: true)
     }
 
     @discardableResult
