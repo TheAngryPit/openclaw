@@ -8,7 +8,11 @@ import { i18n } from "../../i18n/index.ts";
 import { createApplicationContextProvider } from "../../test-helpers/application-context.ts";
 import { createTestGatewayClient } from "../../test-helpers/gateway-client.ts";
 import { PersonalInstructions } from "./personal-instructions.ts";
-import { createConnectedContext, mountProfilePage } from "./profile-page.test-support.ts";
+import {
+  createConnectedContext,
+  modelAccountProfile,
+  mountProfilePage,
+} from "./profile-page.test-support.ts";
 
 const file = {
   agentId: "main",
@@ -412,7 +416,10 @@ it("retains drafts privately while offline and restores them only for the same p
 });
 
 it("keeps the actual Profile editor mounted across an offline transition", async () => {
-  const { context, emit } = createContext(vi.fn().mockResolvedValue(file));
+  const request = vi.fn(async (method: string) =>
+    method === "users.self" ? { profile: modelAccountProfile } : file,
+  );
+  const { context, emit } = createContext(request);
   const page = mountProfilePage(context);
   await page.updateComplete;
   const editor = page.querySelector<PersonalInstructions>("openclaw-personal-instructions")!;

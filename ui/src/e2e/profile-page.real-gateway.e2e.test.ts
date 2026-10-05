@@ -201,9 +201,7 @@ suite.define(() => {
             const content = identitySection
               .locator(contentSelector)
               .filter({ hasText: contentText });
-            await expect
-              .poll(() => heading.textContent())
-              .toContain("Linked channel accounts");
+            await expect.poll(() => heading.textContent()).toContain("Linked channel accounts");
             await expect.poll(() => content.count()).toBe(1);
             await content.evaluate((element) => element.scrollIntoView({ block: "center" }));
             const [headingBox, contentBox] = await Promise.all([
