@@ -8,13 +8,30 @@ on:
         description: Exact published product commit to verify
         required: true
         type: string
+      proof_kind:
+        description: Existing Profile fixture or isolated matched comparison
+        required: true
+        default: profile
+        type: choice
+        options:
+          - profile
+          - operator
+          - profile-comparison
+      operator_variant:
+        description: Explicit provenance label for matched comparisons
+        required: true
+        default: candidate
+        type: choice
+        options:
+          - baseline
+          - candidate
 
 permissions:
   contents: read
 
 jobs:
   profile-proof:
-    if: github.repository == 'TheAngryPit/openclaw'
+    if: github.repository == 'TheAngryPit/openclaw' && inputs.proof_kind == 'profile'
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     env:
@@ -103,5 +120,319 @@ jobs:
             ${{ runner.temp }}/profile-proof/**/*.png
             ${{ runner.temp }}/profile-proof/receipt.txt
             ${{ runner.temp }}/profile-diagnostics/failure-*/failure.public.json
+          if-no-files-found: error
+          retention-days: 7
+
+  profile-comparison-proof:
+    if: github.repository == 'TheAngryPit/openclaw' && inputs.proof_kind == 'profile-comparison'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CI: "true"
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      COMPARISON_VARIANT: ${{ inputs.operator_variant }}
+      PROOF_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      OPENCLAW_BUILD_PRIVATE_QA: "1"
+      OPENCLAW_RUN_NODE_SKIP_DTS_BUILD: "1"
+      OPENCLAW_CAPTURE_UI_PROOF: "1"
+    steps:
+      - name: Validate exact matched source selection
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$COMPARISON_VARIANT" = baseline || "$COMPARISON_VARIANT" = candidate ]]
+          if [[ "$COMPARISON_VARIANT" = baseline ]]; then
+            test "$CANDIDATE_SHA" = e87ab44327c049ca6454550addb4a314048ee2fb
+            printf 'OPENCLAW_PROFILE_COMPARISON_CHANNEL_STATE=absent\n' >> "$GITHUB_ENV"
+          else
+            test "$CANDIDATE_SHA" = ae51861738ec9a3095388a3ff64ba4a2a6220095
+            printf 'OPENCLAW_PROFILE_COMPARISON_CHANNEL_STATE=empty\n' >> "$GITHUB_ENV"
+          fi
+
+      - name: Checkout exact product without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: TheAngryPit/openclaw
+          ref: ${{ inputs.candidate_sha }}
+          path: product
+          persist-credentials: false
+
+      - name: Checkout reviewed capture fixture separately
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: TheAngryPit/openclaw
+          ref: ${{ github.workflow_sha }}
+          path: qa-harness
+          persist-credentials: false
+
+      - name: Verify source and allocate bounded capture directories
+        working-directory: product
+        shell: bash
+        env:
+          OPENCLAW_UI_E2E_ARTIFACT_DIR: ${{ runner.temp }}/profile-comparison-proof
+          OPENCLAW_UI_E2E_DIAGNOSTIC_DIR: ${{ runner.temp }}/profile-comparison-diagnostics
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git -C ../qa-harness rev-parse HEAD)" = "$PROOF_WORKFLOW_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          printf 'OPENCLAW_UI_E2E_ARTIFACT_DIR=%s\nOPENCLAW_UI_E2E_DIAGNOSTIC_DIR=%s\n' "$OPENCLAW_UI_E2E_ARTIFACT_DIR" "$OPENCLAW_UI_E2E_DIAGNOSTIC_DIR" >> "$GITHUB_ENV"
+          mkdir "$OPENCLAW_UI_E2E_ARTIFACT_DIR"
+          printf 'candidate_sha=%s\nworkflow_sha=%s\ncomparison_variant=%s\n' "$CANDIDATE_SHA" "$PROOF_WORKFLOW_SHA" "$COMPARISON_VARIANT" > "$OPENCLAW_UI_E2E_ARTIFACT_DIR/receipt.txt"
+
+      - name: Setup pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24.21.0"
+
+      - name: Install exact product dependencies once
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module -e 'import fs from "node:fs"; const p = JSON.parse(fs.readFileSync("package.json", "utf8")); if (typeof p.packageManager !== "string" || p.packageManager.split("+")[0] !== "pnpm@12.5.1") throw new Error("Unexpected product package manager");'
+          npm install --global pnpm@12.5.1
+          test "$(pnpm --version)" = "12.5.1"
+          pnpm install --frozen-lockfile
+          node --import tsx scripts/ensure-playwright-chromium.mts --require-playwright-chromium
+          printf 'node=%s\npnpm=%s\n' "$(node --version)" "$(pnpm --version)" >> "$OPENCLAW_UI_E2E_ARTIFACT_DIR/receipt.txt"
+
+      - name: Fresh build before staging any QA fixture
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm build
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          sha256sum dist/entry.js dist/control-ui/index.html dist/control-ui/asset-manifest.json dist/build-info.json > "$OPENCLAW_UI_E2E_ARTIFACT_DIR/build-digests.txt"
+          test -d dist/control-ui/assets
+          find dist/control-ui/assets -type f -name '*.js' -print0 | sort -z | xargs -0 -r sha256sum >> "$OPENCLAW_UI_E2E_ARTIFACT_DIR/build-digests.txt"
+          test "$(find dist/control-ui/assets -type f -name '*.js' | wc -l)" -gt 0
+          printf 'fresh_build_product_sha=%s\nfresh_build_workflow_sha=%s\n' "$CANDIDATE_SHA" "$PROOF_WORKFLOW_SHA" >> "$OPENCLAW_UI_E2E_ARTIFACT_DIR/receipt.txt"
+
+      - name: Stage only separately hashed QA fixture and config
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          qa_root=artifacts/profile-comparison-qa-20261005
+          fixture=ui/src/e2e/profile-comparison.capture.real-gateway.e2e.test.ts
+          config=.artifacts/profile-comparison-qa-20261005/vitest.profile-comparison.config.ts
+          test ! -e "$fixture"
+          test ! -e "$config"
+          test -z "$(git ls-files -- "$fixture" "$config")"
+          mkdir -p "$(dirname "$config")"
+          cp "../qa-harness/$qa_root/profile-comparison.capture.real-gateway.e2e.test.ts" "$fixture"
+          cp "../qa-harness/$qa_root/vitest.profile-comparison.config.ts" "$config"
+          cmp "$fixture" "../qa-harness/$qa_root/profile-comparison.capture.real-gateway.e2e.test.ts"
+          cmp "$config" "../qa-harness/$qa_root/vitest.profile-comparison.config.ts"
+          sha256sum "$fixture" "$config" > "$OPENCLAW_UI_E2E_ARTIFACT_DIR/qa-digests.txt"
+          test "$(git status --porcelain=v1 --untracked-files=all)" = "?? $fixture"
+          printf 'tracked_product_source=unchanged\nqa_fixture=separately_hashed_untracked\nsetup=canonical_ordinary_bundled_e2e\n' >> "$OPENCLAW_UI_E2E_ARTIFACT_DIR/receipt.txt"
+
+      - name: Capture matched Profile through canonical ordinary bundled E2E lifecycle
+        working-directory: product
+        shell: bash
+        run: |
+          set -uo pipefail
+          start_seconds=$SECONDS
+          node scripts/run-vitest.mjs run --config .artifacts/profile-comparison-qa-20261005/vitest.profile-comparison.config.ts --configLoader runner --reporter verbose
+          test_result=$?
+          printf 'test_exit=%s\ntest_seconds=%s\n' "$test_result" "$((SECONDS-start_seconds))" >> "$OPENCLAW_UI_E2E_ARTIFACT_DIR/receipt.txt"
+          exit "$test_result"
+
+      - name: Verify immutable source harness build and actual media
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git status --porcelain=v1 --untracked-files=all)" = '?? ui/src/e2e/profile-comparison.capture.real-gateway.e2e.test.ts'
+          sha256sum --check "$OPENCLAW_UI_E2E_ARTIFACT_DIR/build-digests.txt"
+          sha256sum --check "$OPENCLAW_UI_E2E_ARTIFACT_DIR/qa-digests.txt"
+          captured=0
+          for proof_directory in "$OPENCLAW_UI_E2E_ARTIFACT_DIR"/profile-comparison-real-gateway-capture-*; do
+            if test -s "$proof_directory/01-profile-comparison-viewport.png" && test -s "$proof_directory/02-profile-comparison-fullpage.png"; then
+              captured=1
+              break
+            fi
+          done
+          test "$captured" = 1
+          printf 'required_profile_comparison_media=present\nsource_harness_build_after=unchanged\n' >> "$OPENCLAW_UI_E2E_ARTIFACT_DIR/receipt.txt"
+
+      - name: Upload only synthetic comparison media and bounded receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: identity-profile-comparison-${{ inputs.operator_variant }}-${{ inputs.candidate_sha }}
+          path: |
+            ${{ runner.temp }}/profile-comparison-proof/**/*.png
+            ${{ runner.temp }}/profile-comparison-proof/receipt.txt
+            ${{ runner.temp }}/profile-comparison-proof/build-digests.txt
+            ${{ runner.temp }}/profile-comparison-proof/qa-digests.txt
+          if-no-files-found: error
+          retention-days: 7
+
+  operator-proof:
+    if: github.repository == 'TheAngryPit/openclaw' && inputs.proof_kind == 'operator'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CI: "true"
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      OPERATOR_VARIANT: ${{ inputs.operator_variant }}
+      PROOF_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      OPENCLAW_BUILD_PRIVATE_QA: "1"
+      OPENCLAW_RUN_NODE_SKIP_DTS_BUILD: "1"
+    steps:
+      - name: Validate exact source and explicit comparison variant
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$OPERATOR_VARIANT" = baseline || "$OPERATOR_VARIANT" = candidate ]]
+          if [[ "$OPERATOR_VARIANT" = baseline ]]; then
+            test "$CANDIDATE_SHA" = 2a4dacc224c56ba48c9e5353eb0907156a8b35d4
+          else
+            test "$CANDIDATE_SHA" = 409f7cf9b803e8c886c932ba6b4d72ab1de2f04a
+          fi
+
+      - name: Checkout exact product without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: TheAngryPit/openclaw
+          ref: ${{ inputs.candidate_sha }}
+          path: product
+          persist-credentials: false
+
+      - name: Checkout reviewed QA harness separately from product
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: TheAngryPit/openclaw
+          ref: ${{ github.workflow_sha }}
+          path: qa-harness
+          persist-credentials: false
+
+      - name: Allocate external proof directories and verify both source identities
+        working-directory: product
+        shell: bash
+        env:
+          OPERATOR_PROOF_ROOT: ${{ runner.temp }}/operator-proof
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git -C ../qa-harness rev-parse HEAD)" = "$PROOF_WORKFLOW_SHA"
+          printf 'OPERATOR_PROOF_ROOT=%s\n' "$OPERATOR_PROOF_ROOT" >> "$GITHUB_ENV"
+          mkdir -p "$OPERATOR_PROOF_ROOT"
+          printf 'candidate_sha=%s\nworkflow_sha=%s\noperator_variant=%s\n' "$CANDIDATE_SHA" "$PROOF_WORKFLOW_SHA" "$OPERATOR_VARIANT" > "$OPERATOR_PROOF_ROOT/receipt.txt"
+
+      - name: Setup pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24.21.0"
+
+      - name: Reuse one exact product dependency installation
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module -e 'import fs from "node:fs"; const p = JSON.parse(fs.readFileSync("package.json", "utf8")); if (typeof p.packageManager !== "string" || p.packageManager.split("+")[0] !== "pnpm@12.5.1") throw new Error("Unexpected product package manager");'
+          npm install --global pnpm@12.5.1
+          test "$(pnpm --version)" = "12.5.1"
+          pnpm install --frozen-lockfile
+          node --import tsx scripts/ensure-playwright-chromium.mts --require-playwright-chromium
+          printf 'node=%s\npnpm=%s\n' "$(node --version)" "$(pnpm --version)" >> "$OPERATOR_PROOF_ROOT/receipt.txt"
+
+      - name: Build the exact UI and backend source for this comparison cell
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm build
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          entry_sha256="$(sha256sum dist/entry.js | cut -d ' ' -f 1)"
+          [[ "$entry_sha256" =~ ^[0-9a-f]{64}$ ]]
+          printf 'OPENCLAW_QA_EXPECTED_GATEWAY_ENTRY_SHA256=%s\n' "$entry_sha256" >> "$GITHUB_ENV"
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import { createHash } from 'node:crypto';
+          const root = path.resolve('dist/control-ui');
+          const index = fs.readFileSync(path.join(root, 'index.html'));
+          const src = index.toString('utf8').match(/<script\b[^>]*\bsrc=["']([^"']+\.js(?:\?[^"']*)?)["']/i)?.[1];
+          if (!src) throw new Error('Fresh UI build missing main script');
+          const asset = path.resolve(root, decodeURIComponent(new URL(src, 'http://127.0.0.1/').pathname.replace(/^\/+/, '')));
+          const rel = path.relative(root, asset);
+          if (!rel || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) throw new Error('UI main asset escaped build root');
+          const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
+          const indexHash = hash(index), assetHash = hash(fs.readFileSync(asset));
+          fs.appendFileSync(process.env.GITHUB_ENV, `OPENCLAW_QA_EXPECTED_UI_INDEX_SHA256=${indexHash}\nOPENCLAW_QA_EXPECTED_UI_MAIN_ASSET_SHA256=${assetHash}\n`);
+          fs.appendFileSync(path.join(process.env.OPERATOR_PROOF_ROOT, 'receipt.txt'), `fresh_build_product_sha=${process.env.CANDIDATE_SHA}\nfresh_build_workflow_sha=${process.env.PROOF_WORKFLOW_SHA}\nui_index_sha256=${indexHash}\nui_main_asset_sha256=${assetHash}\n`);
+          NODE
+          printf 'gateway_entry_sha256=%s\n' "$entry_sha256" >> "$OPERATOR_PROOF_ROOT/receipt.txt"
+
+      - name: Capture real-token named unnamed and changed-name behavior
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          for qa_case in named unnamed mutation; do
+            cell="$OPERATOR_PROOF_ROOT/$OPERATOR_VARIANT-$qa_case"
+            mkdir "$cell"
+            OPENCLAW_QA_UI_VARIANT="$OPERATOR_VARIANT" \
+            OPENCLAW_QA_CASE="$qa_case" \
+            OPENCLAW_QA_UI_REPO_ROOT="$PWD" \
+            OPENCLAW_QA_GATEWAY_REPO_ROOT="$PWD" \
+            OPENCLAW_QA_EXPECTED_UI_COMMIT="$CANDIDATE_SHA" \
+            OPENCLAW_QA_EXPECTED_GATEWAY_COMMIT="$CANDIDATE_SHA" \
+            OPENCLAW_QA_ARTIFACT_DIR="$cell" \
+            node ../qa-harness/artifacts/operator-token-capture-linux-20261005/run-operator-token-capture.mjs
+          done
+
+      - name: Require successful real-source receipts cleanup and desktop/mobile captures
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          for (const qaCase of ['named', 'unnamed', 'mutation']) {
+            const variant = process.env.OPERATOR_VARIANT;
+            const dir = path.join(process.env.OPERATOR_PROOF_ROOT, `${variant}-${qaCase}`);
+            const r = JSON.parse(fs.readFileSync(path.join(dir, 'result.json'), 'utf8'));
+            if (r.status !== 'passed' || r.uiVariant !== variant || r.qaCase !== qaCase ||
+                r.sourceProvenance?.uiCommit !== process.env.CANDIDATE_SHA ||
+                r.sourceProvenance?.gatewayCommit !== process.env.CANDIDATE_SHA ||
+                r.sourceProvenance?.gatewayBuildIdentity?.entrySha256 !== process.env.OPENCLAW_QA_EXPECTED_GATEWAY_ENTRY_SHA256 ||
+                r.sourceProvenance?.uiAssetDigests?.expected?.indexSha256 !== process.env.OPENCLAW_QA_EXPECTED_UI_INDEX_SHA256 ||
+                r.sourceProvenance?.uiAssetDigests?.expected?.mainAssetSha256 !== process.env.OPENCLAW_QA_EXPECTED_UI_MAIN_ASSET_SHA256 ||
+                r.cleanup?.browserClosed !== true || r.cleanup?.gatewayProcessGroupStopped !== true ||
+                r.cleanup?.gatewayPortReleased !== true || r.tokenFragmentRemoved !== true ||
+                r.communityInvitation?.cardAbsentInDesktopAndMobileScreenshots !== true) {
+              throw new Error(`Incomplete actual operator proof: ${variant}-${qaCase}`);
+            }
+            for (const viewport of ['desktop', 'mobile']) {
+              if (fs.statSync(path.join(dir, `${variant}-${qaCase}-owner-${viewport}.png`)).size === 0) {
+                throw new Error('Empty owner screenshot');
+              }
+            }
+          }
+          NODE
+          printf 'required_operator_receipts_and_media=present\n' >> "$OPERATOR_PROOF_ROOT/receipt.txt"
+
+      - name: Upload only synthetic owner captures and bounded receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: identity-operator-proof-${{ inputs.operator_variant }}-${{ inputs.candidate_sha }}
+          path: |
+            ${{ runner.temp }}/operator-proof/*/*-owner-desktop.png
+            ${{ runner.temp }}/operator-proof/*/*-owner-mobile.png
+            ${{ runner.temp }}/operator-proof/*/result.json
+            ${{ runner.temp }}/operator-proof/receipt.txt
           if-no-files-found: error
           retention-days: 7
