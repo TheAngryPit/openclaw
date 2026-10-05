@@ -18,6 +18,7 @@ on:
           - operator
           - profile-comparison
           - tailscale-paired
+          - tailscale-current
       operator_variant:
         description: Explicit provenance label for matched comparisons
         required: true
@@ -122,6 +123,244 @@ jobs:
             ${{ runner.temp }}/profile-proof/receipt.txt
             ${{ runner.temp }}/profile-diagnostics/failure-*/failure.public.json
           if-no-files-found: error
+          retention-days: 7
+  tailscale-current-main-verification:
+    if: github.repository == 'TheAngryPit/openclaw' && inputs.proof_kind == 'tailscale-current'
+    name: Current-main native identity verification (${{ matrix.label }})
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - label: current
+            revision: 706c6fccf7596f67f0504664bb3a74d7833dad65
+    env:
+      DIAGNOSTIC_LABEL: ${{ matrix.label }}
+      DIAGNOSTIC_REVISION: ${{ matrix.revision }}
+      DIAGNOSTIC_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      EXPECTED_PACKAGE_MANAGER: pnpm@12.5.1+sha512.e3f305bc784a2bc89f5ad3b6138889470fae8d2af5f36b61216ec91c2c3d64089775f9de38aac331044ea40f245cb0d5666392dfdf65824e1907ef6a2c62de5f
+      OPENCLAW_CAPTURE_UI_PROOF: "0"
+      INPUT_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+    steps:
+      - name: Validate the exact integrated candidate input
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$INPUT_CANDIDATE_SHA" = "$DIAGNOSTIC_REVISION"
+
+      - name: Checkout exact source revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.revision }}
+          persist-credentials: false
+
+      - name: Initialize external receipt and verify pristine checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          qa_root="$RUNNER_TEMP/tailscale-current-qa-20261005/$DIAGNOSTIC_LABEL"
+          mkdir -p "$qa_root/receipt" "$qa_root/diagnostics" "$qa_root/artifacts"
+          printf 'OPENCLAW_QA_ROOT=%s\n' "$qa_root" >> "$GITHUB_ENV"
+          printf 'OPENCLAW_UI_E2E_ARTIFACT_DIR=%s\n' "$qa_root/artifacts" >> "$GITHUB_ENV"
+          printf 'OPENCLAW_UI_E2E_DIAGNOSTIC_DIR=%s\n' "$qa_root/diagnostics" >> "$GITHUB_ENV"
+          status="$(git status --porcelain --untracked-files=all)"
+          {
+            printf 'label=%s\nrevision_expected=%s\nrevision_actual=' "$DIAGNOSTIC_LABEL" "$DIAGNOSTIC_REVISION"
+            git rev-parse HEAD
+            printf 'workflow_sha=%s\nsource_status_before=<%s>\n' "$DIAGNOSTIC_WORKFLOW_SHA" "$status"
+          } > "$qa_root/receipt/checkout.txt"
+          test "$(git rev-parse HEAD)" = "$DIAGNOSTIC_REVISION"
+          test -z "$status"
+
+      - name: Setup pinned Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.19.0
+
+      - name: Activate exact packageManager and install frozen dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_manager="$(node -p "require('./package.json').packageManager")"
+          test "$package_manager" = "$EXPECTED_PACKAGE_MANAGER"
+          export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+          corepack enable
+          corepack prepare "$package_manager" --activate
+          test "$(node --version)" = v24.19.0
+          test "$(pnpm --version)" = 12.5.1
+          pnpm install --frozen-lockfile
+
+      - name: Write the pinned include inventory outside the product checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > "$OPENCLAW_QA_ROOT/receipt/include.json" <<'JSON'
+          [
+            "ui/src/e2e/chat-flow.catalog-bootstrap.e2e.test.ts",
+            "ui/src/e2e/worker-initial-setup.real-gateway.e2e.test.ts",
+            "ui/src/e2e/agent-file-lifecycle.real-gateway.e2e.test.ts",
+            "ui/src/e2e/chat-composer-websearch-kill-switch.real-gateway.e2e.test.ts",
+            "ui/src/e2e/chat-agent-avatar.real-gateway.e2e.test.ts",
+            "ui/src/e2e/chat-stop-finished-run.real-gateway.e2e.test.ts",
+            "ui/src/e2e/chat-thinking-metadata.real-gateway.e2e.test.ts",
+            "ui/src/e2e/control-ui-auth-transports.e2e.test.ts",
+            "ui/src/e2e/device-alias-rename.real-gateway.e2e.test.ts",
+            "ui/src/e2e/logs-lifecycle.e2e.test.ts",
+            "ui/src/e2e/model-picker-search.real-gateway.e2e.test.ts",
+            "ui/src/e2e/profile-page.real-gateway.e2e.test.ts",
+            "ui/src/e2e/session-progress-hovercard.real-gateway.e2e.test.ts"
+          ]
+          JSON
+          printf 'OPENCLAW_VITEST_INCLUDE_FILE=%s\n' "$OPENCLAW_QA_ROOT/receipt/include.json" >> "$GITHUB_ENV"
+          sha256sum "$OPENCLAW_QA_ROOT/receipt/include.json" > "$OPENCLAW_QA_ROOT/receipt/include.sha256"
+
+      - name: Install the revision-pinned Playwright Chromium
+        shell: bash
+        run: node --import tsx scripts/ensure-playwright-chromium.mts --require-playwright-chromium
+
+      - name: Build runtime and Control UI from the exact revision
+        env:
+          OPENCLAW_BUILD_PRIVATE_QA: "1"
+          OPENCLAW_RUN_NODE_SKIP_DTS_BUILD: "1"
+        run: pnpm build
+
+      - name: Capture source, toolchain, lock, and runner receipt
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          qa_root="${OPENCLAW_QA_ROOT:-$RUNNER_TEMP/tailscale-current-qa-20261005/$DIAGNOSTIC_LABEL}"
+          mkdir -p "$qa_root/receipt"
+          head_sha='<checkout-unavailable>'
+          status='<checkout-unavailable>'
+          if git rev-parse --git-dir >/dev/null 2>&1; then
+            head_sha="$(git rev-parse HEAD)"
+            status="$(git status --porcelain --untracked-files=all)"
+          fi
+          blob_of() {
+            git rev-parse "HEAD:$1" 2>/dev/null || printf '<unavailable>\n'
+          }
+          package_manager='<unavailable>'
+          if [[ -f package.json ]] && command -v node >/dev/null 2>&1; then
+            package_manager="$(node -p "require('./package.json').packageManager" 2>/dev/null || printf '<unavailable>')"
+          fi
+          node_version='<unavailable>'
+          if command -v node >/dev/null 2>&1; then node_version="$(node --version)"; fi
+          pnpm_version='<unavailable>'
+          if command -v pnpm >/dev/null 2>&1; then pnpm_version="$(pnpm --version 2>/dev/null || printf '<unavailable>')"; fi
+          {
+            printf 'label=%s\nrevision_expected=%s\nrevision_actual=%s\n' "$DIAGNOSTIC_LABEL" "$DIAGNOSTIC_REVISION" "$head_sha"
+            printf 'workflow_sha=%s\nsource_status_before_test=<%s>\n' "$DIAGNOSTIC_WORKFLOW_SHA" "$status"
+            printf 'workflow_blob=%s\n' "$(blob_of .github/workflows/ci.yml)"
+            printf 'prebuilt_config_blob=%s\n' "$(blob_of test/vitest/vitest.ui-e2e-prebuilt.config.ts)"
+            printf 'e2e_config_blob=%s\n' "$(blob_of test/vitest/vitest.ui-e2e.config.ts)"
+            printf 'include_parser_blob=%s\n' "$(blob_of test/vitest/vitest.pattern-file.ts)"
+            printf 'runner_script_blob=%s\n' "$(blob_of scripts/run-vitest.mjs)"
+            printf 'chromium_installer_blob=%s\n' "$(blob_of scripts/ensure-playwright-chromium.mts)"
+            printf 'lock_blob=%s\n' "$(blob_of pnpm-lock.yaml)"
+            printf 'package_manager=%s\nnode=%s\npnpm=%s\n' "$package_manager" "$node_version" "$pnpm_version"
+            printf 'playwright='; if command -v pnpm >/dev/null 2>&1 && pnpm --dir ui exec playwright --version; then :; else printf '<unavailable>\n'; fi
+            printf 'os_release:\n'; cat /etc/os-release
+            printf 'kernel='; uname -a
+            printf 'logical_cpus='; getconf _NPROCESSORS_ONLN
+            printf 'memory='; awk '/MemTotal/ {print $2 " kB"}' /proc/meminfo
+            printf 'workspace_disk='; df -B1 --output=size,avail . | tail -n 1
+            if [[ -f pnpm-lock.yaml ]]; then printf 'lock_sha256='; sha256sum pnpm-lock.yaml; else printf 'lock_sha256=<unavailable>\n'; fi
+            include_file="${OPENCLAW_VITEST_INCLUDE_FILE:-$qa_root/receipt/include.json}"
+            if [[ -f "$include_file" ]]; then
+              printf 'include_sha256='; sha256sum "$include_file"
+            else
+              printf 'include_sha256=<not-created>\n'
+            fi
+          } > "$qa_root/receipt/pre-test.txt"
+          if [[ "$head_sha" != '<checkout-unavailable>' ]]; then
+            test "$head_sha" = "$DIAGNOSTIC_REVISION"
+            test -z "$status"
+          fi
+
+      - name: Run the owning placement admission and reader regressions
+        id: run_placement_owners
+        env:
+          OPENCLAW_VITEST_INCLUDE_FILE: ""
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/run-vitest.mjs run \
+            --config test/vitest/vitest.gateway.config.ts \
+            --configLoader runner --reporter verbose --maxWorkers 2 \
+            src/gateway/worker-environments/worker-turn-launcher-initial-setup.test.ts \
+            src/gateway/worker-environments/placement-read-projection.worker.test.ts
+
+      - name: Run the affected native browser authentication tests
+        id: run_native_auth
+        env:
+          OPENCLAW_VITEST_INCLUDE_FILE: ""
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/run-vitest.mjs run \
+            --config test/vitest/vitest.ui.config.ts \
+            --configLoader runner --reporter verbose --maxWorkers 2 \
+            ui/src/api/gateway-connect.node.test.ts \
+            ui/src/app/native-gateway-auth.node.test.ts
+
+      - name: Run the original inventory with the current strengthened fixture
+        id: run_real_gateway
+        shell: bash
+        run: |
+          set -euo pipefail
+          config=test/vitest/vitest.ui-e2e-prebuilt.config.ts
+          test -f "$config"
+          node scripts/run-vitest.mjs run \
+            --config "$config" \
+            --configLoader runner \
+            --reporter verbose \
+            --reporter github-actions \
+            --reporter default \
+            --reporter ./scripts/lib/vitest-resource-reporter.mts \
+            --maxWorkers 2 \
+            --exclude ui/src/e2e/desktop-resize.real-gateway.e2e.test.ts
+
+      - name: Record final source state and test outcome
+        if: always()
+        env:
+          TEST_OUTCOME: ${{ steps.run_real_gateway.outcome || 'not-run' }}
+          PLACEMENT_OUTCOME: ${{ steps.run_placement_owners.outcome || 'not-run' }}
+          NATIVE_AUTH_OUTCOME: ${{ steps.run_native_auth.outcome || 'not-run' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          qa_root="${OPENCLAW_QA_ROOT:-$RUNNER_TEMP/tailscale-current-qa-20261005/$DIAGNOSTIC_LABEL}"
+          mkdir -p "$qa_root/receipt"
+          head_sha='<checkout-unavailable>'
+          status='<checkout-unavailable>'
+          if git rev-parse --git-dir >/dev/null 2>&1; then
+            head_sha="$(git rev-parse HEAD)"
+            status="$(git status --porcelain --untracked-files=all)"
+          fi
+          {
+            printf 'label=%s\nrevision_expected=%s\nrevision_actual=%s\n' "$DIAGNOSTIC_LABEL" "$DIAGNOSTIC_REVISION" "$head_sha"
+            printf 'workflow_sha=%s\ntest_outcome=%s\nsource_status_after=<%s>\n' "$DIAGNOSTIC_WORKFLOW_SHA" "$TEST_OUTCOME" "$status"
+            printf 'placement_regressions_outcome=%s\nnative_auth_tests_outcome=%s\n' "$PLACEMENT_OUTCOME" "$NATIVE_AUTH_OUTCOME"
+          } > "$qa_root/receipt/final.txt"
+          if [[ "$head_sha" != '<checkout-unavailable>' ]]; then
+            test "$head_sha" = "$DIAGNOSTIC_REVISION"
+            test -z "$status"
+          fi
+
+      - name: Upload bounded receipt and public failure summaries
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tailscale-current-qa-${{ matrix.label }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/tailscale-current-qa-20261005/${{ matrix.label }}/receipt/**
+            ${{ runner.temp }}/tailscale-current-qa-20261005/${{ matrix.label }}/diagnostics/failure-*/failure.public.json
+          if-no-files-found: ignore
           retention-days: 7
 
   profile-comparison-proof:
