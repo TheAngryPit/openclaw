@@ -476,6 +476,7 @@ describe.skipIf(process.platform === "win32")("iOS Access simulator workflow", (
       "-only-testing:OpenClawTests/ChatTypingFocusTests",
       "-only-testing:OpenClawTests/ChatSendHydrationTests",
       "-only-testing:OpenClawTests/SettingsHubTests",
+      "-only-testing:OpenClawTests/SettingsHubVisualProofTests/testIngressAuthorizedDashboardEntryPointsLoadTheSelectedGatewayPage",
       "-only-testing:OpenClawTests/GatewayIngressControllerTests",
       "-only-testing:OpenClawTests/GatewayIngressLoginPreparationTests",
       "-only-testing:OpenClawTests/GatewayAccessDeviceAuthBindingTests",
