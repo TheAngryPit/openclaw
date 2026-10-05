@@ -260,7 +260,9 @@ suite.define(() => {
           await editor.goto(onboardingUrl.href);
           const onboardingPrompt = editor.locator(".custodian__name-prompt");
           await onboardingPrompt.waitFor({ state: "visible" });
-          await expect(editor.locator("#custodian-onboarding-display-name")).toHaveValue("");
+          await expect
+            .poll(() => editor.locator("#custodian-onboarding-display-name").inputValue())
+            .toBe("");
           if (proofDir) {
             await editor.screenshot({
               animations: "disabled",
@@ -269,8 +271,8 @@ suite.define(() => {
           }
 
           await editor.getByRole("button", { name: "Maybe later", exact: true }).click();
-          await expect(onboardingPrompt).toHaveCount(0);
-          await expect(editor.locator(".custodian-surface")).toBeVisible();
+          await expect.poll(() => onboardingPrompt.count()).toBe(0);
+          await expect.poll(() => editor.locator(".custodian-surface").isVisible()).toBe(true);
           if (proofDir) {
             await editor.screenshot({
               animations: "disabled",
@@ -279,19 +281,27 @@ suite.define(() => {
           }
 
           await editor.goto(profileUrl.href);
-          await expect(editor.locator(".profile-hero__name")).toHaveText(authenticatedUser);
-          await expect(editor.locator(".identity-name-control input")).toHaveValue("");
+          await expect
+            .poll(() => editor.locator(".profile-hero__name").textContent())
+            .toBe(authenticatedUser);
+          await expect
+            .poll(() => editor.locator(".identity-name-control input").inputValue())
+            .toBe("");
 
           await editor.goto(onboardingUrl.href);
           await editor.locator(".custodian__name-prompt").waitFor({ state: "visible" });
           await editor.getByLabel("Your name", { exact: true }).fill(onboardingName);
           await editor.getByRole("button", { name: "Save name", exact: true }).click();
-          await expect(editor.locator(".custodian__name-prompt")).toHaveCount(0);
-          await expect(editor.locator(".custodian-surface")).toBeVisible();
+          await expect.poll(() => editor.locator(".custodian__name-prompt").count()).toBe(0);
+          await expect.poll(() => editor.locator(".custodian-surface").isVisible()).toBe(true);
 
           await editor.goto(profileUrl.href);
-          await expect(editor.locator(".profile-hero__name")).toHaveText(onboardingName);
-          await expect(editor.locator(".identity-name-control input")).toHaveValue(onboardingName);
+          await expect
+            .poll(() => editor.locator(".profile-hero__name").textContent())
+            .toBe(onboardingName);
+          await expect
+            .poll(() => editor.locator(".identity-name-control input").inputValue())
+            .toBe(onboardingName);
           if (proofDir) {
             await editor.screenshot({
               animations: "disabled",
@@ -303,13 +313,15 @@ suite.define(() => {
           try {
             await editor.goto(onboardingUrl.href);
             await selfProfileRead.response;
-            await expect(editor.locator(".sidebar-identity-card__name")).toHaveText(onboardingName);
+            await expect
+              .poll(() => editor.locator(".sidebar-identity-card__name").textContent())
+              .toBe(onboardingName);
             await editor.locator("openclaw-custodian-page").evaluate(async (element) => {
               await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
               await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
             });
-            await expect(editor.locator(".custodian__name-prompt")).toHaveCount(0);
-            await expect(editor.locator(".custodian-surface")).toBeVisible();
+            await expect.poll(() => editor.locator(".custodian__name-prompt").count()).toBe(0);
+            await expect.poll(() => editor.locator(".custodian-surface").isVisible()).toBe(true);
             if (proofDir) {
               await editor.screenshot({
                 animations: "disabled",
@@ -321,8 +333,12 @@ suite.define(() => {
           }
 
           await editor.goto(profileUrl.href);
-          await expect(editor.locator(".profile-hero__name")).toHaveText(onboardingName);
-          await expect(editor.locator(".identity-name-control input")).toHaveValue(onboardingName);
+          await expect
+            .poll(() => editor.locator(".profile-hero__name").textContent())
+            .toBe(onboardingName);
+          await expect
+            .poll(() => editor.locator(".identity-name-control input").inputValue())
+            .toBe(onboardingName);
         },
       );
     } finally {
