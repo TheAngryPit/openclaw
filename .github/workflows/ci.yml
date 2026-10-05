@@ -1,5 +1,5 @@
-name: Temporary native identity UI proof
-run-name: Identity UI proof ${{ inputs.candidate_sha }}
+name: Temporary native identity proof
+run-name: Identity proof ${{ inputs.proof_kind }} ${{ inputs.candidate_sha }}
 
 on:
   workflow_dispatch:
@@ -20,6 +20,7 @@ on:
           - tailscale-paired
           - tailscale-current
           - onboarding-comparison
+          - maccli-preflight
       operator_variant:
         description: Explicit provenance label for matched comparisons
         required: true
@@ -123,6 +124,50 @@ jobs:
             ${{ runner.temp }}/profile-proof/**/*.png
             ${{ runner.temp }}/profile-proof/receipt.txt
             ${{ runner.temp }}/profile-diagnostics/failure-*/failure.public.json
+          if-no-files-found: error
+          retention-days: 7
+  maccli-preflight:
+    if: github.repository == 'TheAngryPit/openclaw' && inputs.proof_kind == 'maccli-preflight'
+    runs-on: xcode-27
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+    steps:
+      - name: Validate exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$CANDIDATE_SHA" = a38ed66158bd270bd45607411aadb5862b299b8b
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+      - name: Set up pinned real Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24.19.0
+      - name: Record native toolchain and published release metadata only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/maccli-preflight"
+          {
+            printf 'product_sha=%s\nworkflow_sha=%s\nrunner_environment=%s\n' "$CANDIDATE_SHA" "$GITHUB_SHA" "$RUNNER_ENVIRONMENT"
+            sw_vers
+            xcodebuild -version
+            swift --version
+            node --version
+            npm --version
+            df -h "$RUNNER_TEMP"
+          } > "$RUNNER_TEMP/maccli-preflight/toolchain.txt"
+          npm view openclaw@2026.9.8 version dist engines --json --registry https://registry.npmjs.org > "$RUNNER_TEMP/maccli-preflight/release.json"
+          node --input-type=module -e 'import fs from "node:fs"; const r=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP+"/maccli-preflight/release.json","utf8")); if(r.version!=="2026.9.8" || !r.dist?.integrity || !r.dist?.tarball?.startsWith("https://registry.npmjs.org/")) throw Error("Release provenance unavailable");'
+      - name: Upload metadata receipt, not behavior proof
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: maccli-preflight-${{ github.run_id }}
+          path: ${{ runner.temp }}/maccli-preflight/*
           if-no-files-found: error
           retention-days: 7
   tailscale-current-main-verification:
