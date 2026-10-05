@@ -37,6 +37,8 @@ const TEST_RELATIVE = path.join(
 const SCRIPT_RELATIVE = path.join(QA_RELATIVE, "prepare.mjs");
 const EXPECTED_NODE = "v24.19.0";
 const EXPECTED_NPM = "11.17.0";
+const MAX_DIAGNOSTIC_CHARS = 2400;
+const MAX_DIAGNOSTIC_LINES = 12;
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -181,6 +183,41 @@ function run(command, args, { cwd, env = filteredEnvironment() } = {}) {
   });
 }
 
+function diagnosticTail(output) {
+  const clean = String(output ?? "")
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/(https?:\/\/)[^/@\s:]+:[^/@\s]+@/gi, "$1[REDACTED]@")
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, "$1 [REDACTED]")
+    .replace(
+      /((?:_authToken|_password|password|access[_-]?token|token)\s*[:=]\s*)[\"']?[^\s,\"'}]+/gi,
+      "$1[REDACTED]",
+    )
+    .replace(/([?&](?:token|access_token|auth|password)=)[^&\s]+/gi, "$1[REDACTED]");
+  return clean.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+    .slice(-MAX_DIAGNOSTIC_LINES).join("\n").slice(-MAX_DIAGNOSTIC_CHARS);
+}
+
+function commandReceipt(command, result) {
+  const receipt = { command, exitCode: result.code, signal: result.signal };
+  if (result.code !== 0) {
+    const stdoutTail = diagnosticTail(result.stdout);
+    const stderrTail = diagnosticTail(result.stderr);
+    if (stdoutTail) receipt.stdoutTail = stdoutTail;
+    if (stderrTail) receipt.stderrTail = stderrTail;
+  }
+  return receipt;
+}
+
+function commandFailure(command, result) {
+  const details = commandReceipt(command, result);
+  const signal = details.signal ? ` (signal ${details.signal})` : "";
+  const excerpts = [
+    details.stderrTail && `stderr tail:\n${details.stderrTail}`,
+    details.stdoutTail && `stdout tail:\n${details.stdoutTail}`,
+  ].filter(Boolean);
+  return `${command} failed with exit ${details.exitCode}${signal}${excerpts.length ? `\n${excerpts.join("\n")}` : " (no captured stdout or stderr)"}`;
+}
+
 async function requireCommandVersion(command, expected, label) {
   const result = await run(command, ["--version"]);
   if (result.code !== 0) fail(`${label} --version failed with exit ${result.code}`);
@@ -242,7 +279,7 @@ async function compareStagedArtifacts(repoRoot, sidecarRoot) {
   return hashes;
 }
 
-async function npmMetadata(npm, userConfig, cache) {
+async function npmMetadata(npm, userConfig, cache, cwd, commandReceipts) {
   const result = await run(npm, [
     "view",
     `openclaw@${VERSION}`,
@@ -255,8 +292,9 @@ async function npmMetadata(npm, userConfig, cache) {
     `--cache=${cache}`,
     "--audit=false",
     "--fund=false",
-  ]);
-  if (result.code !== 0) fail(`npm release metadata query failed with exit ${result.code}`);
+  ], { cwd });
+  commandReceipts.push(commandReceipt("npm view", result));
+  if (result.code !== 0) fail(commandFailure("npm view", result));
   let metadata;
   try {
     metadata = JSON.parse(result.stdout);
@@ -321,6 +359,8 @@ async function createManifest(args) {
     node: { path: nodePath, version: nodeVersion },
     npm: { path: npmPath, version: npmVersion },
     receiptDirectory: receiptDir,
+    npmWorkingDirectory: workDirectory,
+    npmCommands: [],
     sidecarHashes,
     tarballPath,
     tarballIntegrity: null,
@@ -331,7 +371,14 @@ async function createManifest(args) {
     await mkdir(workDirectory, { recursive: false, mode: 0o700 });
     await mkdir(cacheDirectory, { recursive: true, mode: 0o700 });
     await writeFile(userConfig, "", { flag: "wx", mode: 0o600 });
-    const metadata = await npmMetadata(npmPath, userConfig, cacheDirectory);
+    const metadata = await npmMetadata(
+      npmPath,
+      userConfig,
+      cacheDirectory,
+      workDirectory,
+      setupReceipt.npmCommands,
+    );
+    setupReceipt.npmMetadata = metadata;
     const packResult = await run(npmPath, [
       "pack",
       `openclaw@${VERSION}`,
@@ -342,8 +389,9 @@ async function createManifest(args) {
       `--cache=${cacheDirectory}`,
       "--audit=false",
       "--fund=false",
-    ]);
-    if (packResult.code !== 0) fail(`npm pack failed with exit ${packResult.code}`);
+    ], { cwd: workDirectory });
+    setupReceipt.npmCommands.push(commandReceipt("npm pack", packResult));
+    if (packResult.code !== 0) fail(commandFailure("npm pack", packResult));
     let packed;
     try {
       packed = JSON.parse(packResult.stdout)?.[0];
@@ -364,7 +412,6 @@ async function createManifest(args) {
       fail("downloaded npm tarball bytes did not match the independently pinned SRI");
     }
     setupReceipt.tarballIntegrity = actualIntegrity;
-    setupReceipt.npmMetadata = metadata;
     const manifest = {
       schemaVersion: 1,
       runId,

@@ -39,6 +39,28 @@ assertion failures, timeouts, and cleanup/restoration failures can never count
 as an expected baseline result. The candidate passes only with a successful
 focused test run and all preservation checks true.
 
+## npm preparation and failure diagnostics
+
+The release metadata query and tarball pack run from a unique, private scratch
+working directory under the receipt directory, while `--pack-destination`
+keeps the verified tarball in the persistent receipt directory. This prevents
+the product checkout's project configuration from becoming an input to npm
+preparation. The previous run's exact cause remains unknown: its helper did not
+retain npm output. In the pinned npm CLI v11.17.0 source, an explicit remote
+package spec bypasses workspace expansion, and `prepack`/`postpack` hooks run
+only for directory specs ([`pack.js`](https://github.com/npm/cli/blob/v11.17.0/lib/commands/pack.js),
+[`libnpmpack`](https://github.com/npm/cli/blob/v11.17.0/workspaces/libnpmpack/lib/index.js)).
+Thus neither product workspaces nor release lifecycle hooks are established as
+the cause of that earlier failure; using scratch is an isolation improvement,
+not a claimed fix for an unobserved cause.
+
+If metadata lookup or packing fails, the setup receipt preserves any verified
+release metadata and records each npm command's exit code and signal, plus the
+failed command's bounded stdout/stderr tail (last 12 non-empty lines, at most
+2,400 characters per stream). The helper also emits that excerpt with the
+failure. URL credentials and common token or password forms are redacted before
+either copy is retained.
+
 ## Workflow integration
 
 The workflow must stage these three sidecar files into the product checkout at
