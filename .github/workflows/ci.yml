@@ -22,6 +22,7 @@ on:
           - onboarding-comparison
           - maccli-preflight
           - maccli-real
+          - cloudflare-native
       operator_variant:
         description: Explicit provenance label for matched comparisons
         required: true
@@ -35,6 +36,332 @@ permissions:
   contents: read
 
 jobs:
+  cloudflare-native:
+    name: Ingress-authorized dashboard entrypoints (iOS simulator)
+    if: ${{ github.repository == 'TheAngryPit/openclaw' && github.event_name == 'workflow_dispatch' && inputs.proof_kind == 'cloudflare-native' }}
+    runs-on: xcode-27
+    timeout-minutes: 150
+    concurrency:
+      group: cloudflare-pr158051-native-entrypoint
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      CI: "true"
+      INPUT_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      EXPECTED_SOURCE_SHA: 7c51cbbddaba415e905d58c016612a0972130235
+      EXPECTED_XCTEST_ID: SettingsHubVisualProofTests/testIngressAuthorizedDashboardEntryPointsLoadTheSelectedGatewayPage()
+      SELECTED_TEST: OpenClawTests/SettingsHubVisualProofTests/testIngressAuthorizedDashboardEntryPointsLoadTheSelectedGatewayPage
+    steps:
+      - name: Checkout immutable public fork source
+        id: checkout-source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: TheAngryPit/openclaw
+          ref: 7c51cbbddaba415e905d58c016612a0972130235
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+
+      - name: Verify target and start evidence receipt
+        run: |
+          set -euo pipefail
+          [[ "$INPUT_CANDIDATE_SHA" == "$EXPECTED_SOURCE_SHA" ]]
+          [[ "${RUNNER_ENVIRONMENT:-}" == "github-hosted" ]]
+          [[ "$(uname -m)" == "arm64" ]]
+          actual_sha="$(git rev-parse HEAD)"
+          [[ "$actual_sha" == "$EXPECTED_SOURCE_SHA" ]]
+          git diff --quiet "$EXPECTED_SOURCE_SHA" --
+          git diff --cached --quiet "$EXPECTED_SOURCE_SHA" --
+          [[ -z "$(git status --porcelain --untracked-files=all)" ]]
+          EVIDENCE_DIR="$RUNNER_TEMP/openclaw-cloudflare-pr158051-evidence"
+          RESULT_BUNDLE="$RUNNER_TEMP/openclaw-cloudflare-pr158051.xcresult"
+          DERIVED_DATA="$RUNNER_TEMP/openclaw-cloudflare-pr158051-derived"
+          printf 'EVIDENCE_DIR=%s\nRESULT_BUNDLE=%s\nDERIVED_DATA=%s\n' "$EVIDENCE_DIR" "$RESULT_BUNDLE" "$DERIVED_DATA" >> "$GITHUB_ENV"
+          mkdir -p "$EVIDENCE_DIR"
+          {
+            echo "source_repository=TheAngryPit/openclaw"
+            echo "source_sha=$actual_sha"
+            echo "workflow_repository=$GITHUB_REPOSITORY"
+            echo "workflow_sha=$GITHUB_WORKFLOW_SHA"
+            echo "workflow_ref=$GITHUB_WORKFLOW_REF"
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "run_attempt=$GITHUB_RUN_ATTEMPT"
+            echo "runner_label=xcode-27"
+            echo "runner_environment=${RUNNER_ENVIRONMENT:-unknown}"
+            echo "runner_arch=$(uname -m)"
+            echo "runner_image_os=${ImageOS:-unknown}"
+            echo "runner_image_version=${ImageVersion:-unknown}"
+            echo "runner_disk=$(df -h "$RUNNER_TEMP" | tail -n 1)"
+            echo "selected_test=$SELECTED_TEST"
+            echo "source_checkout_credentials_persisted=false"
+            echo "workflow_permissions=contents:read"
+            echo "checkout_action=actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+            echo "artifact_action=actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+          } > "$EVIDENCE_DIR/preflight.txt"
+
+      - name: Install pinned Node and pnpm; install locked JS dependencies
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.21.0"
+          cache-mode: "off"
+          install-bun: "false"
+          install-deps: "true"
+          frozen-lockfile: "true"
+
+      - name: Install pinned Xcode tools and select one simulator
+        run: |
+          set -euo pipefail
+          source scripts/lib/swift-toolchain.sh
+          select_xcode_toolchain
+          require_swift_toolchain
+          xcode_version="$(xcodebuild -version | awk 'NR == 1 { print $2 }')"
+          [[ "$xcode_version" == 27.* ]]
+
+          swift_tools_dir="$RUNNER_TEMP/openclaw-pr158051-swift-tools"
+          scripts/install-xcodegen.sh "$swift_tools_dir"
+          scripts/install-swift-tools.sh "$swift_tools_dir"
+          export PATH="$swift_tools_dir:$PATH"
+          echo "$swift_tools_dir" >> "$GITHUB_PATH"
+          [[ "$(xcodegen --version)" == "Version: 2.46.0" ]]
+          [[ "$(swiftformat --version)" == "0.63.0" ]]
+          [[ "$(swiftlint version)" == "0.65.1" ]]
+
+          node_version="$(node --version)"
+          pnpm_version="$(pnpm --version)"
+          package_manager="$(node -p 'require("./package.json").packageManager')"
+          pnpm_expected="${package_manager#pnpm@}"
+          pnpm_expected="${pnpm_expected%%+*}"
+          [[ "$node_version" == "v24.21.0" ]]
+          [[ "$package_manager" == pnpm@* ]]
+          [[ "$pnpm_version" == "$pnpm_expected" ]]
+
+          watch_toolchain="$(awk -F '"' '/^channel =/ { print $2; exit }' apps/shared/OpenClawWatchRTC/rust-toolchain.toml)"
+          [[ -n "$watch_toolchain" ]]
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup toolchain install "$watch_toolchain" --profile minimal --component rust-src
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+          simulator_id="$(select_ios_test_simulator)"
+          [[ "$simulator_id" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]
+          echo "IOS_SIMULATOR_ID=$simulator_id" >> "$GITHUB_ENV"
+          simslim_dir="$RUNNER_TEMP/openclaw-pr158051-simslim"
+          scripts/install-simslim.sh "$simslim_dir"
+          xcrun simctl bootstatus "$simulator_id" -b
+          OPENCLAW_CI_SIMSLIM_BINARY="$simslim_dir/simslim" scripts/ios-simulator-prepare.sh "$simulator_id"
+
+          {
+            echo "xcode_version=$(xcodebuild -version | tr '\n' ';')"
+            echo "swift_version=$(swift --version | tr '\n' ';')"
+            echo "node_version=$node_version"
+            echo "pnpm_version=$pnpm_version"
+            echo "pnpm_package_manager=$package_manager"
+            echo "xcodegen_version=$(xcodegen --version)"
+            echo "swiftformat_version=$(swiftformat --version)"
+            echo "swiftlint_version=$(swiftlint version)"
+            echo "rust_toolchain=$watch_toolchain"
+            echo "rustc_version=$(rustup run "$watch_toolchain" rustc --version)"
+            echo "simslim_version=$("$simslim_dir/simslim" --version)"
+            echo "simulator_id=$simulator_id"
+            echo "simulator_device=$(IOS_SIMULATOR_ID="$simulator_id" xcrun simctl list devices available --json | IOS_SIMULATOR_ID="$simulator_id" node --input-type=module -e 'let s=""; for await (const c of process.stdin) s += c; const data=JSON.parse(s); const d=Object.values(data.devices).flat().find(x => x.udid === process.env.IOS_SIMULATOR_ID); if (!d) process.exit(2); process.stdout.write(`${d.name} (${d.state})`);')"
+            echo "pnpm_lock_sha256=$(shasum -a 256 pnpm-lock.yaml | awk '{ print $1 }')"
+            echo "ios_project_spec_sha256=$(shasum -a 256 apps/ios/project.yml | awk '{ print $1 }')"
+            echo "watch_rust_lock_sha256=$(shasum -a 256 apps/shared/OpenClawWatchRTC/Cargo.lock | awk '{ print $1 }')"
+          } >> "$EVIDENCE_DIR/preflight.txt"
+          while IFS= read -r file; do
+            [[ -n "$file" ]] || continue
+            shasum -a 256 "$file" >> "$EVIDENCE_DIR/preflight.txt"
+          done < <(find apps/ios apps/shared apps/swabble -name Package.resolved -type f | sort)
+          while IFS= read -r file; do
+            [[ -n "$file" ]] || continue
+            shasum -a 256 "$file" >> "$EVIDENCE_DIR/preflight.txt"
+          done <<'FILES'
+          .github/actions/setup-node-env/action.yml
+          apps/ios/Tests/SettingsHubTests.swift
+          scripts/ios-configure-signing.sh
+          scripts/ios-access-restart-proof.py
+          scripts/ios-simulator-prepare.sh
+          scripts/ios-team-id.sh
+          scripts/ios-write-swift-filelist.mts
+          scripts/ios-write-version-xcconfig.sh
+          scripts/install-simslim.sh
+          scripts/install-swift-tools.sh
+          scripts/install-xcodegen.sh
+          scripts/lib/swift-toolchain.sh
+          FILES
+          {
+            echo "## Cloudflare PR 158051 native proof preflight"
+            echo
+            echo "- Source: TheAngryPit/openclaw@$EXPECTED_SOURCE_SHA"
+            echo "- Workflow: $GITHUB_REPOSITORY@$GITHUB_WORKFLOW_SHA"
+            echo "- Xcode: $xcode_version; simulator: $simulator_id"
+            echo "- Selected XCTest: $SELECTED_TEST"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install pinned Apple Mermaid build inputs
+        run: >-
+          pnpm install --frozen-lockfile --prefer-offline --optional
+          --filter '@openclaw/mermaid-renderer...'
+          --filter '@openclaw/gateway-protocol...'
+          --config.ignore-scripts=false
+          --config.engine-strict=false
+          --config.enable-pre-post-scripts=true
+          --config.side-effects-cache=true
+
+      - name: Generate Xcode project from the pinned source
+        run: |
+          set -euo pipefail
+          pnpm ios:gen 2>&1 | tee "$EVIDENCE_DIR/project-generation.log"
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SOURCE_SHA" ]]
+          git diff --quiet "$EXPECTED_SOURCE_SHA" --
+          git diff --cached --quiet "$EXPECTED_SOURCE_SHA" --
+          git status --porcelain --untracked-files=all > "$EVIDENCE_DIR/source-after-generation.txt"
+          [[ ! -s "$EVIDENCE_DIR/source-after-generation.txt" ]]
+
+      - name: Build only the selected test products
+        run: |
+          set -euo pipefail
+          source scripts/lib/swift-toolchain.sh
+          run_apple_command_logged "$EVIDENCE_DIR/build.log" xcodebuild \
+            -project apps/ios/OpenClaw.xcodeproj \
+            -scheme OpenClaw \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${IOS_SIMULATOR_ID:?}" \
+            -derivedDataPath "$DERIVED_DATA" \
+            -parallel-testing-enabled NO \
+            -only-testing:"$SELECTED_TEST" \
+            -showBuildTimingSummary \
+            build-for-testing
+
+      - name: Run exactly the ingress-authorized dashboard entrypoint test
+        id: native-test
+        run: |
+          set -euo pipefail
+          source scripts/lib/swift-toolchain.sh
+          run_apple_command_logged "$EVIDENCE_DIR/test.log" xcodebuild \
+            -project apps/ios/OpenClaw.xcodeproj \
+            -scheme OpenClaw \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${IOS_SIMULATOR_ID:?}" \
+            -derivedDataPath "$DERIVED_DATA" \
+            -resultBundlePath "$RESULT_BUNDLE" \
+            -parallel-testing-enabled NO \
+            -collect-test-diagnostics never \
+            -only-testing:"$SELECTED_TEST" \
+            test-without-building
+
+      - name: Require one passing selected XCTest in xcresult
+        if: ${{ always() && steps.native-test.outcome != 'skipped' }}
+        run: |
+          set -euo pipefail
+          if [[ ! -d "$RESULT_BUNDLE" ]]; then
+            echo "Missing xcresult bundle for the selected XCTest: $RESULT_BUNDLE" >&2
+            exit 1
+          fi
+          xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE" --compact \
+            > "$EVIDENCE_DIR/xcresult-summary.json"
+          xcrun xcresulttool get test-results tests --path "$RESULT_BUNDLE" \
+            > "$EVIDENCE_DIR/xcresult-tests.json"
+          xcrun xcresulttool get test-results test-details --path "$RESULT_BUNDLE" --test-id "$EXPECTED_XCTEST_ID" \
+            > "$EVIDENCE_DIR/xcresult-selected-test.json"
+          python3 - "$EVIDENCE_DIR/xcresult-summary.json" "$EVIDENCE_DIR/xcresult-tests.json" "$EVIDENCE_DIR/xcresult-selected-test.json" "$EXPECTED_XCTEST_ID" "$IOS_SIMULATOR_ID" <<'PY'
+          import json
+          import sys
+
+          summary_path, tests_path, details_path, expected_id, simulator_id = sys.argv[1:]
+          with open(summary_path, encoding="utf-8") as stream:
+              summary = json.load(stream)
+          with open(tests_path, encoding="utf-8") as stream:
+              tests = json.load(stream)
+          with open(details_path, encoding="utf-8") as stream:
+              details = json.load(stream)
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          def descendants(value):
+              if isinstance(value, dict):
+                  yield value
+                  for child in value.get("children", []):
+                      yield from descendants(child)
+              elif isinstance(value, list):
+                  for child in value:
+                      yield from descendants(child)
+
+          require(summary.get("result") == "Passed", "xcresult summary is not Passed")
+          require(summary.get("totalTestCount") == 1, "xcresult must report exactly one executed test")
+          require(summary.get("passedTests") == 1, "xcresult must report exactly one passing test")
+          require(summary.get("failedTests") == 0, "xcresult reports a failed test")
+          require(summary.get("skippedTests") == 0, "xcresult reports a skipped test")
+          require(summary.get("expectedFailures") == 0, "xcresult reports an expected failure")
+          require(summary.get("testFailures") == [], "xcresult contains test failures")
+
+          all_nodes = list(descendants(tests.get("testNodes", [])))
+          bundles = [node for node in all_nodes if node.get("nodeType") == "Unit test bundle"]
+          require(len(bundles) == 1 and bundles[0].get("name") == "OpenClawTests",
+                  "xcresult does not contain exactly the OpenClawTests bundle")
+          bundle_nodes = list(descendants(bundles[0].get("children", [])))
+          cases = [node for node in bundle_nodes if node.get("nodeType") == "Test Case"]
+          require(len(cases) == 1, "xcresult must contain exactly one test case")
+          require(cases[0].get("nodeIdentifier") == expected_id and cases[0].get("result") == "Passed",
+                  "xcresult test case identity or outcome does not match the selected test")
+          require(details.get("testIdentifier") == expected_id and details.get("testResult") == "Passed",
+                  "xcresult selected-test details do not confirm the expected pass")
+
+          summary_runs = summary.get("devicesAndConfigurations", [])
+          require(len(summary_runs) == 1 and summary_runs[0].get("device", {}).get("deviceId") == simulator_id,
+                  "xcresult used an unexpected simulator or test configuration")
+          configuration = summary_runs[0].get("testPlanConfiguration", {}).get("configurationId")
+          require(isinstance(configuration, str) and configuration,
+                  "xcresult summary is missing the selected test configuration")
+          for document in (tests, details):
+              devices = document.get("devices", [])
+              configurations = document.get("testPlanConfigurations", [])
+              require(len(devices) == 1 and devices[0].get("deviceId") == simulator_id,
+                      "xcresult test records used an unexpected simulator")
+              require(len(configurations) == 1 and configurations[0].get("configurationId") == configuration,
+                      "xcresult test records used an unexpected configuration")
+          print(json.dumps({
+              "result": summary["result"],
+              "totalTestCount": summary["totalTestCount"],
+              "passedTests": summary["passedTests"],
+              "failedTests": summary["failedTests"],
+              "skippedTests": summary["skippedTests"],
+              "expectedTest": expected_id,
+              "simulatorId": simulator_id,
+          }, sort_keys=True))
+          PY
+          cat "$EVIDENCE_DIR/xcresult-summary.json" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Exact selected-test xcresult gate: **passed** ($EXPECTED_XCTEST_ID)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify source remains pristine after build
+        if: ${{ always() && steps.checkout-source.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          [[ "$actual_sha" == "$EXPECTED_SOURCE_SHA" ]]
+          git diff --quiet "$EXPECTED_SOURCE_SHA" --
+          git diff --cached --quiet "$EXPECTED_SOURCE_SHA" --
+          mkdir -p "$EVIDENCE_DIR"
+          git status --porcelain --untracked-files=all > "$EVIDENCE_DIR/source-final-status.txt"
+          [[ ! -s "$EVIDENCE_DIR/source-final-status.txt" ]]
+          echo "source_post_build_sha=$actual_sha" >> "$EVIDENCE_DIR/preflight.txt"
+
+      - name: Upload source, toolchain, logs, and xcresult evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cloudflare-pr158051-native-entrypoint-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/openclaw-cloudflare-pr158051-evidence
+            ${{ runner.temp }}/openclaw-cloudflare-pr158051.xcresult
+          if-no-files-found: warn
+          retention-days: 14
   profile-proof:
     if: github.repository == 'TheAngryPit/openclaw' && inputs.proof_kind == 'profile'
     runs-on: ubuntu-24.04
@@ -214,6 +541,17 @@ jobs:
           npm install --global pnpm@12.5.1
           test "$(pnpm --version)" = 12.5.1
           pnpm install --frozen-lockfile
+      - name: Generate canonical Apple Mermaid resources
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm install --frozen-lockfile --prefer-offline --optional --filter '@openclaw/mermaid-renderer...' --filter '@openclaw/gateway-protocol...' --config.ignore-scripts=false --config.engine-strict=false --config.enable-pre-post-scripts=true --config.side-effects-cache=true
+          node scripts/prepare-apple-mermaid.mjs
+          test -d apps/shared/OpenClawKit/Sources/OpenClawChatUI/Resources/Mermaid
+          shasum -a 256 scripts/prepare-apple-mermaid.mjs >> "$MACCLI_QA_RECEIPT_DIR/harness-digests.txt"
+          git diff --exit-code
+
       - name: Prepare official release provenance for native setup
         working-directory: product
         shell: bash
