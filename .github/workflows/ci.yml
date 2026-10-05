@@ -25,8 +25,6 @@ jobs:
       OPENCLAW_BUILD_PRIVATE_QA: "1"
       OPENCLAW_RUN_NODE_SKIP_DTS_BUILD: "1"
       OPENCLAW_CAPTURE_UI_PROOF: "1"
-      OPENCLAW_UI_E2E_ARTIFACT_DIR: ${{ runner.temp }}/profile-proof
-      OPENCLAW_UI_E2E_DIAGNOSTIC_DIR: ${{ runner.temp }}/profile-diagnostics
     steps:
       - name: Validate pinned candidate
         shell: bash
@@ -43,9 +41,13 @@ jobs:
 
       - name: Verify source identity
         shell: bash
+        env:
+          OPENCLAW_UI_E2E_ARTIFACT_DIR: ${{ runner.temp }}/profile-proof
+          OPENCLAW_UI_E2E_DIAGNOSTIC_DIR: ${{ runner.temp }}/profile-diagnostics
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          printf 'OPENCLAW_UI_E2E_ARTIFACT_DIR=%s\nOPENCLAW_UI_E2E_DIAGNOSTIC_DIR=%s\n' "$OPENCLAW_UI_E2E_ARTIFACT_DIR" "$OPENCLAW_UI_E2E_DIAGNOSTIC_DIR" >> "$GITHUB_ENV"
           mkdir -p "$OPENCLAW_UI_E2E_ARTIFACT_DIR"
           printf 'candidate_sha=%s\nworkflow_sha=%s\n' "$CANDIDATE_SHA" "$PROOF_WORKFLOW_SHA" > "$OPENCLAW_UI_E2E_ARTIFACT_DIR/receipt.txt"
 
