@@ -4,6 +4,7 @@ import path from "node:path";
 import { createServer, type ViteDevServer } from "vite";
 import { expect, it } from "vitest";
 import type { GatewayServer } from "../../../src/gateway/server-public.ts";
+import { setDisplayName } from "../../../src/state/user-profile-writes.worker.ts";
 import { ensureProfileForEmail } from "../../../src/state/user-profiles.ts";
 import { createOpenClawTestState } from "../../../src/test-utils/openclaw-test-state.ts";
 import { getFreePort } from "../../../src/test-utils/ports.ts";
@@ -50,10 +51,12 @@ suite.define(() => {
       const clipperWorkspace = state.path("workspace-clipper");
       await mkdir(clipperWorkspace, { recursive: true });
 
-      // Create the same blank synthetic Profile on both revisions; do not set or
-      // infer a name through a candidate-only API.
+      // Email-profile creation derives a local-part fallback. Seed the same blank
+      // persisted value through the existing storage owner on both revisions;
+      // this is fixture setup, not a replay of the UI/Gateway name mutation.
       const profile = ensureProfileForEmail(authenticatedUser);
-      expect(profile.displayName ?? "").toBe("");
+      const blankProfile = setDisplayName(profile.id, null);
+      expect(blankProfile.displayName ?? "").toBe("");
 
       const trustedProxy = {
         allowLoopback: true,

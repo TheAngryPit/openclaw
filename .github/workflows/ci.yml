@@ -478,8 +478,11 @@ jobs:
         run: |
           set -uo pipefail
           start_seconds=$SECONDS
-          node scripts/run-vitest.mjs run --config .artifacts/onboarding-comparison-qa-20261005/vitest.onboarding-comparison.config.ts --configLoader runner --reporter verbose
-          test_result=$?
+          if node scripts/run-vitest.mjs run --config .artifacts/onboarding-comparison-qa-20261005/vitest.onboarding-comparison.config.ts --configLoader runner --reporter verbose; then
+            test_result=0
+          else
+            test_result=$?
+          fi
           printf 'test_exit=%s\ntest_seconds=%s\n' "$test_result" "$((SECONDS-start_seconds))" >> "$OPENCLAW_UI_E2E_ARTIFACT_DIR/receipt.txt"
           exit "$test_result"
 
