@@ -19,6 +19,7 @@ on:
           - profile-comparison
           - tailscale-paired
           - tailscale-current
+          - onboarding-comparison
       operator_variant:
         description: Explicit provenance label for matched comparisons
         required: true
@@ -361,6 +362,160 @@ jobs:
             ${{ runner.temp }}/tailscale-current-qa-20261005/${{ matrix.label }}/receipt/**
             ${{ runner.temp }}/tailscale-current-qa-20261005/${{ matrix.label }}/diagnostics/failure-*/failure.public.json
           if-no-files-found: ignore
+          retention-days: 7
+
+  onboarding-comparison-proof:
+    if: github.repository == 'TheAngryPit/openclaw' && inputs.proof_kind == 'onboarding-comparison'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CI: "true"
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      COMPARISON_VARIANT: ${{ inputs.operator_variant }}
+      OPENCLAW_ONBOARDING_COMPARISON_SIDE: ${{ inputs.operator_variant }}
+      PROOF_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      OPENCLAW_BUILD_PRIVATE_QA: "1"
+      OPENCLAW_RUN_NODE_SKIP_DTS_BUILD: "1"
+      OPENCLAW_CAPTURE_UI_PROOF: "1"
+    steps:
+      - name: Validate exact matched source selection
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$COMPARISON_VARIANT" = baseline || "$COMPARISON_VARIANT" = candidate ]]
+          if [[ "$COMPARISON_VARIANT" = baseline ]]; then
+            test "$CANDIDATE_SHA" = 8db9539ee84a9c89f535c70fd39aa8fcaebc1bb9
+          else
+            test "$CANDIDATE_SHA" = 31c9aadb82cb4a0b99fbd49b12111eb204cf0a43
+          fi
+
+      - name: Checkout exact product without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: TheAngryPit/openclaw
+          ref: ${{ inputs.candidate_sha }}
+          path: product
+          persist-credentials: false
+
+      - name: Checkout reviewed capture fixture separately
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: TheAngryPit/openclaw
+          ref: ${{ github.workflow_sha }}
+          path: qa-harness
+          persist-credentials: false
+
+      - name: Verify source and allocate bounded capture directories
+        working-directory: product
+        shell: bash
+        env:
+          OPENCLAW_UI_E2E_ARTIFACT_DIR: ${{ runner.temp }}/onboarding-comparison-proof
+          OPENCLAW_UI_E2E_DIAGNOSTIC_DIR: ${{ runner.temp }}/onboarding-comparison-diagnostics
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git -C ../qa-harness rev-parse HEAD)" = "$PROOF_WORKFLOW_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          printf 'OPENCLAW_UI_E2E_ARTIFACT_DIR=%s\nOPENCLAW_UI_E2E_DIAGNOSTIC_DIR=%s\n' "$OPENCLAW_UI_E2E_ARTIFACT_DIR" "$OPENCLAW_UI_E2E_DIAGNOSTIC_DIR" >> "$GITHUB_ENV"
+          mkdir "$OPENCLAW_UI_E2E_ARTIFACT_DIR"
+          printf 'candidate_sha=%s\nworkflow_sha=%s\ncomparison_variant=%s\n' "$CANDIDATE_SHA" "$PROOF_WORKFLOW_SHA" "$COMPARISON_VARIANT" > "$OPENCLAW_UI_E2E_ARTIFACT_DIR/receipt.txt"
+
+      - name: Setup pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24.21.0"
+
+      - name: Install exact product dependencies once
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module -e 'import fs from "node:fs"; const p = JSON.parse(fs.readFileSync("package.json", "utf8")); if (typeof p.packageManager !== "string" || p.packageManager.split("+")[0] !== "pnpm@12.5.1") throw new Error("Unexpected product package manager");'
+          npm install --global pnpm@12.5.1
+          test "$(pnpm --version)" = "12.5.1"
+          pnpm install --frozen-lockfile
+          node --import tsx scripts/ensure-playwright-chromium.mts --require-playwright-chromium
+          printf 'node=%s\npnpm=%s\n' "$(node --version)" "$(pnpm --version)" >> "$OPENCLAW_UI_E2E_ARTIFACT_DIR/receipt.txt"
+
+      - name: Fresh build before staging any QA fixture
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm build
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          sha256sum dist/entry.js dist/control-ui/index.html dist/control-ui/asset-manifest.json dist/build-info.json > "$OPENCLAW_UI_E2E_ARTIFACT_DIR/build-digests.txt"
+          test -d dist/control-ui/assets
+          find dist/control-ui/assets -type f -name '*.js' -print0 | sort -z | xargs -0 -r sha256sum >> "$OPENCLAW_UI_E2E_ARTIFACT_DIR/build-digests.txt"
+          test "$(find dist/control-ui/assets -type f -name '*.js' | wc -l)" -gt 0
+          printf 'fresh_build_product_sha=%s\nfresh_build_workflow_sha=%s\n' "$CANDIDATE_SHA" "$PROOF_WORKFLOW_SHA" >> "$OPENCLAW_UI_E2E_ARTIFACT_DIR/receipt.txt"
+
+      - name: Stage only separately hashed QA fixture and config
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          qa_root=artifacts/onboarding-comparison-qa-20261005
+          fixture=ui/src/e2e/onboarding-comparison.capture.real-gateway.e2e.test.ts
+          config=.artifacts/onboarding-comparison-qa-20261005/vitest.onboarding-comparison.config.ts
+          test ! -e "$fixture"
+          test ! -e "$config"
+          test -z "$(git ls-files -- "$fixture" "$config")"
+          mkdir -p "$(dirname "$config")"
+          cp "../qa-harness/$qa_root/onboarding-comparison.capture.real-gateway.e2e.test.ts" "$fixture"
+          cp "../qa-harness/$qa_root/vitest.onboarding-comparison.config.ts" "$config"
+          cmp "$fixture" "../qa-harness/$qa_root/onboarding-comparison.capture.real-gateway.e2e.test.ts"
+          cmp "$config" "../qa-harness/$qa_root/vitest.onboarding-comparison.config.ts"
+          sha256sum "$fixture" "$config" > "$OPENCLAW_UI_E2E_ARTIFACT_DIR/qa-digests.txt"
+          test "$(git status --porcelain=v1 --untracked-files=all)" = "?? $fixture"
+          printf 'tracked_product_source=unchanged\nqa_fixture=separately_hashed_untracked\nsetup=canonical_ordinary_bundled_e2e\n' >> "$OPENCLAW_UI_E2E_ARTIFACT_DIR/receipt.txt"
+
+      - name: Capture matched onboarding through canonical ordinary bundled E2E lifecycle
+        working-directory: product
+        shell: bash
+        run: |
+          set -uo pipefail
+          start_seconds=$SECONDS
+          node scripts/run-vitest.mjs run --config .artifacts/onboarding-comparison-qa-20261005/vitest.onboarding-comparison.config.ts --configLoader runner --reporter verbose
+          test_result=$?
+          printf 'test_exit=%s\ntest_seconds=%s\n' "$test_result" "$((SECONDS-start_seconds))" >> "$OPENCLAW_UI_E2E_ARTIFACT_DIR/receipt.txt"
+          exit "$test_result"
+
+      - name: Verify immutable source harness build and actual media
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git status --porcelain=v1 --untracked-files=all)" = '?? ui/src/e2e/onboarding-comparison.capture.real-gateway.e2e.test.ts'
+          sha256sum --check "$OPENCLAW_UI_E2E_ARTIFACT_DIR/build-digests.txt"
+          sha256sum --check "$OPENCLAW_UI_E2E_ARTIFACT_DIR/qa-digests.txt"
+          captured=0
+          for proof_directory in "$OPENCLAW_UI_E2E_ARTIFACT_DIR"/onboarding-comparison-with-a-real-gateway-*; do
+            if test -s "$proof_directory/01-$COMPARISON_VARIANT-onboarding-desktop-1280x800.png" && test -s "$proof_directory/02-$COMPARISON_VARIANT-onboarding-mobile-390x844.png"; then
+              captured=1
+              break
+            fi
+          done
+          test "$captured" = 1
+          printf 'required_onboarding_comparison_media=present\nsource_harness_build_after=unchanged\n' >> "$OPENCLAW_UI_E2E_ARTIFACT_DIR/receipt.txt"
+          rm -- ui/src/e2e/onboarding-comparison.capture.real-gateway.e2e.test.ts .artifacts/onboarding-comparison-qa-20261005/vitest.onboarding-comparison.config.ts
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          printf 'source_status_after_cleanup=pristine\n' >> "$OPENCLAW_UI_E2E_ARTIFACT_DIR/receipt.txt"
+
+      - name: Upload only synthetic comparison media and bounded receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: identity-onboarding-comparison-${{ inputs.operator_variant }}-${{ inputs.candidate_sha }}
+          path: |
+            ${{ runner.temp }}/onboarding-comparison-proof/**/*.png
+            ${{ runner.temp }}/onboarding-comparison-proof/receipt.txt
+            ${{ runner.temp }}/onboarding-comparison-proof/build-digests.txt
+            ${{ runner.temp }}/onboarding-comparison-proof/qa-digests.txt
+          if-no-files-found: error
           retention-days: 7
 
   profile-comparison-proof:
