@@ -317,7 +317,9 @@ suite.define(() => {
               .poll(() => editor.locator(".sidebar-identity-card__name").textContent())
               .toBe(onboardingName);
             await editor.locator("openclaw-custodian-page").evaluate(async (element) => {
-              await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+              await new Promise<void>((resolve) => {
+                requestAnimationFrame(() => resolve());
+              });
               await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
             });
             await expect.poll(() => editor.locator(".custodian__name-prompt").count()).toBe(0);
