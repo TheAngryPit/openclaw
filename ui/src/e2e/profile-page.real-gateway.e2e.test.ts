@@ -29,15 +29,15 @@ function observeGatewayMethodResponse(page: Page, method: string) {
     onFrameReceived: (event: { payload: string | Buffer }) => void;
     onClose: () => void;
   }> = [];
-  let resolveResponse!: () => void;
+  let resolveResponse!: (payload: unknown) => void;
   let rejectResponse!: (error: Error) => void;
   let settled = false;
-  const response = new Promise<void>((resolve, reject) => {
+  const response = new Promise<unknown>((resolve, reject) => {
     resolveResponse = resolve;
     rejectResponse = reject;
   });
   void response.catch(() => {});
-  const settle = (error?: Error) => {
+  const settle = (payload?: unknown, error?: Error) => {
     if (settled) {
       return;
     }
@@ -45,7 +45,7 @@ function observeGatewayMethodResponse(page: Page, method: string) {
     if (error) {
       rejectResponse(error);
     } else {
-      resolveResponse();
+      resolveResponse(payload);
     }
   };
   const onSocket = (socket: PlaywrightWebSocket) => {
@@ -64,7 +64,10 @@ function observeGatewayMethodResponse(page: Page, method: string) {
       try {
         const frame = JSON.parse(String(payload)) as Record<string, unknown>;
         if (frame.type === "res" && typeof frame.id === "string" && pending.delete(frame.id)) {
-          settle(frame.ok === true ? undefined : new Error(`Gateway ${method} request failed`));
+          settle(
+            frame.payload,
+            frame.ok === true ? undefined : new Error(`Gateway ${method} request failed`),
+          );
         }
       } catch {
         // Ignore non-JSON frames; only matching Gateway RPC receipts establish readiness.
@@ -312,14 +315,20 @@ suite.define(() => {
           const selfProfileRead = observeGatewayMethodResponse(editor, "users.self");
           try {
             await editor.goto(onboardingUrl.href);
-            await selfProfileRead.response;
+            const selfProfileResult = await selfProfileRead.response;
+            expect(selfProfileResult).toMatchObject({ profile: { displayName: onboardingName } });
+            const custodianPage = editor.locator("openclaw-custodian-page");
             await expect
-              .poll(() => editor.locator(".sidebar-identity-card__name").textContent())
+              .poll(() =>
+                custodianPage.evaluate((element) => {
+                  const page = element as HTMLElement & {
+                    onboardingNameProfile: { displayName?: string | null } | null;
+                  };
+                  return page.onboardingNameProfile?.displayName ?? null;
+                }),
+              )
               .toBe(onboardingName);
-            await editor.locator("openclaw-custodian-page").evaluate(async (element) => {
-              await new Promise<void>((resolve) => {
-                requestAnimationFrame(() => resolve());
-              });
+            await custodianPage.evaluate(async (element) => {
               await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
             });
             await expect.poll(() => editor.locator(".custodian__name-prompt").count()).toBe(0);
