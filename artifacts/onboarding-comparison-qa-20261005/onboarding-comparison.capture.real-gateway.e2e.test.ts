@@ -173,6 +173,7 @@ suite.define(() => {
           await waitForControlUiGatewayReady(page);
           await expect.poll(() => page.locator(".custodian-surface").isVisible()).toBe(true);
           const onboardingPrompt = page.locator(".custodian__name-prompt");
+          const channelOnboardingNudge = page.locator(".custodian__nudge--channel-onboarding");
 
           if (comparisonSide === "baseline") {
             // The baseline frame is the ordinary setup surface; it does not claim
@@ -192,6 +193,8 @@ suite.define(() => {
               )
               .toBe(true);
           }
+          await expect.poll(() => channelOnboardingNudge.isVisible()).toBe(true);
+          await expect.poll(() => channelOnboardingNudge.getAttribute("role")).toBe("status");
 
           if (proofDir) {
             await page.screenshot({
@@ -202,6 +205,8 @@ suite.define(() => {
 
           await page.setViewportSize({ width: 390, height: 844 });
           await expect.poll(() => page.locator(".custodian-surface").isVisible()).toBe(true);
+          await expect.poll(() => channelOnboardingNudge.isVisible()).toBe(true);
+          await expect.poll(() => channelOnboardingNudge.getAttribute("role")).toBe("status");
           if (comparisonSide === "candidate") {
             await expect.poll(() => onboardingPrompt.isVisible()).toBe(true);
             await expect
