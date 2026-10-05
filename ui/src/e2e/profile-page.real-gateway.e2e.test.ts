@@ -321,10 +321,10 @@ suite.define(() => {
             await expect
               .poll(() =>
                 custodianPage.evaluate((element) => {
-                  const page = element as HTMLElement & {
+                  const custodian = element as HTMLElement & {
                     onboardingNameProfile: { displayName?: string | null } | null;
                   };
-                  return page.onboardingNameProfile?.displayName ?? null;
+                  return custodian.onboardingNameProfile?.displayName ?? null;
                 }),
               )
               .toBe(onboardingName);
