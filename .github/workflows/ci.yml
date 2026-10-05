@@ -21,6 +21,7 @@ on:
           - tailscale-current
           - onboarding-comparison
           - maccli-preflight
+          - maccli-real
       operator_variant:
         description: Explicit provenance label for matched comparisons
         required: true
@@ -124,6 +125,140 @@ jobs:
             ${{ runner.temp }}/profile-proof/**/*.png
             ${{ runner.temp }}/profile-proof/receipt.txt
             ${{ runner.temp }}/profile-diagnostics/failure-*/failure.public.json
+          if-no-files-found: error
+          retention-days: 7
+  maccli-real:
+    if: github.repository == 'TheAngryPit/openclaw' && inputs.proof_kind == 'maccli-real'
+    name: Real CLI selection proof (${{ matrix.label }})
+    runs-on: xcode-27
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - label: baseline
+            revision: 3b16db73c0b5209aad2ee7c3fb5ddfb12fb208f9
+          - label: candidate
+            revision: a38ed66158bd270bd45607411aadb5862b299b8b
+    env:
+      CI: "true"
+      PRODUCT_SHA: ${{ matrix.revision }}
+      PROOF_LABEL: ${{ matrix.label }}
+      INPUT_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      HARNESS_SHA: ${{ github.sha }}
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    steps:
+      - name: Validate exact products and disposable standard runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$INPUT_CANDIDATE_SHA" = a38ed66158bd270bd45607411aadb5862b299b8b
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          [[ "$PRODUCT_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - name: Checkout immutable QA harness without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: harness
+          persist-credentials: false
+          sparse-checkout: qa/maccli-real-distribution-qa-20261005
+      - name: Checkout exact product without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ matrix.revision }}
+          path: product
+          persist-credentials: false
+      - name: Set up pinned real Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24.19.0
+      - name: Verify source and expose only the reviewed sidecar
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          test "$(git -C ../harness rev-parse HEAD)" = "$HARNESS_SHA"
+          qa_root="$RUNNER_TEMP/maccli-real-qa-20261005/$PROOF_LABEL"
+          mkdir -p "$qa_root"
+          printf 'MACCLI_QA_RECEIPT_DIR=%s\n' "$qa_root" >> "$GITHUB_ENV"
+          {
+            printf 'product_sha=%s\nharness_sha=%s\nlabel=%s\nrunner_environment=%s\n' "$PRODUCT_SHA" "$HARNESS_SHA" "$PROOF_LABEL" "$RUNNER_ENVIRONMENT"
+            sw_vers
+            xcodebuild -version
+            swift --version
+            node --version
+            npm --version
+            git status --porcelain --untracked-files=all
+          } > "$qa_root/provenance.txt"
+          test ! -e qa/maccli-real-distribution-qa-20261005
+          test ! -e apps/macos/Tests/OpenClawIPCTests/CLIInstallerRealDistributionProofTests.swift
+          mkdir -p qa
+          cp -R ../harness/qa/maccli-real-distribution-qa-20261005 qa/
+          cp qa/maccli-real-distribution-qa-20261005/CLIInstallerRealDistributionProofTests.swift apps/macos/Tests/OpenClawIPCTests/
+          git diff --exit-code
+          git status --porcelain --untracked-files=all >> "$qa_root/provenance.txt"
+          shasum -a 256 qa/maccli-real-distribution-qa-20261005/prepare.mjs apps/macos/Tests/OpenClawIPCTests/CLIInstallerRealDistributionProofTests.swift > "$qa_root/harness-digests.txt"
+      - name: Install the declared package manager and frozen source dependencies
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_manager="$(node -p "require('./package.json').packageManager")"
+          test "${package_manager%%+*}" = pnpm@12.5.1
+          npm install --global pnpm@12.5.1
+          test "$(pnpm --version)" = 12.5.1
+          pnpm install --frozen-lockfile
+      - name: Prepare official release provenance for native setup
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          node qa/maccli-real-distribution-qa-20261005/prepare.mjs manifest --repo-root "$PWD" --receipt-dir "$MACCLI_QA_RECEIPT_DIR" --sidecar-root "$GITHUB_WORKSPACE/harness/qa/maccli-real-distribution-qa-20261005" --product-sha "$PRODUCT_SHA"
+      - name: Compile exact native owners and sidecar without app launch
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift build --package-path apps/macos --build-system native --build-tests --jobs 2 --disable-index-store -Xswiftc -gline-tables-only
+      - name: Run canonical native launcher and classify real outcomes
+        working-directory: product
+        shell: bash
+        run: |
+          set -uo pipefail
+          node scripts/test-macos-native.mts default --package-path apps/macos --build-system native --skip-build --jobs 2 --disable-index-store -Xswiftc -gline-tables-only --experimental-maximum-parallelization-width 1 --filter CLIInstallerRealDistributionProofTests 2>&1 | tee "$MACCLI_QA_RECEIPT_DIR/native-tests.log"
+          command_exits=("${PIPESTATUS[@]}")
+          test_exit=${command_exits[0]}
+          test "${command_exits[1]}" = 0 || exit 1
+          printf 'test_exit=%s\n' "$test_exit" >> "$MACCLI_QA_RECEIPT_DIR/provenance.txt"
+          node qa/maccli-real-distribution-qa-20261005/prepare.mjs verify --receipt-dir "$MACCLI_QA_RECEIPT_DIR" --expect "$PROOF_LABEL" --test-exit "$test_exit"
+      - name: Verify tracked product remains pristine
+        if: always()
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          while IFS= read -r untracked_path; do
+            case "$untracked_path" in
+              qa/maccli-real-distribution-qa-20261005/*|apps/macos/Tests/OpenClawIPCTests/CLIInstallerRealDistributionProofTests.swift) ;;
+              *) printf 'Unexpected untracked input: %s\n' "$untracked_path" >&2; exit 1 ;;
+            esac
+          done < <(git ls-files --others --exclude-standard)
+          git status --porcelain --untracked-files=all >> "$MACCLI_QA_RECEIPT_DIR/provenance.txt"
+      - name: Upload bounded synthetic native receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: maccli-real-${{ matrix.label }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/maccli-real-qa-20261005/${{ matrix.label }}/*
           if-no-files-found: error
           retention-days: 7
   maccli-preflight:
