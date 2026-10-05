@@ -1,12 +1,14 @@
 /* @vitest-environment jsdom */
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
-import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import { createAgentSelectionCapability } from "../../app/agent-selection.ts";
 import type { ApplicationContext, ApplicationGatewaySnapshot } from "../../app/context.ts";
 import { i18n } from "../../i18n/index.ts";
 import { createApplicationContextProvider } from "../../test-helpers/application-context.ts";
-import { createTestGatewayClient } from "../../test-helpers/gateway-client.ts";
+import {
+  createTestGatewayClient,
+  type GatewayRequestHandler,
+} from "../../test-helpers/gateway-client.ts";
 import { PersonalInstructions } from "./personal-instructions.ts";
 import {
   createConnectedContext,
@@ -42,12 +44,12 @@ afterEach(() => {
 });
 
 function createContext(
-  request: GatewayBrowserClient["request"],
+  request: GatewayRequestHandler,
   signedIn = true,
   multipleProfiles = true,
 ) {
   const base = createConnectedContext(
-    request,
+    createTestGatewayClient(request).request,
     signedIn ? { id: "profile-1", name: "Ada" } : null,
   ).context;
   let snapshot: ApplicationGatewaySnapshot = {
@@ -101,7 +103,7 @@ function createContext(
     },
   };
 }
-function mount(request: GatewayBrowserClient["request"], signedIn = true, multipleProfiles = true) {
+function mount(request: GatewayRequestHandler, signedIn = true, multipleProfiles = true) {
   const harness = createContext(request, signedIn, multipleProfiles);
   const provider = createApplicationContextProvider(harness.context);
   const element = document.createElement(tag) as PersonalInstructions;
