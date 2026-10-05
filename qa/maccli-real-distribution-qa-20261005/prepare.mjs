@@ -938,7 +938,7 @@ async function verifyRun(args) {
     fail("cell receipts are not bound to the pinned npm release");
   }
   if (external.managedPrefix !== install.managed.prefix || external.externalPrefix !== install.external.prefix ||
-      external.managedExecutable !== install.managed.executable || external.externalExecutable !== install.external.executable ||
+      external.managedExecutable !== install.managed.executable || external.externalExecutable !== install.external.installed.executable ||
       !sameFileIdentity(external.managedResolvedExecutableIdentity, install.managed.installed.fileIdentity) ||
       !sameFileIdentity(external.externalResolvedExecutableIdentity, install.external.installed.fileIdentity) ||
       unset.managedPrefix !== install.managed.prefix || unset.managedExecutable !== install.managed.executable) {

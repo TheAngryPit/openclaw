@@ -999,8 +999,10 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
+          set +e
           node scripts/test-macos-native.mts default --package-path apps/macos --build-system native --skip-build --jobs 2 --disable-index-store -Xswiftc -gline-tables-only --experimental-maximum-parallelization-width 1 --filter CLIInstallerRealDistributionProofTests 2>&1 | tee "$MACCLI_QA_RECEIPT_DIR/native-tests.log"
           command_exits=("${PIPESTATUS[@]}")
+          set -e
           test_exit=${command_exits[0]}
           test "${command_exits[1]}" = 0 || exit 1
           printf 'test_exit=%s\n' "$test_exit" >> "$MACCLI_QA_RECEIPT_DIR/provenance.txt"
