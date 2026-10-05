@@ -1,0 +1,105 @@
+name: Temporary native identity UI proof
+run-name: Identity UI proof ${{ inputs.candidate_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact published product commit to verify
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  profile-proof:
+    if: github.repository == 'TheAngryPit/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CI: "true"
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      PROOF_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      OPENCLAW_BUILD_PRIVATE_QA: "1"
+      OPENCLAW_RUN_NODE_SKIP_DTS_BUILD: "1"
+      OPENCLAW_CAPTURE_UI_PROOF: "1"
+      OPENCLAW_UI_E2E_ARTIFACT_DIR: ${{ runner.temp }}/profile-proof
+      OPENCLAW_UI_E2E_DIAGNOSTIC_DIR: ${{ runner.temp }}/profile-diagnostics
+    steps:
+      - name: Validate pinned candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+      - name: Checkout exact product commit without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: TheAngryPit/openclaw
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+
+      - name: Verify source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          mkdir -p "$OPENCLAW_UI_E2E_ARTIFACT_DIR"
+          printf 'candidate_sha=%s\nworkflow_sha=%s\n' "$CANDIDATE_SHA" "$PROOF_WORKFLOW_SHA" > "$OPENCLAW_UI_E2E_ARTIFACT_DIR/receipt.txt"
+
+      - name: Setup pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24.21.0"
+
+      - name: Install pinned package manager and candidate dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module -e 'import fs from "node:fs"; const p = JSON.parse(fs.readFileSync("package.json", "utf8")); if (typeof p.packageManager !== "string" || p.packageManager.split("+")[0] !== "pnpm@12.5.1") throw new Error("Unexpected candidate package manager");'
+          npm install --global pnpm@12.5.1
+          test "$(pnpm --version)" = "12.5.1"
+          printf 'node=%s\npnpm=%s\n' "$(node --version)" "$(pnpm --version)" >> "$OPENCLAW_UI_E2E_ARTIFACT_DIR/receipt.txt"
+          pnpm install --frozen-lockfile
+          node --import tsx scripts/ensure-playwright-chromium.mts --require-playwright-chromium
+
+      - name: Build exact candidate for incumbent prebuilt verification
+        run: pnpm build
+
+      - name: Run actual Gateway Profile composition test
+        shell: bash
+        run: |
+          set -uo pipefail
+          start_seconds=$SECONDS
+          node scripts/run-vitest.mjs run --config test/vitest/vitest.ui-e2e-prebuilt.config.ts --configLoader runner --reporter verbose ui/src/e2e/profile-page.real-gateway.e2e.test.ts
+          test_result=$?
+          printf 'test_exit=%s\ntest_seconds=%s\n' "$test_result" "$((SECONDS-start_seconds))" >> "$OPENCLAW_UI_E2E_ARTIFACT_DIR/receipt.txt"
+          exit "$test_result"
+
+      - name: Require actual captured Profile media
+        shell: bash
+        run: |
+          set -euo pipefail
+          captured=0
+          for proof_directory in "$OPENCLAW_UI_E2E_ARTIFACT_DIR"/control-ui-profile-page-real-gateway-e2e-*; do
+            if test -s "$proof_directory/01-real-gateway-authenticated-profile.png" && test -s "$proof_directory/02-real-gateway-cleared-profile.png"; then
+              captured=1
+              break
+            fi
+          done
+          test "$captured" = 1
+          printf 'required_profile_media=present\n' >> "$OPENCLAW_UI_E2E_ARTIFACT_DIR/receipt.txt"
+
+      - name: Upload only synthetic media and bounded receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: identity-profile-proof-${{ inputs.candidate_sha }}
+          path: |
+            ${{ runner.temp }}/profile-proof/**/*.png
+            ${{ runner.temp }}/profile-proof/receipt.txt
+            ${{ runner.temp }}/profile-diagnostics/failure-*/failure.public.json
+          if-no-files-found: error
+          retention-days: 7
