@@ -303,6 +303,11 @@ suite.define(() => {
           try {
             await editor.goto(onboardingUrl.href);
             await selfProfileRead.response;
+            await expect(editor.locator(".sidebar-identity-card__name")).toHaveText(onboardingName);
+            await editor.locator("openclaw-custodian-page").evaluate(async (element) => {
+              await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+              await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
+            });
             await expect(editor.locator(".custodian__name-prompt")).toHaveCount(0);
             await expect(editor.locator(".custodian-surface")).toBeVisible();
             if (proofDir) {
