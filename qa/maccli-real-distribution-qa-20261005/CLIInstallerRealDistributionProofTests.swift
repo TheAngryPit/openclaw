@@ -1,6 +1,16 @@
 import Foundation
 import Testing
+import Darwin
 @testable import OpenClaw
+
+private struct RealDistributionFileIdentity: Decodable, Equatable {
+    let device: String
+    let inode: String
+
+    var receipt: [String: String] {
+        ["device": self.device, "inode": self.inode]
+    }
+}
 
 private struct RealDistributionManifest: Decodable {
     struct Package: Decodable {
@@ -10,12 +20,18 @@ private struct RealDistributionManifest: Decodable {
     }
 
     struct Toolchain: Decodable {
+        struct NodeTool: Decodable {
+            let path: String
+            let version: String
+            let fileIdentity: RealDistributionFileIdentity
+        }
+
         struct Tool: Decodable {
             let path: String
             let version: String
         }
 
-        let node: Tool
+        let node: NodeTool
         let npm: Tool
     }
 
@@ -68,27 +84,50 @@ struct CLIInstallerRealDistributionProofTests {
         else {
             throw RealDistributionTestError.invalid("The canonical native launcher did not provide its isolated HOME, TMPDIR, and default profile.")
         }
-        let home = URL(fileURLWithPath: String(cString: homeValue), isDirectory: true).standardizedFileURL
-        let fixedHome = URL(fileURLWithPath: String(cString: fixedHomeValue), isDirectory: true).standardizedFileURL
+        let rawHome = String(cString: homeValue)
+        let rawFixedHome = String(cString: fixedHomeValue)
+        let rawTemporaryDirectory = String(cString: tempValue)
+        let home = URL(fileURLWithPath: rawHome, isDirectory: true).standardizedFileURL
+        let fixedHome = URL(fileURLWithPath: rawFixedHome, isDirectory: true).standardizedFileURL
         let foundationHome = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
-        guard home == fixedHome,
-              home.resolvingSymlinksInPath() == foundationHome.resolvingSymlinksInPath()
+        let homePathEvidence: [String: Any] = [
+            "launcherHomeEnvironment": rawHome,
+            "launcherFixedUserHomeEnvironment": rawFixedHome,
+            "foundationHome": foundationHome.path,
+            "canonicalLauncherHome": self.canonicalPath(home).map { $0 as Any } ?? NSNull(),
+            "canonicalFixedUserHome": self.canonicalPath(fixedHome).map { $0 as Any } ?? NSNull(),
+            "canonicalFoundationHome": self.canonicalPath(foundationHome).map { $0 as Any } ?? NSNull(),
+        ]
+        guard self.canonicalPath(home) == self.canonicalPath(fixedHome),
+              self.canonicalPath(home) == self.canonicalPath(foundationHome)
         else {
-            throw RealDistributionTestError.invalid("Foundation's home does not match the launcher's disposable HOME.")
+            throw RealDistributionTestError.invalid("Foundation's home does not resolve to the launcher's disposable HOME: \(homePathEvidence)")
         }
-        let temporaryDirectory = URL(fileURLWithPath: String(cString: tempValue), isDirectory: true).standardizedFileURL
+        let temporaryDirectory = URL(fileURLWithPath: rawTemporaryDirectory, isDirectory: true).standardizedFileURL
         let receiptDirectory = URL(fileURLWithPath: manifest.receiptDirectory, isDirectory: true).standardizedFileURL
         guard !self.isWithin(home, receiptDirectory), self.isWithin(temporaryDirectory, receiptDirectory) == false else {
             throw RealDistributionTestError.invalid("Persistent receipts must remain outside the launcher HOME and temporary cleanup tree.")
         }
 
         // Derive the managed install tree from the same production APIs under the launcher's real HOME/profile.
-        let managedPrefix = URL(fileURLWithPath: CLIInstaller.installPrefix(), isDirectory: true).standardizedFileURL
-        let managedExecutable = URL(fileURLWithPath: CLIInstaller.managedExecutableLocation()).standardizedFileURL
+        let managedPrefixPath = CLIInstaller.installPrefix()
+        let managedExecutablePath = CLIInstaller.managedExecutableLocation()
+        let managedPrefix = URL(fileURLWithPath: managedPrefixPath, isDirectory: true)
+        let managedExecutable = URL(fileURLWithPath: managedExecutablePath)
         guard self.isStrictlyWithin(home, managedPrefix),
               self.isStrictlyWithin(managedPrefix, managedExecutable)
         else {
-            throw RealDistributionTestError.invalid("The runtime-derived managed install paths are not safely beneath the disposable HOME.")
+            let evidence: [String: Any] = [
+                "launcherHomeEnvironment": rawHome,
+                "launcherFixedUserHomeEnvironment": rawFixedHome,
+                "foundationHome": foundationHome.path,
+                "managedPrefixFromCLIInstaller": managedPrefixPath,
+                "managedExecutableFromCLIInstaller": managedExecutablePath,
+                "canonicalHome": self.canonicalPath(home).map { $0 as Any } ?? NSNull(),
+                "canonicalManagedPrefix": self.canonicalPath(managedPrefix).map { $0 as Any } ?? NSNull(),
+                "canonicalManagedExecutable": self.canonicalPath(managedExecutable).map { $0 as Any } ?? NSNull(),
+            ]
+            throw RealDistributionTestError.invalid("The runtime-derived managed install paths are not safely beneath the disposable HOME: \(evidence)")
         }
         guard !FileManager.default.fileExists(atPath: managedPrefix.path) else {
             throw RealDistributionTestError.invalid("Refusing to overwrite a pre-existing managed prefix in the disposable HOME.")
@@ -131,22 +170,34 @@ struct CLIInstallerRealDistributionProofTests {
                 ]
             ) {
                 let actualHome = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
-                guard actualHome.resolvingSymlinksInPath() == home.resolvingSymlinksInPath() else {
-                    throw RealDistributionTestError.invalid("TestIsolation changed the launcher HOME unexpectedly.")
+                guard self.canonicalPath(actualHome) == self.canonicalPath(home) else {
+                    throw RealDistributionTestError.invalid("TestIsolation changed the launcher HOME unexpectedly: \(homePathEvidence)")
                 }
 
                 try self.runInstallHelper(
                     manifest: manifest,
                     repoRoot: repoRoot,
-                    managedPrefix: managedPrefix,
-                    managedExecutable: managedExecutable,
+                    swiftHome: foundationHome,
+                    managedPrefix: managedPrefixPath,
+                    managedExecutable: managedExecutablePath,
                     externalPrefix: externalPrefix,
                 )
                 helperInstallSucceeded = true
 
                 let externalExecutable = externalPrefix.appendingPathComponent("bin/openclaw").standardizedFileURL
-                let externalResolved = externalExecutable.resolvingSymlinksInPath().standardizedFileURL
-                let managedResolved = managedExecutable.resolvingSymlinksInPath().standardizedFileURL
+                guard let externalCanonicalPath = self.canonicalPath(externalExecutable),
+                      let managedCanonicalPath = self.canonicalPath(managedExecutable)
+                else {
+                    throw RealDistributionTestError.invalid("Could not resolve both installed CLI executable paths after helper installation.")
+                }
+                let externalResolved = URL(fileURLWithPath: externalCanonicalPath)
+                let managedResolved = URL(fileURLWithPath: managedCanonicalPath)
+                let externalExecutableIdentity = try self.fileIdentity(at: externalResolved.path)
+                let managedExecutableIdentity = try self.fileIdentity(at: managedResolved.path)
+                let pinnedNodeIdentity = try self.fileIdentity(at: manifest.toolchain.node.path)
+                guard pinnedNodeIdentity == manifest.toolchain.node.fileIdentity else {
+                    throw RealDistributionTestError.invalid("The manifest's pinned Node filesystem identity changed before the proof cells.")
+                }
                 let selectedBeforeDiscovery = AppDefaults.standard.string(forKey: self.validatedExecutableKey)
                 let versionBeforeDiscovery = AppDefaults.standard.string(forKey: self.validatedVersionKey)
                 let discovered = await CLIInstaller.status()
@@ -157,7 +208,14 @@ struct CLIInstallerRealDistributionProofTests {
                     discoveredReady = false
                 }
                 let statusRuntime = await self.resolvedRuntimePaths(for: externalExecutable.path)
-                let managedRuntime = await self.resolvedRuntimePaths(for: managedExecutable.path)
+                let managedRuntime = await self.resolvedRuntimePaths(for: managedExecutablePath)
+                guard let statusRuntimeFinalPath = statusRuntime.finalPath,
+                      let managedRuntimeFinalPath = managedRuntime.finalPath
+                else {
+                    throw RealDistributionTestError.invalid("RuntimeLocator did not resolve the pinned Node for both CLI paths.")
+                }
+                let statusRuntimeIdentity = try self.fileIdentity(at: statusRuntimeFinalPath)
+                let managedRuntimeIdentity = try self.fileIdentity(at: managedRuntimeFinalPath)
 
                 let inspected = await CLIInstaller.managedStatus(
                     expectedVersion: self.expectedVersion,
@@ -165,7 +223,7 @@ struct CLIInstallerRealDistributionProofTests {
                 )
                 let managedReady: Bool
                 if case let .ready(location, version) = inspected {
-                    managedReady = location == managedExecutable.path && version == self.expectedVersion
+                    managedReady = location == managedExecutablePath && version == self.expectedVersion
                 } else {
                     managedReady = false
                 }
@@ -173,19 +231,19 @@ struct CLIInstallerRealDistributionProofTests {
                 let versionAfterInspection = AppDefaults.standard.string(forKey: self.validatedVersionKey)
                 let resolvedCommand = CommandResolver.openclawExecutable()
                 let resolvedCommandFinalPath = resolvedCommand.map {
-                    URL(fileURLWithPath: $0).resolvingSymlinksInPath().standardizedFileURL.path
+                    self.canonicalPath(URL(fileURLWithPath: $0)) ?? ""
                 }
                 let checks: [String: Bool] = [
-                    "isolatedRunnerHome": actualHome.resolvingSymlinksInPath() == home.resolvingSymlinksInPath(),
-                    "managedPathMatchesRuntimeDerivation": managedPrefix.path == CLIInstaller.installPrefix()
-                        && managedExecutable.path == CLIInstaller.managedExecutableLocation(),
-                    "distinctInstallations": externalExecutable.path != managedExecutable.path
-                        && externalResolved.path != managedResolved.path,
+                    "isolatedRunnerHome": self.canonicalPath(actualHome) == self.canonicalPath(home),
+                    "managedPathMatchesRuntimeDerivation": managedPrefixPath == CLIInstaller.installPrefix()
+                        && managedExecutablePath == CLIInstaller.managedExecutableLocation(),
+                    "distinctInstallations": externalExecutable.path != managedExecutablePath
+                        && externalExecutableIdentity != managedExecutableIdentity,
                     "externalCLIReady": discoveredReady,
-                    "runtimeNodeSearchPathIsPinned": statusRuntime.finalPath == manifest.toolchain.node.path
-                        && statusRuntime.rawPath == externalPrefix.appendingPathComponent("bin/node").path,
-                    "managedRuntimeSearchPathIsPinned": managedRuntime.finalPath == manifest.toolchain.node.path
-                        && managedRuntime.rawPath == managedPrefix.appendingPathComponent("bin/node").path,
+                    "runtimeNodeSearchPathIsPinned": statusRuntime.rawPath == externalPrefix.appendingPathComponent("bin/node").path
+                        && statusRuntimeIdentity == pinnedNodeIdentity,
+                    "managedRuntimeSearchPathIsPinned": managedRuntime.rawPath == managedPrefix.appendingPathComponent("bin/node").path
+                        && managedRuntimeIdentity == pinnedNodeIdentity,
                     "managedCLIReady": managedReady,
                     "externalSelectionSeeded": selectedBeforeDiscovery == externalExecutable.path
                         && versionBeforeDiscovery == self.expectedVersion,
@@ -194,9 +252,9 @@ struct CLIInstallerRealDistributionProofTests {
                     "resolverSelectsExternal": resolvedCommand == externalExecutable.path,
                     "resolverFinalPathIsExternal": resolvedCommandFinalPath == externalResolved.path,
                 ]
-                let overwroteExternal = selectedAfterInspection == managedExecutable.path
+                let overwroteExternal = selectedAfterInspection == managedExecutablePath
                     && versionAfterInspection == self.expectedVersion
-                    && resolvedCommand == managedExecutable.path
+                    && resolvedCommand == managedExecutablePath
                     && resolvedCommandFinalPath == managedResolved.path
                 let externalReceipt: [String: Any] = [
                     "schemaVersion": 1,
@@ -211,17 +269,25 @@ struct CLIInstallerRealDistributionProofTests {
                     "node": ["path": manifest.toolchain.node.path, "version": manifest.toolchain.node.version],
                     "npm": ["path": manifest.toolchain.npm.path, "version": manifest.toolchain.npm.version],
                     "home": home.path,
+                    "launcherHomeEnvironment": rawHome,
+                    "launcherFixedUserHomeEnvironment": rawFixedHome,
+                    "foundationHome": foundationHome.path,
+                    "canonicalHome": self.canonicalPath(home).map { $0 as Any } ?? NSNull(),
                     "stateDirectory": self.environmentValue("OPENCLAW_STATE_DIR"),
-                    "managedPrefix": managedPrefix.path,
-                    "managedExecutable": managedExecutable.path,
+                    "managedPrefix": managedPrefixPath,
+                    "managedExecutable": managedExecutablePath,
                     "managedResolvedExecutable": managedResolved.path,
+                    "managedResolvedExecutableIdentity": managedExecutableIdentity.receipt,
                     "externalPrefix": externalPrefix.path,
                     "externalExecutable": externalExecutable.path,
                     "externalResolvedExecutable": externalResolved.path,
+                    "externalResolvedExecutableIdentity": externalExecutableIdentity.receipt,
                     "runtimeNodePath": statusRuntime.rawPath.map { $0 as Any } ?? NSNull(),
                     "runtimeNodeFinalPath": statusRuntime.finalPath.map { $0 as Any } ?? NSNull(),
+                    "runtimeNodeFileIdentity": statusRuntimeIdentity.receipt,
                     "managedRuntimeNodePath": managedRuntime.rawPath.map { $0 as Any } ?? NSNull(),
                     "managedRuntimeNodeFinalPath": managedRuntime.finalPath.map { $0 as Any } ?? NSNull(),
+                    "managedRuntimeNodeFileIdentity": managedRuntimeIdentity.receipt,
                     "discoveryStatus": String(describing: discovered),
                     "managedStatus": String(describing: inspected),
                     "selectedExecutableBeforeDiscovery": selectedBeforeDiscovery.map { $0 as Any } ?? NSNull(),
@@ -238,14 +304,18 @@ struct CLIInstallerRealDistributionProofTests {
                 AppDefaults.standard.removeObject(forKey: self.validatedVersionKey)
                 let executableInitiallyUnset = AppDefaults.standard.string(forKey: self.validatedExecutableKey) == nil
                 let versionInitiallyUnset = AppDefaults.standard.string(forKey: self.validatedVersionKey) == nil
-                let unsetManagedRuntime = await self.resolvedRuntimePaths(for: managedExecutable.path)
+                let unsetManagedRuntime = await self.resolvedRuntimePaths(for: managedExecutablePath)
+                guard let unsetRuntimeFinalPath = unsetManagedRuntime.finalPath else {
+                    throw RealDistributionTestError.invalid("RuntimeLocator did not resolve the pinned Node for the initially-unset cell.")
+                }
+                let unsetRuntimeIdentity = try self.fileIdentity(at: unsetRuntimeFinalPath)
                 let unsetManagedStatus = await CLIInstaller.managedStatus(
                     expectedVersion: self.expectedVersion,
                     usesBundledRuntime: false,
                 )
                 let unsetManagedReady: Bool
                 if case let .ready(location, version) = unsetManagedStatus {
-                    unsetManagedReady = location == managedExecutable.path && version == self.expectedVersion
+                    unsetManagedReady = location == managedExecutablePath && version == self.expectedVersion
                 } else {
                     unsetManagedReady = false
                 }
@@ -253,14 +323,14 @@ struct CLIInstallerRealDistributionProofTests {
                 let versionRemainsUnset = AppDefaults.standard.string(forKey: self.validatedVersionKey) == nil
                 let unsetExecutableAfter = AppDefaults.standard.string(forKey: self.validatedExecutableKey)
                 let unsetVersionAfter = AppDefaults.standard.string(forKey: self.validatedVersionKey)
-                let selectedWhenUnset = unsetExecutableAfter == managedExecutable.path
+                let selectedWhenUnset = unsetExecutableAfter == managedExecutablePath
                     && unsetVersionAfter == self.expectedVersion
                 let unsetChecks: [String: Bool] = [
-                    "isolatedRunnerHome": actualHome.resolvingSymlinksInPath() == home.resolvingSymlinksInPath(),
-                    "managedPathMatchesRuntimeDerivation": managedPrefix.path == CLIInstaller.installPrefix()
-                        && managedExecutable.path == CLIInstaller.managedExecutableLocation(),
-                    "runtimeNodeSearchPathIsPinned": unsetManagedRuntime.finalPath == manifest.toolchain.node.path
-                        && unsetManagedRuntime.rawPath == managedPrefix.appendingPathComponent("bin/node").path,
+                    "isolatedRunnerHome": self.canonicalPath(actualHome) == self.canonicalPath(home),
+                    "managedPathMatchesRuntimeDerivation": managedPrefixPath == CLIInstaller.installPrefix()
+                        && managedExecutablePath == CLIInstaller.managedExecutableLocation(),
+                    "runtimeNodeSearchPathIsPinned": unsetManagedRuntime.rawPath == managedPrefix.appendingPathComponent("bin/node").path
+                        && unsetRuntimeIdentity == pinnedNodeIdentity,
                     "managedCLIReady": unsetManagedReady,
                     "validatedExecutableInitiallyUnset": executableInitiallyUnset,
                     "validatedVersionInitiallyUnset": versionInitiallyUnset,
@@ -278,12 +348,17 @@ struct CLIInstallerRealDistributionProofTests {
                     "packageVersion": self.expectedVersion,
                     "integrity": manifest.package.integrity,
                     "home": home.path,
+                    "launcherHomeEnvironment": rawHome,
+                    "launcherFixedUserHomeEnvironment": rawFixedHome,
+                    "foundationHome": foundationHome.path,
+                    "canonicalHome": self.canonicalPath(home).map { $0 as Any } ?? NSNull(),
                     "stateDirectory": self.environmentValue("OPENCLAW_STATE_DIR"),
-                    "managedPrefix": managedPrefix.path,
-                    "managedExecutable": managedExecutable.path,
+                    "managedPrefix": managedPrefixPath,
+                    "managedExecutable": managedExecutablePath,
                     "managedStatus": String(describing: unsetManagedStatus),
                     "runtimeNodePath": unsetManagedRuntime.rawPath.map { $0 as Any } ?? NSNull(),
                     "runtimeNodeFinalPath": unsetManagedRuntime.finalPath.map { $0 as Any } ?? NSNull(),
+                    "runtimeNodeFileIdentity": unsetRuntimeIdentity.receipt,
                     "validatedExecutableInitiallyUnset": executableInitiallyUnset,
                     "validatedVersionInitiallyUnset": versionInitiallyUnset,
                     "validatedExecutableAfterInspection": unsetExecutableAfter.map { $0 as Any } ?? NSNull(),
@@ -351,8 +426,13 @@ struct CLIInstallerRealDistributionProofTests {
             "productSha": manifest.productSha,
             "bodyCompleted": externalCell != nil && unsetCell != nil,
             "helperInstallSucceeded": helperInstallSucceeded,
-            "managedPrefix": managedPrefix.path,
+            "managedPrefix": managedPrefixPath,
             "managedPrefixRemoved": managedPrefixRemoved,
+            "launcherHomeEnvironment": rawHome,
+            "launcherFixedUserHomeEnvironment": rawFixedHome,
+            "foundationHome": foundationHome.path,
+            "canonicalHome": self.canonicalPath(home).map { $0 as Any } ?? NSNull(),
+            "canonicalManagedPrefix": self.canonicalPath(managedPrefix).map { $0 as Any } ?? NSNull(),
             "tempRoot": tempRoot.path,
             "tempRootRemoved": tempRootRemoved,
             "testIsolationDefaultsRestored": defaultsRestored,
@@ -404,8 +484,9 @@ struct CLIInstallerRealDistributionProofTests {
     private func runInstallHelper(
         manifest: RealDistributionManifest,
         repoRoot: URL,
-        managedPrefix: URL,
-        managedExecutable: URL,
+        swiftHome: URL,
+        managedPrefix: String,
+        managedExecutable: String,
         externalPrefix: URL
     ) throws {
         let helper = repoRoot.appendingPathComponent(manifest.helperRelativePath)
@@ -419,8 +500,9 @@ struct CLIInstallerRealDistributionProofTests {
             "install",
             "--manifest", repoRoot.appendingPathComponent("qa/maccli-real-distribution-qa-20261005/manifest.json").path,
             "--receipt-dir", manifest.receiptDirectory,
-            "--managed-prefix", managedPrefix.path,
-            "--managed-executable", managedExecutable.path,
+            "--swift-home", swiftHome.path,
+            "--managed-prefix", managedPrefix,
+            "--managed-executable", managedExecutable,
             "--external-prefix", externalPrefix.path,
         ]
         process.currentDirectoryURL = repoRoot
@@ -452,9 +534,35 @@ struct CLIInstallerRealDistributionProofTests {
     }
 
     private func isWithin(_ parent: URL, _ child: URL) -> Bool {
-        let parentPath = parent.standardizedFileURL.path
-        let childPath = child.standardizedFileURL.path
+        guard let parentPath = self.canonicalPath(parent), let childPath = self.canonicalPath(child) else {
+            return false
+        }
         return childPath == parentPath || childPath.hasPrefix(parentPath.hasSuffix("/") ? parentPath : parentPath + "/")
+    }
+
+    private func canonicalPath(_ url: URL) -> String? {
+        var ancestor = url.standardizedFileURL
+        var missingComponents: [String] = []
+        while !FileManager.default.fileExists(atPath: ancestor.path) {
+            let parent = ancestor.deletingLastPathComponent()
+            guard parent.path != ancestor.path else { return nil }
+            missingComponents.insert(ancestor.lastPathComponent, at: 0)
+            ancestor = parent
+        }
+        var resolved = ancestor.resolvingSymlinksInPath().standardizedFileURL
+        for component in missingComponents {
+            resolved.appendPathComponent(component)
+        }
+        return resolved.standardizedFileURL.path
+    }
+
+    private func fileIdentity(at path: String) throws -> RealDistributionFileIdentity {
+        var details = stat()
+        let result = path.withCString { stat($0, &details) }
+        guard result == 0 else {
+            throw RealDistributionTestError.invalid("Darwin stat could not read filesystem identity for \(path), errno=\(errno).")
+        }
+        return RealDistributionFileIdentity(device: String(details.st_dev), inode: String(details.st_ino))
     }
 
     private func isStrictlyWithin(_ parent: URL, _ child: URL) -> Bool {

@@ -16,8 +16,10 @@ runtime in both selection states. The suite also checks `RuntimeLocator` against
 the status APIs' production-derived search paths as a preparation gate; it does
 not claim to instrument each subprocess invocation. One prefix is derived at runtime from
 `CLIInstaller.installPrefix()` and `managedExecutableLocation()` under the
-launcher-created HOME; the other is a distinct temporary prefix. The helper
-does not guess the managed location from `OPENCLAW_STATE_DIR`.
+launcher-created HOME; the other is a distinct temporary prefix. The original
+API-derived strings are passed to the helper and retained alongside the
+absolute lexical paths used for npm installation. The helper does not guess the managed location from
+`OPENCLAW_STATE_DIR`.
 
 The two serialized cells exercise these contracts:
 
@@ -60,6 +62,42 @@ failed command's bounded stdout/stderr tail (last 12 non-empty lines, at most
 2,400 characters per stream). The helper also emits that excerpt with the
 failure. URL credentials and common token or password forms are redacted before
 either copy is retained.
+
+The canonical launcher gives its Swift child the allowlisted `HOME` and
+`CFFIXED_USER_HOME` values for the disposable account. The suite leaves
+`Process.environment` unset when starting the Node helper, so Foundation's
+[documented default](https://developer.apple.com/documentation/foundation/process/environment)
+is to inherit the Swift process environment; the helper retains and reports
+those raw environment spellings alongside the Foundation-derived home. Neither
+layer rewrites HOME to make a containment check pass.
+
+For path policy checks only, both layers resolve existing filesystem ancestors
+and append any not-yet-created suffix. This treats macOS aliases such as
+`/tmp/...` and `/private/tmp/...` as the same location while still rejecting
+symlink-resolved escapes, overlapping prefixes/state, and an executable path
+that is not the expected `prefix/bin/openclaw` shape. The raw
+`CLIInstaller` paths determine the actual npm installation targets; canonical
+paths are never substituted as install prefixes. HOME and
+TMPDIR must already exist; the managed/external prefixes and managed
+executable may not. The install receipt records raw and canonical paths plus
+relative containment evidence. When Swift/Foundation and Node report different
+spellings for one resolved executable (for example because Foundation strips
+the `/private` designator per [Foundation's URL contract](https://developer.apple.com/documentation/foundation/nsurl/resolvingsymlinksinpath),
+both capture device/inode identity while the installed files still exist: Node
+uses `stat` on its `realpath` target, and Swift records Darwin `st_dev`/`st_ino`
+for the resolved executable. The post-cleanup verifier
+compares those retained identities and does not re-resolve removed install
+paths. The pinned Node binary is likewise identity-checked before launcher
+cleanup. Node's [`path.resolve`](https://nodejs.org/api/path.html#pathresolvepaths)
+normalizes path segments but does not itself resolve symlinks.
+This is a safety fix for equivalent path spellings; it does not establish the
+historical cause of earlier setup failures.
+
+If install setup rejects a containment check, its diagnostic includes the
+helper HOME, `CFFIXED_USER_HOME`, Swift/Foundation home, managed/external
+paths, state directory, and both raw and canonical relative-path evidence.
+This makes a Swift-to-helper environment mismatch diagnosable from retained
+receipts and native logs without relaxing either containment guard.
 
 ## Workflow integration
 

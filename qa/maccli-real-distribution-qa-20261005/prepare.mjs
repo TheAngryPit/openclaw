@@ -99,6 +99,20 @@ async function hashFile(file, algorithm = "sha256") {
   return hash.digest("hex");
 }
 
+async function fileIdentity(file) {
+  const info = await stat(file, { bigint: true });
+  if (!info.isFile()) fail(`expected a regular file for filesystem identity: ${file}`);
+  return { device: info.dev.toString(), inode: info.ino.toString() };
+}
+
+function isFileIdentity(value) {
+  return Boolean(value && typeof value.device === "string" && typeof value.inode === "string");
+}
+
+function sameFileIdentity(left, right) {
+  return isFileIdentity(left) && isFileIdentity(right) && left.device === right.device && left.inode === right.inode;
+}
+
 function integrityFromHex(hex) {
   return `sha512-${Buffer.from(hex, "hex").toString("base64")}`;
 }
@@ -338,6 +352,7 @@ async function createManifest(args) {
   const sidecarHashes = await compareStagedArtifacts(repoRoot, sidecarRoot);
   const nodePath = await realpath(process.execPath);
   const nodeVersion = await requireCommandVersion(nodePath, EXPECTED_NODE, "Node.js");
+  const nodeIdentity = await fileIdentity(nodePath);
   const npmPath = await findExecutable("npm");
   const npmVersion = await requireCommandVersion(npmPath, EXPECTED_NPM, "npm");
 
@@ -356,7 +371,7 @@ async function createManifest(args) {
     productSha,
     packageVersion: VERSION,
     expectedIntegrity: RELEASE_SRI,
-    node: { path: nodePath, version: nodeVersion },
+    node: { path: nodePath, version: nodeVersion, fileIdentity: nodeIdentity },
     npm: { path: npmPath, version: npmVersion },
     receiptDirectory: receiptDir,
     npmWorkingDirectory: workDirectory,
@@ -418,7 +433,10 @@ async function createManifest(args) {
       createdAt: timestamp(),
       productSha,
       package: { name: "openclaw", version: VERSION, integrity: RELEASE_SRI, tarball: metadata.tarball, shasum: metadata.shasum, engines: metadata.engines },
-      toolchain: { node: { path: nodePath, version: nodeVersion }, npm: { path: npmPath, version: npmVersion } },
+      toolchain: {
+        node: { path: nodePath, version: nodeVersion, fileIdentity: nodeIdentity },
+        npm: { path: npmPath, version: npmVersion },
+      },
       receiptDirectory: receiptDir,
       tarballPath: finalTarballPath,
       helperRelativePath: SCRIPT_RELATIVE,
@@ -460,31 +478,151 @@ async function createManifest(args) {
   }));
 }
 
-function validateRunnerEnvironment() {
-  const home = process.env.HOME;
-  const fixedHome = process.env.CFFIXED_USER_HOME;
-  const temp = process.env.TMPDIR;
-  if (process.platform !== "darwin" || !home || !fixedHome || !temp || path.resolve(home) !== path.resolve(fixedHome)) {
+async function canonicalPathAllowingMissingSuffix(value, label) {
+  let candidate = path.resolve(value);
+  const missingSuffix = [];
+  while (true) {
+    try {
+      const resolved = await realpath(candidate);
+      if (missingSuffix.length > 0 && !(await stat(resolved)).isDirectory()) {
+        fail(`${label} has a non-directory existing ancestor: ${candidate}`);
+      }
+      return path.resolve(resolved, ...missingSuffix);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+
+      // realpath reports ENOENT for a dangling symlink too. Do not mistake
+      // that existing link for an ordinary missing suffix and append through it.
+      try {
+        await lstat(candidate);
+        fail(`${label} contains an existing path that cannot be resolved: ${candidate}`);
+      } catch (statError) {
+        if (statError.code !== "ENOENT") throw statError;
+      }
+
+      const parent = path.dirname(candidate);
+      if (parent === candidate) fail(`${label} has no resolvable filesystem ancestor`);
+      missingSuffix.unshift(path.basename(candidate));
+      candidate = parent;
+    }
+  }
+}
+
+async function canonicalExistingDirectory(value, label) {
+  const resolved = await realpath(path.resolve(value));
+  if (!(await stat(resolved)).isDirectory()) fail(`${label} is not an existing directory`);
+  return resolved;
+}
+
+async function validateRunnerEnvironment() {
+  const rawHome = process.env.HOME;
+  const rawFixedHome = process.env.CFFIXED_USER_HOME;
+  const rawTemp = process.env.TMPDIR;
+  if (process.platform !== "darwin" || !rawHome || !rawFixedHome || !rawTemp) {
     fail("install mode requires the canonical launcher-created macOS HOME and TMPDIR");
   }
   if (process.env.OPENCLAW_PROFILE !== "default") fail("install mode requires the launcher's default app profile");
-  return { home: path.resolve(home), temp: path.resolve(temp) };
+
+  const [homeCanonical, fixedHomeCanonical, tempCanonical] = await Promise.all([
+    canonicalExistingDirectory(rawHome, "HOME"),
+    canonicalExistingDirectory(rawFixedHome, "CFFIXED_USER_HOME"),
+    canonicalExistingDirectory(rawTemp, "TMPDIR"),
+  ]);
+  if (homeCanonical !== fixedHomeCanonical) {
+    fail(`launcher HOME and CFFIXED_USER_HOME do not resolve to the same directory: ${JSON.stringify({
+      home: rawHome,
+      fixedHome: rawFixedHome,
+      homeCanonical,
+      fixedHomeCanonical,
+    })}`);
+  }
+  return {
+    rawHome: rawHome,
+    rawFixedHome: rawFixedHome,
+    rawTemp: rawTemp,
+    home: path.resolve(rawHome),
+    homeCanonical,
+    fixedHome: path.resolve(rawFixedHome),
+    temp: path.resolve(rawTemp),
+    tempCanonical,
+  };
 }
 
-function validateManagedPrefix(managedPrefix, externalPrefix, managedExecutable, home, temp) {
-  if (!isStrictlyWithin(home, managedPrefix)) fail("runtime-derived managed prefix is not beneath the launcher HOME");
-  if (!isStrictlyWithin(temp, externalPrefix)) fail("external npm prefix is not beneath the launcher TMPDIR");
-  if (isWithin(managedPrefix, externalPrefix) || isWithin(externalPrefix, managedPrefix)) {
-    fail("managed and external npm prefixes are not distinct disjoint trees");
-  }
-  if (!isStrictlyWithin(managedPrefix, managedExecutable)) fail("managed executable is not beneath the runtime-derived prefix");
+async function validateManagedPrefix(managedPrefix, externalPrefix, managedExecutable, runner, swiftHome, rawInputs) {
+  const swiftHomeCanonical = await canonicalExistingDirectory(swiftHome, "Swift/Foundation home");
+  const [managedPrefixCanonical, externalPrefixCanonical, managedExecutableCanonical] = await Promise.all([
+    canonicalPathAllowingMissingSuffix(managedPrefix, "managed prefix"),
+    canonicalPathAllowingMissingSuffix(externalPrefix, "external prefix"),
+    canonicalPathAllowingMissingSuffix(managedExecutable, "managed executable"),
+  ]);
   const stateDirectory = process.env.OPENCLAW_STATE_DIR;
-  if (stateDirectory && (path.resolve(stateDirectory) === managedPrefix || isWithin(stateDirectory, managedPrefix) || isWithin(managedPrefix, stateDirectory))) {
-    fail("managed prefix overlaps OPENCLAW_STATE_DIR; this harness requires the API-derived profile prefix instead");
+  const stateDirectoryCanonical = stateDirectory
+    ? await canonicalPathAllowingMissingSuffix(stateDirectory, "OPENCLAW_STATE_DIR")
+    : null;
+  const evidence = {
+    raw: {
+      helperHome: runner.rawHome,
+      fixedUserHome: runner.rawFixedHome,
+      temporaryDirectory: runner.rawTemp,
+      swiftFoundationHome: swiftHome,
+      managedPrefix: rawInputs.managedPrefix,
+      managedExecutable: rawInputs.managedExecutable,
+      externalPrefix: rawInputs.externalPrefix,
+      stateDirectory: stateDirectory ?? null,
+    },
+    helperHome: runner.home,
+    fixedUserHome: runner.fixedHome,
+    swiftFoundationHome: path.resolve(swiftHome),
+    temporaryDirectory: runner.temp,
+    managedPrefix,
+    managedExecutable,
+    externalPrefix,
+    stateDirectory: stateDirectory ? path.resolve(stateDirectory) : null,
+    canonical: {
+      helperHome: runner.homeCanonical,
+      fixedUserHome: runner.homeCanonical,
+      swiftFoundationHome: swiftHomeCanonical,
+      temporaryDirectory: runner.tempCanonical,
+      managedPrefix: managedPrefixCanonical,
+      managedExecutable: managedExecutableCanonical,
+      externalPrefix: externalPrefixCanonical,
+      stateDirectory: stateDirectoryCanonical,
+    },
+    managedPrefixRelativeToHelperHome: path.relative(runner.homeCanonical, managedPrefixCanonical),
+    managedPrefixRelativeToSwiftFoundationHome: path.relative(swiftHomeCanonical, managedPrefixCanonical),
+    managedExecutableRelativeToManagedPrefix: path.relative(managedPrefixCanonical, managedExecutableCanonical),
+    profile: process.env.OPENCLAW_PROFILE ?? null,
+  };
+
+  if (runner.homeCanonical !== swiftHomeCanonical) {
+    fail(`Swift/Foundation home does not resolve to the launcher's HOME; path evidence: ${JSON.stringify(evidence)}`);
   }
-  if (path.resolve(managedExecutable) !== path.join(managedPrefix, "bin", "openclaw")) {
-    fail("runtime-derived managed executable did not have the expected npm prefix/bin/openclaw shape");
+  if (!isStrictlyWithin(runner.homeCanonical, managedPrefixCanonical)) {
+    fail(`runtime-derived managed prefix is not beneath the helper's launcher HOME; path evidence: ${JSON.stringify(evidence)}`);
   }
+  if (!isStrictlyWithin(runner.tempCanonical, externalPrefixCanonical)) {
+    fail(`external npm prefix is not beneath the launcher TMPDIR; path evidence: ${JSON.stringify(evidence)}`);
+  }
+  if (isWithin(managedPrefixCanonical, externalPrefixCanonical) || isWithin(externalPrefixCanonical, managedPrefixCanonical)) {
+    fail(`managed and external npm prefixes are not distinct disjoint trees; path evidence: ${JSON.stringify(evidence)}`);
+  }
+  if (!isStrictlyWithin(managedPrefixCanonical, managedExecutableCanonical)) {
+    fail(`managed executable is not beneath the runtime-derived prefix; path evidence: ${JSON.stringify(evidence)}`);
+  }
+  if (managedExecutableCanonical !== path.join(managedPrefixCanonical, "bin", "openclaw")) {
+    fail(`runtime-derived managed executable does not resolve to the expected npm prefix/bin/openclaw shape; path evidence: ${JSON.stringify(evidence)}`);
+  }
+  if (stateDirectoryCanonical && (
+    stateDirectoryCanonical === managedPrefixCanonical ||
+    isWithin(stateDirectoryCanonical, managedPrefixCanonical) ||
+    isWithin(managedPrefixCanonical, stateDirectoryCanonical)
+  )) {
+    fail(`managed prefix overlaps OPENCLAW_STATE_DIR; path evidence: ${JSON.stringify(evidence)}`);
+  }
+  if (managedExecutable !== path.join(managedPrefix, "bin", "openclaw")) {
+    fail(`runtime-derived managed executable did not have the expected npm prefix/bin/openclaw shape; path evidence: ${JSON.stringify(evidence)}`);
+  }
+  return evidence;
 }
 
 async function installedPackage(prefix) {
@@ -495,12 +633,14 @@ async function installedPackage(prefix) {
   await access(executable, fsConstants.X_OK);
   const realExecutable = await realpath(executable);
   const realPackageDirectory = await realpath(packageDirectory);
+  const executableIdentity = await fileIdentity(realExecutable);
   if (!isStrictlyWithin(realPackageDirectory, realExecutable)) fail(`npm executable under ${prefix} does not resolve inside the installed package`);
   return {
     prefix,
     packageDirectory: realPackageDirectory,
     executable,
     realExecutable,
+    fileIdentity: executableIdentity,
     version: packageJSON.version,
     packageName: packageJSON.name,
   };
@@ -553,11 +693,17 @@ async function installRealDistributions(args) {
   if (await requireCommandVersion(npm, EXPECTED_NPM, "npm") !== manifest.toolchain?.npm?.version) fail("npm differs from the manifest toolchain");
   const tarballIntegrity = integrityFromHex(await hashFile(manifest.tarballPath, "sha512"));
   if (tarballIntegrity !== RELEASE_SRI) fail("verified npm tarball changed after manifest creation");
-  const { home, temp } = validateRunnerEnvironment();
-  const managedPrefix = absolute(required(args, "managed-prefix"), "--managed-prefix");
-  const managedExecutable = absolute(required(args, "managed-executable"), "--managed-executable");
-  const externalPrefix = absolute(required(args, "external-prefix"), "--external-prefix");
-  validateManagedPrefix(managedPrefix, externalPrefix, managedExecutable, home, temp);
+  const runner = await validateRunnerEnvironment();
+  const swiftHome = absolute(required(args, "swift-home"), "--swift-home");
+  const rawInputs = {
+    managedPrefix: required(args, "managed-prefix"),
+    managedExecutable: required(args, "managed-executable"),
+    externalPrefix: required(args, "external-prefix"),
+  };
+  const managedPrefix = absolute(rawInputs.managedPrefix, "--managed-prefix");
+  const managedExecutable = absolute(rawInputs.managedExecutable, "--managed-executable");
+  const externalPrefix = absolute(rawInputs.externalPrefix, "--external-prefix");
+  const pathEvidence = await validateManagedPrefix(managedPrefix, externalPrefix, managedExecutable, runner, swiftHome, rawInputs);
   if (await gitHead(path.resolve(here, "..", "..")) !== manifest.productSha) {
     // The copied helper sits at product/qa/maccli-real-distribution-qa-20261005.
     fail("product checkout HEAD changed since the immutable manifest was prepared");
@@ -574,13 +720,28 @@ async function installRealDistributions(args) {
     packageVersion: VERSION,
     expectedIntegrity: RELEASE_SRI,
     observedTarballIntegrity: tarballIntegrity,
-    node: { path: manifest.toolchain.node.path, version: nodeVersion },
+    node: {
+      path: manifest.toolchain.node.path,
+      version: nodeVersion,
+      fileIdentity: manifest.toolchain.node.fileIdentity,
+    },
     npm: manifest.toolchain.npm,
-    managed: { prefix: managedPrefix, executable: managedExecutable, before: "unknown", installed: null },
-    external: { prefix: externalPrefix, before: "unknown", installed: null },
+    managed: {
+      prefix: managedPrefix,
+      executable: managedExecutable,
+      inputPrefix: rawInputs.managedPrefix,
+      inputExecutable: rawInputs.managedExecutable,
+      before: "unknown",
+      installed: null,
+    },
+    external: { prefix: externalPrefix, inputPrefix: rawInputs.externalPrefix, before: "unknown", installed: null },
     stateDirectory: process.env.OPENCLAW_STATE_DIR ?? null,
-    home,
-    temp,
+    home: runner.home,
+    temp: runner.temp,
+    homeEnvironment: runner.rawHome,
+    fixedUserHomeEnvironment: runner.rawFixedHome,
+    tempEnvironment: runner.rawTemp,
+    pathEvidence,
     npmCacheRemoved: false,
     tarballRemoved: false,
   };
@@ -590,10 +751,19 @@ async function installRealDistributions(args) {
     await mkdir(cache, { recursive: false, mode: 0o700 });
     const managed = await installOne(manifest.toolchain.npm.path, manifest, managedPrefix, cache, userConfig);
     if (managed.executable !== managedExecutable) fail("installed managed executable path differs from CLIInstaller's runtime-derived path");
-    receipt.managed = { prefix: managedPrefix, executable: managedExecutable, before: managed.before, installed: managed };
+    receipt.managed = {
+      prefix: managedPrefix,
+      executable: managedExecutable,
+      inputPrefix: rawInputs.managedPrefix,
+      inputExecutable: rawInputs.managedExecutable,
+      before: managed.before,
+      installed: managed,
+    };
     const external = await installOne(manifest.toolchain.npm.path, manifest, externalPrefix, cache, userConfig);
-    receipt.external = { prefix: externalPrefix, before: external.before, installed: external };
-    receipt.distinctInstallations = managedPrefix !== externalPrefix && managed.realExecutable !== external.realExecutable;
+    receipt.external = { prefix: externalPrefix, inputPrefix: rawInputs.externalPrefix, before: external.before, installed: external };
+    receipt.distinctInstallations = pathEvidence.canonical.managedPrefix !== pathEvidence.canonical.externalPrefix
+      && managed.realExecutable !== external.realExecutable
+      && !sameFileIdentity(managed.fileIdentity, external.fileIdentity);
     if (!receipt.distinctInstallations) fail("the two npm installations did not produce distinct executable trees");
     receipt.completed = true;
   } catch (error) {
@@ -695,19 +865,52 @@ async function verifyRun(args) {
   if (setup.expectedIntegrity !== RELEASE_SRI || setup.tarballIntegrity !== RELEASE_SRI || manifest.package.integrity !== RELEASE_SRI || install.observedTarballIntegrity !== RELEASE_SRI) {
     fail("pinned npm release integrity is absent or incorrect");
   }
+  const paths = install.pathEvidence;
+  const canonical = paths?.canonical;
+  if (!paths || !canonical ||
+      paths.raw?.helperHome !== install.homeEnvironment ||
+      paths.raw?.fixedUserHome !== install.fixedUserHomeEnvironment ||
+      paths.raw?.temporaryDirectory !== install.tempEnvironment ||
+      paths.raw?.managedPrefix !== install.managed?.inputPrefix ||
+      paths.raw?.managedExecutable !== install.managed?.inputExecutable ||
+      paths.raw?.externalPrefix !== install.external?.inputPrefix ||
+      paths.raw?.stateDirectory !== install.stateDirectory ||
+      paths.managedPrefix !== install.managed?.prefix || paths.managedExecutable !== install.managed?.executable ||
+      paths.externalPrefix !== install.external?.prefix || paths.helperHome !== install.home || paths.temporaryDirectory !== install.temp ||
+      canonical.helperHome !== canonical.fixedUserHome || canonical.helperHome !== canonical.swiftFoundationHome ||
+      !isStrictlyWithin(canonical.helperHome, canonical.managedPrefix) ||
+      !isStrictlyWithin(canonical.temporaryDirectory, canonical.externalPrefix) ||
+      isWithin(canonical.managedPrefix, canonical.externalPrefix) || isWithin(canonical.externalPrefix, canonical.managedPrefix) ||
+      !isStrictlyWithin(canonical.managedPrefix, canonical.managedExecutable) ||
+      canonical.managedExecutable !== path.join(canonical.managedPrefix, "bin", "openclaw") ||
+      install.managed.executable !== path.join(install.managed.prefix, "bin", "openclaw")) {
+    fail("install receipt lacks coherent canonical containment proof for the runtime-derived paths");
+  }
+  const stateDirectory = canonical.stateDirectory;
+  if (stateDirectory && (
+    stateDirectory === canonical.managedPrefix ||
+    isWithin(stateDirectory, canonical.managedPrefix) ||
+    isWithin(canonical.managedPrefix, stateDirectory)
+  )) fail("install receipt shows the managed prefix overlaps OPENCLAW_STATE_DIR");
   if (setup.npmMetadata?.shasum !== RELEASE_SHASUM || manifest.package.shasum !== RELEASE_SHASUM) fail("pinned npm release SHA-1 is absent or incorrect");
   if (manifest.package.version !== VERSION || install.packageVersion !== VERSION) fail("pinned npm package version is absent or incorrect");
   if (await gitHead(path.resolve(here, "..", "..")) !== expectedSha) fail("current product checkout HEAD does not match the selected verification lane");
-  if (setup.node?.version !== EXPECTED_NODE || setup.npm?.version !== EXPECTED_NPM || install.node?.version !== EXPECTED_NODE || install.npm?.version !== EXPECTED_NPM) {
+  if (setup.node?.version !== EXPECTED_NODE || setup.npm?.version !== EXPECTED_NPM || install.node?.version !== EXPECTED_NODE || install.npm?.version !== EXPECTED_NPM ||
+      !sameFileIdentity(setup.node?.fileIdentity, manifest.toolchain.node?.fileIdentity) ||
+      !sameFileIdentity(setup.node?.fileIdentity, install.node?.fileIdentity)) {
     fail("toolchain versions do not match the preflight-pinned Node/npm versions");
   }
   if (!setup.workDirectoryRemoved || !install.npmCacheRemoved || !install.tarballRemoved) fail("setup/download/cache cleanup did not complete");
   if (install.managed?.before !== "absent" || install.external?.before !== "absent" || !install.distinctInstallations) fail("the test did not create two distinct fresh npm prefix trees");
   for (const [label, item] of [["managed", install.managed], ["external", install.external]]) {
     if (item.installed?.version !== VERSION || item.installed?.packageName !== "openclaw" || !item.installed?.realExecutable ||
+        !isFileIdentity(item.installed?.fileIdentity) ||
         item.installed?.nodeLink?.resolved !== setup.node?.path || item.installed?.nodeLink?.link !== path.join(item.prefix, "bin", "node")) {
       fail(`${label} prefix lacks a verified real npm installation and pinned real Node link`);
     }
+  }
+  if (sameFileIdentity(install.managed.installed.fileIdentity, install.external.installed.fileIdentity)) {
+    fail("managed and external CLI executable receipts identify the same filesystem object");
   }
   if (setup.sidecarHashes?.["prepare.mjs"] !== manifest.stagedArtifactHashes?.["prepare.mjs"] ||
       setup.sidecarHashes?.["README.md"] !== manifest.stagedArtifactHashes?.["README.md"] ||
@@ -736,17 +939,17 @@ async function verifyRun(args) {
   }
   if (external.managedPrefix !== install.managed.prefix || external.externalPrefix !== install.external.prefix ||
       external.managedExecutable !== install.managed.executable || external.externalExecutable !== install.external.executable ||
-      external.managedResolvedExecutable !== install.managed.installed.realExecutable ||
-      external.externalResolvedExecutable !== install.external.installed.realExecutable ||
+      !sameFileIdentity(external.managedResolvedExecutableIdentity, install.managed.installed.fileIdentity) ||
+      !sameFileIdentity(external.externalResolvedExecutableIdentity, install.external.installed.fileIdentity) ||
       unset.managedPrefix !== install.managed.prefix || unset.managedExecutable !== install.managed.executable) {
     fail("Swift cell paths do not match the two verified npm installation receipts");
   }
   if (external.runtimeNodePath !== path.join(external.externalPrefix, "bin", "node") ||
-      external.runtimeNodeFinalPath !== setup.node.path ||
       external.managedRuntimeNodePath !== path.join(install.managed.prefix, "bin", "node") ||
-      external.managedRuntimeNodeFinalPath !== setup.node.path ||
       unset.runtimeNodePath !== path.join(install.managed.prefix, "bin", "node") ||
-      unset.runtimeNodeFinalPath !== setup.node.path) {
+      !sameFileIdentity(external.runtimeNodeFileIdentity, setup.node.fileIdentity) ||
+      !sameFileIdentity(external.managedRuntimeNodeFileIdentity, setup.node.fileIdentity) ||
+      !sameFileIdentity(unset.runtimeNodeFileIdentity, setup.node.fileIdentity)) {
     fail("production-derived CLI runtime search paths did not resolve to the manifest-pinned real Node");
   }
   if (external.selectedExecutableBeforeDiscovery !== external.externalExecutable ||
