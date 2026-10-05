@@ -11,6 +11,7 @@ export const gatewayPluginTestFiles = [
 
 // Native database consumers retain lifecycle cleanup within each forked process.
 export const gatewayDatabaseWorkerTestFiles = [
+  "src/gateway/agent-turn/agent-run-commentary-media.test.ts",
   "src/gateway/approval-fixture.test.ts",
   "src/gateway/auth-token-store-ref.test.ts",
   "src/gateway/board-http.test.ts",
@@ -19,7 +20,6 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/config-reload.activation.integration.test.ts",
   "src/gateway/config-reload.lease-retry.test.ts",
   "src/gateway/config-reload.plugin-drain.test.ts",
-  "src/gateway/config-reload.plugin-observation.test.ts",
   "src/gateway/config-reload.test.ts",
   "src/gateway/config-reload.transcripts.test.ts",
   "src/gateway/control-ui-assistant-media-policy.test.ts",
@@ -195,6 +195,7 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/server/ws-connection/message-handler.worker.test.ts",
   "src/gateway/session-activity-summaries.retry.test.ts",
   "src/gateway/session-activity-summaries.test.ts",
+  "src/gateway/session-companion-rpc.test.ts",
   "src/gateway/session-companion-runtime.test.ts",
   "src/gateway/session-create-atomic-initialization.test.ts",
   "src/gateway/session-create-preparation.test.ts",
@@ -207,6 +208,7 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/session-history-worker.integration.test.ts",
   "src/gateway/session-involvement.test.ts",
   "src/gateway/session-lifecycle-run-failure.test.ts",
+  "src/gateway/session-lifecycle-source-authority.test.ts",
   "src/gateway/session-lifecycle-state.persistence.test.ts",
   "src/gateway/session-list-viewers.perf.test.ts",
   "src/gateway/session-message-events.exec-completion.test.ts",
@@ -235,6 +237,7 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/session-sharing-preparation.admission.test.ts",
   "src/gateway/session-sharing-preparation.creation-settlement.test.ts",
   "src/gateway/session-sharing-preparation.test.ts",
+  "src/gateway/session-sharing.worker.test.ts",
   "src/gateway/session-startup-migration.test.ts",
   "src/gateway/session-subagent-resume.test.ts",
   "src/gateway/session-swarm-summary.test.ts",
@@ -266,6 +269,7 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/talk/relay/index.test.ts",
   "src/gateway/test-helpers.acquisition.test.ts",
   "src/gateway/tool-resolution.cron-capture.test.ts",
+  "src/gateway/tool-resolution.test.ts",
   "src/gateway/tools-invoke-authorization.test.ts",
   "src/gateway/tools-invoke-http.test.ts",
   "src/gateway/tui-session-description-wire.test.ts",
@@ -503,6 +507,7 @@ export const gatewayServerIsolatedTestFiles = [
   "src/gateway/server-close.channel-pairing.test.ts",
   "src/gateway/server-close.acp-diagnostics.test.ts",
   "src/gateway/server.chat.canonical-publication.test.ts",
+  "src/gateway/server.chat-membership-authority.product.test.ts",
   "src/gateway/server-chat.retired-projection.test.ts",
   "src/gateway/server-plugin-subagent-runtime.overrides.test.ts",
   // Loads the real plugin runtime that neighboring server tests replace with mocks.

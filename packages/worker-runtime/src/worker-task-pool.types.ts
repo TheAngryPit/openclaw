@@ -110,7 +110,8 @@ export type Task<Input, Output> = Omit<PromiseWithResolvers<Output>, "resolve"> 
   read(): RetainedOutcome<Output>;
   id: number;
   runInContext: ReturnType<typeof AsyncLocalStorage.snapshot>;
-  controller: AbortController;
+  /** Allocated when a host request exposes the task's lifetime signal. */
+  controller?: AbortController;
   exchange?: WorkerHostExchange;
   inputConsumed: boolean;
   executionNotified: boolean;
@@ -139,6 +140,8 @@ export type Slot<Input, Output> = {
   nativeSections: WorkerNativeSectionState;
   worker?: WorkerLifecycle;
   native?: RetainedNativeWorker;
+  /** Undefined until a host-declared task-protocol Worker begins construction. */
+  ready?: boolean;
   creating?: boolean;
   releaseResources?: () => Promise<void>;
   task?: Task<Input, Output>;

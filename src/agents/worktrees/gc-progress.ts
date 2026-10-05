@@ -1,8 +1,8 @@
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { OpenClawStateLeaseError } from "../../state/openclaw-state-lease.js";
+import { WorktreeRemovalContentionError } from "./errors.js";
 import { classifyWorktreeRemovalError, WorktreeBranchMovedError } from "./removal-errors.js";
-import { WorktreeRemovalContentionError } from "./run-lease-owner.js";
 import type { ManagedWorktreeGcResult } from "./types.js";
 
 const MAX_WORKTREE_GC_ISSUES = 64;
@@ -62,10 +62,6 @@ export class WorktreeGcProgress {
     const counts = this.result.protectionReasons;
     counts[reason] = (counts[reason] ?? 0) + 1;
     this.record(stage, "deferred", detail, id);
-  }
-
-  recordLimitState(satisfied: boolean, inventoryComplete = true): void {
-    this.result.limitsSatisfied = satisfied ? (inventoryComplete ? true : null) : false;
   }
 
   error(
