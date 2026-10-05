@@ -13,11 +13,19 @@ the UI tree named by `OPENCLAW_QA_UI_REPO_ROOT`; both full expected commit SHAs
 are checked. After building those clean checkouts, the workflow records a receipt
 tying the selected product commits and workflow revision to the Gateway entry,
 UI index, and UI main-asset SHA-256 digests, then passes those digests to the
-helper. The helper compares its local and Gateway-served UI bytes with the
+helper. The helper compares its local build index and local/Gateway-served main JavaScript bytes with the
 caller-provided build digests before opening the browser, and rechecks local UI
 bytes and the captured served digests after cleanup. It resolves the already-installed `playwright`
 dependency from the verified Gateway product root; the temporary QA workflow
 checkout needs no duplicate dependency installation.
+
+The Gateway legitimately prepares the served HTML index, so its digest is
+recorded separately rather than equated with the raw build index. The served
+document must reference the exact same-origin main asset identified by the
+receipt-verified local index. Main JavaScript bytes must match local and expected
+digests; the same served document URL is re-fetched after capture and must remain
+unchanged before shutdown. This proves entry asset identity and document stability,
+not complete transformed-HTML equivalence.
 
 Run each case in its own new, empty artifact directory outside both product
 checkouts. The Gateway product checkout must have its existing `playwright`

@@ -158,6 +158,10 @@ suite.define(() => {
             .poll(() => page.locator(".profile-hero").textContent())
             .not.toContain("Clipper");
           await expect.poll(() => page.locator(".community-invite-card").count()).toBe(0);
+          await expect.poll(() => page.locator(".profile-refresh").isEnabled()).toBe(true);
+          await expect
+            .poll(() => page.getByRole("textbox", { name: "Display name", exact: true }).inputValue())
+            .toBe("Test Person");
 
           const channelSection = page.locator("#settings-profile-channel-identities");
           if (expectedChannelState === "absent") {
@@ -182,6 +186,18 @@ suite.define(() => {
               fullPage: true,
               path: path.join(proofDir, "02-profile-comparison-fullpage.png"),
             });
+            await page.locator("#settings-profile-identity").scrollIntoViewIfNeeded();
+            await page.screenshot({
+              animations: "disabled",
+              path: path.join(proofDir, "03-profile-comparison-identity.png"),
+            });
+            if (expectedChannelState === "empty") {
+              await channelSection.scrollIntoViewIfNeeded();
+              await page.screenshot({
+                animations: "disabled",
+                path: path.join(proofDir, "04-profile-comparison-channel-links.png"),
+              });
+            }
           }
         },
       );

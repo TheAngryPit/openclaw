@@ -665,8 +665,12 @@ async function main() {
     }
     await waitForHealth(gateway, origin, () => Boolean(interruptedBy));
 
-    const indexResponse = await fetch(origin, { headers: { "accept-encoding": "identity" } });
-    if (!indexResponse.ok) {
+    const indexResponse = await fetch(origin, {
+      headers: { "accept-encoding": "identity" },
+      redirect: "error",
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!indexResponse.ok || !indexResponse.headers.get("content-type")?.includes("text/html")) {
       throw new Error(`Gateway UI root returned HTTP ${indexResponse.status}.`);
     }
     const servedIndex = Buffer.from(await indexResponse.arrayBuffer());
@@ -677,21 +681,33 @@ async function main() {
       localSha256: localIndexSha256,
       servedSha256: servedIndexSha256,
     };
-    if (servedIndexSha256 !== localIndexSha256) {
-      throw new Error("Gateway-served UI index does not match the selected UI checkout's build output.");
-    }
-    if (localIndexSha256 !== expectedUiIndexSha256 || servedIndexSha256 !== expectedUiIndexSha256) {
+    if (localIndexSha256 !== expectedUiIndexSha256) {
       throw new Error("The UI index does not match the caller's fresh-build SHA-256 receipt.");
     }
     const servedIndexText = servedIndex.toString("utf8");
+    const localMainScriptUrl = localIndex.toString("utf8").match(/<script\b[^>]*\bsrc=[\"']([^\"']+\.js(?:\?[^\"']*)?)[\"']/i)?.[1];
+    if (!localMainScriptUrl) {
+      throw new Error("The receipt-verified local UI index has no identifiable main JavaScript asset.");
+    }
+    const expectedMainAssetUrl = new URL(localMainScriptUrl, origin);
     const mainScriptUrl = servedIndexText.match(/<script\b[^>]*\bsrc=[\"']([^\"']+\.js(?:\?[^\"']*)?)[\"']/i)?.[1];
     if (!mainScriptUrl) {
       writeNewArtifact(resolve(artifactRoot, "served-index.html"), servedIndex);
       throw new Error("The Gateway-served UI index has no identifiable main JavaScript asset.");
     }
     const mainAssetUrl = new URL(mainScriptUrl, origin);
+    if (
+      expectedMainAssetUrl.origin !== origin ||
+      expectedMainAssetUrl.search ||
+      expectedMainAssetUrl.hash ||
+      mainAssetUrl.href !== expectedMainAssetUrl.href
+    ) {
+      throw new Error("The served UI document does not reference the expected same-origin local main asset.");
+    }
     const mainAssetResponse = await fetch(mainAssetUrl, {
       headers: { "accept-encoding": "identity" },
+      redirect: "error",
+      signal: AbortSignal.timeout(10_000),
     });
     if (!mainAssetResponse.ok) {
       throw new Error(`Gateway UI main asset returned HTTP ${mainAssetResponse.status}.`);
@@ -920,6 +936,21 @@ async function main() {
       artifactRoot,
       token,
     );
+    // The Gateway prepares HTML at serving time; compare the same served route,
+    // not that prepared document with the raw build index.
+    const finalIndexResponse = await fetch(origin, {
+      headers: { "accept-encoding": "identity" },
+      redirect: "error",
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (
+      !finalIndexResponse.ok ||
+      !finalIndexResponse.headers.get("content-type")?.includes("text/html") ||
+      sha256(Buffer.from(await finalIndexResponse.arrayBuffer())) !== servedIndexSha256
+    ) {
+      throw new Error("The Gateway-served UI document changed during the capture.");
+    }
+    uiAssetDigests.observed.index.stableAcrossCapture = true;
     result = {
       schemaVersion: 1,
       status: "passed",
@@ -1027,7 +1058,7 @@ async function main() {
     };
     if (
       localIndexAfterCleanupSha256 !== expectedUiIndexSha256 ||
-      servedIndexSha256 !== expectedUiIndexSha256 ||
+      uiAssetDigests.observed.index?.stableAcrossCapture !== true ||
       localMainAssetAfterCleanupSha256 !== expectedUiMainAssetSha256 ||
       servedMainAssetSha256 !== expectedUiMainAssetSha256
     ) {

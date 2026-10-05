@@ -254,7 +254,10 @@ jobs:
           sha256sum --check "$OPENCLAW_UI_E2E_ARTIFACT_DIR/qa-digests.txt"
           captured=0
           for proof_directory in "$OPENCLAW_UI_E2E_ARTIFACT_DIR"/profile-comparison-real-gateway-capture-*; do
-            if test -s "$proof_directory/01-profile-comparison-viewport.png" && test -s "$proof_directory/02-profile-comparison-fullpage.png"; then
+            if test -s "$proof_directory/01-profile-comparison-viewport.png" && test -s "$proof_directory/02-profile-comparison-fullpage.png" && test -s "$proof_directory/03-profile-comparison-identity.png"; then
+              if [[ "$COMPARISON_VARIANT" = candidate ]]; then
+                test -s "$proof_directory/04-profile-comparison-channel-links.png"
+              fi
               captured=1
               break
             fi
