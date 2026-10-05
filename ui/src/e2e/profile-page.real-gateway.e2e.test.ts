@@ -8,6 +8,7 @@ import { setDisplayName } from "../../../src/state/user-profile-writes.worker.ts
 import { ensureProfileForEmail } from "../../../src/state/user-profiles.ts";
 import { createOpenClawTestState } from "../../../src/test-utils/openclaw-test-state.ts";
 import { getFreePort } from "../../../src/test-utils/ports.ts";
+import { COMMUNITY_INVITE_KEY } from "../components/community-invite-state.ts";
 import { createControlUiE2eSuite } from "./control-ui-e2e-suite.test-support.ts";
 
 const suite = createControlUiE2eSuite({
@@ -131,6 +132,9 @@ suite.define(() => {
             : {}),
         },
         async ({ page }) => {
+          await page.addInitScript((key) => {
+            window.localStorage.setItem(key, JSON.stringify({ dismissedAtMs: 1770000000000 }));
+          }, COMMUNITY_INVITE_KEY);
           const url = new URL("settings/profile", suite.server.baseUrl);
           url.hash = new URLSearchParams({ gatewayUrl: gatewayUrl.href }).toString();
           const response = await page.goto(url.href);
