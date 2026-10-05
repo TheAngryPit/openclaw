@@ -43,13 +43,9 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function createContext(
-  request: GatewayRequestHandler,
-  signedIn = true,
-  multipleProfiles = true,
-) {
+function createContext(request: GatewayRequestHandler, signedIn = true, multipleProfiles = true) {
   const base = createConnectedContext(
-    createTestGatewayClient(request).request,
+    request,
     signedIn ? { id: "profile-1", name: "Ada" } : null,
   ).context;
   let snapshot: ApplicationGatewaySnapshot = {
