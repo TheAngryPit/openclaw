@@ -176,9 +176,12 @@ jobs:
 
           xcodegen_root="$RUNNER_TEMP/tailscale-native-xcodegen"
           scripts/install-xcodegen.sh "$xcodegen_root/bin"
+          scripts/install-swift-tools.sh "$xcodegen_root/bin"
           export PATH="$xcodegen_root/bin:$PATH"
           echo "$xcodegen_root/bin" >> "$GITHUB_PATH"
           [[ "$(xcodegen --version)" == "Version: 2.46.0" ]]
+          [[ "$(swiftformat --version)" == "0.63.0" ]]
+          [[ "$(swiftlint version)" == "0.65.1" ]]
 
           simslim_dir="$RUNNER_TEMP/tailscale-native-simslim"
           scripts/install-simslim.sh "$simslim_dir"
@@ -197,6 +200,7 @@ jobs:
             printf 'swift_version=%s\n' "$(swift --version | tr '\n' ';')"
             printf 'node_version=%s\npnpm_version=%s\npnpm_package_manager=%s\n' "$node_version" "$pnpm_version" "$package_manager"
             printf 'xcodegen_version=%s\nsimslim_version=%s\n' "$(xcodegen --version)" "$("$simslim_dir/simslim" --version)"
+            printf 'swiftformat_version=%s\nswiftlint_version=%s\n' "$(swiftformat --version)" "$(swiftlint version)"
             printf 'simulator_id=%s\nsimulator_device=%s\n' "$simulator_id" "$simulator_device"
             printf 'pnpm_lock_sha256=%s\n' "$(shasum -a 256 pnpm-lock.yaml | awk '{ print $1 }')"
             printf 'ios_project_spec_sha256=%s\n' "$(shasum -a 256 apps/ios/project.yml | awk '{ print $1 }')"
@@ -305,8 +309,18 @@ jobs:
           source scripts/lib/swift-toolchain.sh
           export OPENCLAW_SWIFT_TESTING_EVENT_DIAGNOSTIC_DIR="$EVIDENCE_DIR"
           swift test --help > "$EVIDENCE_DIR/swift-test-help.txt"
+          swift test --help-hidden > "$EVIDENCE_DIR/swift-test-hidden-help.txt"
           grep -Fq -- '--disable-xctest' "$EVIDENCE_DIR/swift-test-help.txt"
           grep -Fq -- '--enable-swift-testing' "$EVIDENCE_DIR/swift-test-help.txt"
+          grep -Fq -- '--test-product' "$EVIDENCE_DIR/swift-test-hidden-help.txt"
+          run_apple_command_logged "$EVIDENCE_DIR/openclawkit-selected-product-list.log" swift test \
+            --package-path apps/shared/OpenClawKit \
+            --scratch-path "$OPENCLAWKIT_SCRATCH" \
+            --skip-build \
+            --test-product OpenClawKitTests \
+            list
+          grep -Fq 'GatewayNativeTransportDeviceAuthTests' "$EVIDENCE_DIR/openclawkit-selected-product-list.log"
+          printf 'selected_swift_test_product=OpenClawKitTests\n' >> "$EVIDENCE_DIR/provenance.txt"
           run_apple_command_logged "$EVIDENCE_DIR/openclawkit-test.log" node scripts/test-macos-native.mts default \
             --package-path apps/shared/OpenClawKit \
             --scratch-path "$OPENCLAWKIT_SCRATCH" \
@@ -316,6 +330,7 @@ jobs:
             --no-parallel \
             --disable-xctest \
             --enable-swift-testing \
+            --test-product OpenClawKitTests \
             --filter GatewayNativeTransportDeviceAuthTests \
             --xunit-output="$EVIDENCE_DIR/openclawkit-native-tests.xml"
 
