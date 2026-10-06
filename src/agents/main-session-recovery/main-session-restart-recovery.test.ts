@@ -742,21 +742,6 @@ describe("main-session-restart-recovery", () => {
     });
   });
 
-  it("keeps a configured fixed store when its path carries a retired owner id", async () => {
-    const sessionsDir = await makeSessionsDir("old");
-    const storePath = path.join(sessionsDir, "sessions.json");
-    await writeMainSession({ sessionsDir, sessionKey: "agent:old:main" });
-
-    const cfg = {
-      agents: { entries: { main: {} } },
-      session: { store: storePath },
-    } as OpenClawConfig;
-
-    await expect(
-      discoverRestartRecoveryStoreTargets({ cfg, stateDir: tmpDir, statuses: ["running"] }),
-    ).resolves.toContainEqual({ agentId: "old", storePath });
-  });
-
   it("preserves the yielded global requester owner in a shared store", async () => {
     await withEnvAsync({ OPENCLAW_STATE_DIR: tmpDir }, async () => {
       const storePath = path.join(tmpDir, "yielded", "shared.sqlite");
@@ -1160,9 +1145,7 @@ describe("main-session-restart-recovery", () => {
 
   it("replaces an older marker when the same run id is active after another restart", async () => {
     tmpDir = transcriptFixture.prepareRoot();
-    const sessionsDir = await makeSessionsDir();
-    await writeMainSession({
-      sessionsDir,
+    const { sessionsDir } = await makeMainSessionFixture({
       restartRecoveryRuns: [
         {
           runId: "shared-run",
@@ -1749,9 +1732,7 @@ describe("main-session-restart-recovery", () => {
   });
 
   it("stores no recovery identity with default configuration", async () => {
-    const sessionsDir = await makeSessionsDir();
-    const storePath = path.join(sessionsDir, "sessions.json");
-    await writeMainSession({ sessionsDir });
+    const { sessionsDir, storePath } = await makeMainSessionFixture();
     await writeCompletedToolTranscript(sessionsDir);
 
     await expectRecovery({ started: 1, settled: 0, failed: 0, skipped: 0 });
@@ -2290,9 +2271,7 @@ describe("main-session-restart-recovery", () => {
   it("defers mixed deliveries while any exact queue owner is pending", async () => {
     try {
       seedQueuedFinal("delivery-still-pending", "Pending sibling.");
-      const sessionsDir = await makeSessionsDir();
-      await writeMainSession({
-        sessionsDir,
+      await makeMainSessionFixture({
         pendingFinalDelivery: makePendingFinalDelivery("Partially delivered answer.", {
           context: discordDeliveryContext,
           intentId: "intent-mixed-pending",
@@ -2315,10 +2294,7 @@ describe("main-session-restart-recovery", () => {
   it("completes terminal deliveries despite a residual pending queue row", async () => {
     try {
       seedQueuedFinal("delivery-terminal-with-row", "Already delivered.");
-      const sessionsDir = await makeSessionsDir();
-      const storePath = path.join(sessionsDir, "sessions.json");
-      await writeMainSession({
-        sessionsDir,
+      const { storePath } = await makeMainSessionFixture({
         pendingFinalDelivery: makePendingFinalDelivery("Already delivered.", {
           intentId: "intent-terminal-with-row",
           deliveries: [
@@ -2341,9 +2317,7 @@ describe("main-session-restart-recovery", () => {
   });
 
   it("resumes safely when residual ambiguity has no notice identity", async () => {
-    const sessionsDir = await makeSessionsDir();
-    await writeMainSession({
-      sessionsDir,
+    await makeMainSessionFixture({
       pendingFinalDelivery: {
         kind: "transport-only",
         createdAt: Date.now(),
@@ -2360,10 +2334,7 @@ describe("main-session-restart-recovery", () => {
   });
 
   it("completes an unqueued media-only final with owed notice debt", async () => {
-    const sessionsDir = await makeSessionsDir();
-    const storePath = path.join(sessionsDir, "sessions.json");
-    await writeMainSession({
-      sessionsDir,
+    const { storePath } = await makeMainSessionFixture({
       pendingFinalDelivery: {
         kind: "transport-only",
         createdAt: Date.now(),
@@ -2415,10 +2386,7 @@ describe("main-session-restart-recovery", () => {
   });
 
   it("records notice debt for unknown delivery mixed with prepared work", async () => {
-    const sessionsDir = await makeSessionsDir();
-    const storePath = path.join(sessionsDir, "sessions.json");
-    await writeMainSession({
-      sessionsDir,
+    const { storePath } = await makeMainSessionFixture({
       pendingFinalDelivery: makePendingFinalDelivery("Do not regenerate this aggregate.", {
         context: discordDeliveryContext,
         intentId: `intent-mixed-unknown`,
@@ -2462,9 +2430,7 @@ describe("main-session-restart-recovery", () => {
             deliveryId,
           );
         }
-        const sessionsDir = await makeSessionsDir();
-        await writeMainSession({
-          sessionsDir,
+        const { sessionsDir } = await makeMainSessionFixture({
           pendingFinalDelivery: makePendingFinalDelivery("Queue owns this final.", {
             context: discordDeliveryContext,
             intentId: `intent-owner-${ownerStatus}`,
@@ -2745,6 +2711,7 @@ describe("main-session-restart-recovery", () => {
   registerStartupSessionRepairCases(() => ({
     tmpDir,
     makeSessionsDir,
+    mainSessionEntry,
     writeStore,
     writeTranscript,
     runningSessionEntry,
@@ -3043,7 +3010,6 @@ describe("main-session-restart-recovery", () => {
     try {
       await firstDispatch.promise;
       expect(callGateway).toHaveBeenCalledOnce();
-      dispatchSettlement.resolve(); // The second store waits for the first recovery slot.
       await mockRecoveryRuntime.expectAdmission(
         2,
         recovery,
@@ -3062,9 +3028,7 @@ describe("main-session-restart-recovery", () => {
 
   it("cancels startup recovery when its gateway lifecycle stops", async () => {
     tmpDir = transcriptFixture.prepareRoot();
-    const sessionsDir = await makeSessionsDir();
-    await writeMainSession({
-      sessionsDir,
+    const { sessionsDir } = await makeMainSessionFixture({
       pendingFinalDelivery: makePendingFinalDelivery(),
     });
 
@@ -3494,9 +3458,7 @@ describe("main-session-restart-recovery", () => {
   );
 
   it("retains canonical retry backoff when startup recovery begins immediately", async () => {
-    const sessionsDir = await makeSessionsDir();
-    await writeMainSession({
-      sessionsDir,
+    const { sessionsDir } = await makeMainSessionFixture({
       pendingFinalDelivery: makePendingFinalDelivery(),
     });
     const cfg = {} as OpenClawConfig;

@@ -47,6 +47,9 @@ updates the sidebar without renaming an existing branch.
 In **Project → Browse**, keyboard focus moves to the folder path. Escape returns
 focus to **Browse**. Loading and folder errors are announced without moving focus
 away from the path field.
+Enter opens the typed path; use Up or Down first to open a highlighted folder.
+Tab completes a folder name. If the starting workspace does not exist yet, Browse
+opens the home folder. Errors for paths you enter remain visible.
 
 For connections with a durable user profile, the Gateway stores each agent's latest folder, worktree, model, thinking, and fast-mode choices. New sessions restore the last fast-mode choice, including an explicit off choice, for supported providers. The new-session picker also shows recent projects and folders derived only from sessions created by that profile. These conveniences follow the person across browsers; they do not grant access to a project or path.
 
@@ -175,6 +178,10 @@ session-section header and open its **Reorder** grip menu. Choose **Move up** or
 with the moved item, and the order uses the same saved preferences or Gateway
 group order as dragging. Home and sections derived from people, projects, or
 agents keep their existing fixed order.
+
+Page reorder grips appear in the leading gutter without moving the icon or label.
+The **Edit pinned items** pencil has its own space beside the first navigation row;
+hover or focus the navigation to reveal it. It stays visible on touch screens.
 
 To inspect Home’s subagents, open **Home** and select **Subagents**. The side panel lists ordinary child runs and opens their view-only transcripts without replacing Home. Swarm members remain in the parallel-tasks view. You can also use `/subagents list`, `/subagents info <id|#>`, or `/subagents log <id|#>`. See [Sub-agent slash command](/tools/subagents/slash-command).
 
@@ -504,6 +511,8 @@ If startup is rejected, the draft remains available to correct and retry.
 
 On an OpenClaw Chat send, the submitted text and attachments appear immediately with a **Starting** indicator while the Gateway creates or adopts the session. This is a pending submission, not a Gateway acknowledgment. If creation is rejected, your prompt and attachments remain available to correct and retry. Once creation succeeds, the UI opens the session's chat. If navigation fails, the submitted message stays visible with an **Open session** action that retries navigation without creating or sending again. A background start keeps the same visible acknowledgment above the next draft, with a link to the created session.
 
+If the model catalog is still loading, session creation stops waiting after a shared 20-second catalog deadline and reports that the session was not created. Retry shortly; your draft remains available. Closing the requesting connection or losing its authority also ends a pending catalog wait.
+
 Starting a suggested task keeps its instructions visible through acceptance, with **Task started** and **Open session** after confirmation. Interrupted acceptance remains visible, and Retry checks the same task. Skill Workshop revisions carry their submitted instructions into chat while history loads.
 
 Attributed submissions show your avatar immediately, in the same position as the chat transcript. Opening the created session focuses the composer quietly; the attention cue is reserved for navigation that prefills a draft.
@@ -557,7 +566,7 @@ checkout directory's name.
 Registering the same resolved repository root again returns its existing project ID and
 display name. Passing a different `name` does not rename an existing project.
 
-`projects.list` returns recorded projects without probing Git. Operators with
+`projects.list` returns recorded projects without checking Git. Operators with
 `operator.write` can request `{"includeObserved":true}` to discover additional
 checkouts from visible sessions and managed worktrees. Concurrent discovery of
 the same checkout set shares one bounded Git pass; subsequent requests read
