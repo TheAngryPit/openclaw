@@ -24,6 +24,7 @@ on:
           - maccli-real
           - cloudflare-native
           - tailscale-native
+          - codex-catalog-paired
       operator_variant:
         description: Explicit provenance label for matched comparisons
         required: true
@@ -2286,3 +2287,210 @@ jobs:
             ${{ runner.temp }}/tailscale-paired-qa-20261005/${{ matrix.label }}/diagnostics/failure-*/failure.public.json
           if-no-files-found: ignore
           retention-days: 7
+
+  codex-catalog-paired:
+    name: PR130115 original default shard (${{ matrix.label }})
+    if: ${{ github.repository == 'TheAngryPit/openclaw' && github.event_name == 'workflow_dispatch' && inputs.proof_kind == 'codex-catalog-paired' && inputs.candidate_sha == 'd58f658547ef92b124b6bf6f467379620de224b3' }}
+    runs-on: xcode-27
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - label: baseline
+            revision: cfc1f6b3f68256fd8b6889cdc68be61c9fdf096c
+          - label: candidate
+            revision: d58f658547ef92b124b6bf6f467379620de224b3
+    env:
+      INPUT_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      INPUT_PROOF_KIND: ${{ inputs.proof_kind }}
+      QA_LABEL: ${{ matrix.label }}
+      QA_REVISION: ${{ matrix.revision }}
+      QA_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      QA_RUN_ID: ${{ github.run_id }}
+      QA_RUN_ATTEMPT: ${{ github.run_attempt }}
+    steps:
+      - name: Validate the exact paired request before checkout
+        id: request
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = TheAngryPit/openclaw
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$INPUT_PROOF_KIND" = codex-catalog-paired
+          test "$INPUT_CANDIDATE_SHA" = d58f658547ef92b124b6bf6f467379620de224b3
+
+      - name: Checkout immutable source without persistent credentials
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: TheAngryPit/openclaw
+          ref: ${{ matrix.revision }}
+          persist-credentials: false
+
+      - name: Verify source and initialize external evidence
+        id: initialize
+        env:
+          QA_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          qa_root="$RUNNER_TEMP/pr130115-paired-native/$QA_LABEL"
+          mkdir -p "$qa_root"
+          printf 'PR130115_QA_ROOT=%s\n' "$qa_root" >> "$GITHUB_ENV"
+          {
+            printf 'expected_revision=%s\nactual_revision=' "$QA_REVISION"
+            git rev-parse HEAD
+            printf 'workflow_sha=%s\nrun_id=%s\nrun_attempt=%s\n' "$QA_WORKFLOW_SHA" "$QA_RUN_ID" "$QA_RUN_ATTEMPT"
+          } > "$qa_root/source.txt"
+          git status --porcelain --untracked-files=all > "$qa_root/status-before.txt"
+          test "$(git rev-parse HEAD)" = "$QA_REVISION"
+          test ! -s "$qa_root/status-before.txt"
+          test "$QA_RUNNER_ENVIRONMENT" = github-hosted
+          shasum -a 256 package.json pnpm-lock.yaml apps/macos/Package.swift apps/macos/Package.resolved \
+            scripts/test-macos-native.mts scripts/lib/swift-toolchain.sh .github/workflows/ci.yml \
+            apps/macos/Sources/OpenClawDiscovery/TailscaleServeGatewayDiscovery.swift \
+            apps/macos/Tests/OpenClawIPCTests/TailscaleServeGatewayDiscoveryTests.swift \
+            apps/macos/Tests/OpenClawIPCTests/DashboardHTTPFixture.swift \
+            apps/macos/Sources/OpenClaw/NodeMode/MacNodeModeCoordinator.swift \
+            apps/macos/Tests/OpenClawIPCTests/MacNodeHostWorkerTests.swift > "$qa_root/source-sha256.txt"
+          find -H /tmp -maxdepth 1 -type d -name 'oc-test-*' -print | LC_ALL=C sort > "$qa_root/native-resources-before.txt"
+
+      - name: Setup the original CI Node version
+        id: node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24.21.0"
+
+      - name: Select and record the authorized hosted toolchain
+        id: toolchain
+        env:
+          QA_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+          printf 'DEVELOPER_DIR=%s\n' "$DEVELOPER_DIR" >> "$GITHUB_ENV"
+          {
+            sw_vers
+            xcodebuild -version
+            swift --version
+            node --version
+            printf 'logical_cpus='
+            sysctl -n hw.logicalcpu
+            printf 'memory_bytes='
+            sysctl -n hw.memsize
+            printf 'architecture=%s\nrunner_environment=%s\n' "$RUNNER_ARCH" "$QA_RUNNER_ENVIRONMENT"
+          } > "$PR130115_QA_ROOT/toolchain.txt"
+          test "$(xcodebuild -version | head -n 1)" = 'Xcode 27.0'
+          test "$(node --version)" = v24.21.0
+          test "$(sysctl -n hw.logicalcpu)" -le 4
+          cat "$PR130115_QA_ROOT/toolchain.txt"
+
+      - name: Install the frozen renderer dependencies used by original CI
+        id: dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_manager="$(node -p "require('./package.json').packageManager")"
+          printf '%s\n' "$package_manager" > "$PR130115_QA_ROOT/package-manager.txt"
+          export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+          corepack enable
+          corepack prepare "$package_manager" --activate
+          pnpm --version >> "$PR130115_QA_ROOT/package-manager.txt"
+          pnpm install --frozen-lockfile --prefer-offline --optional \
+            --filter '@openclaw/mermaid-renderer...' \
+            --config.ignore-scripts=false --config.engine-strict=false \
+            --config.enable-pre-post-scripts=true --config.side-effects-cache=true \
+            > "$PR130115_QA_ROOT/dependencies.log" 2>&1
+
+      - name: Prepare exact-source Apple assets
+        id: assets
+        shell: bash
+        run: node scripts/prepare-apple-mermaid.mjs > "$PR130115_QA_ROOT/assets.log" 2>&1
+
+      - name: Build the original native tests once
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'swift build --package-path apps/macos --build-system native --enable-code-coverage --disable-index-store -Xswiftc -gline-tables-only --build-tests' > "$PR130115_QA_ROOT/build-command.txt"
+          swift build --package-path apps/macos --build-system native --enable-code-coverage \
+            --disable-index-store -Xswiftc -gline-tables-only --build-tests \
+            > "$PR130115_QA_ROOT/build.log" 2>&1
+
+      - name: Capture the built test inventory
+        id: inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          swift test list --package-path apps/macos --build-system native --enable-code-coverage \
+            --disable-index-store -Xswiftc -gline-tables-only --skip-build \
+            > "$PR130115_QA_ROOT/test-inventory.txt" 2> "$PR130115_QA_ROOT/test-inventory-stderr.txt"
+          shasum -a 256 "$PR130115_QA_ROOT/test-inventory.txt" > "$PR130115_QA_ROOT/test-inventory.sha256"
+
+      - name: Run the unchanged original default shard once
+        id: native
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s\n' 'node scripts/test-macos-native.mts default --package-path apps/macos --build-system native --enable-code-coverage --disable-index-store -Xswiftc -gline-tables-only --skip-build --experimental-maximum-parallelization-width 3 --skip "AppStateIsolationTests|ProfileChatPreferencesTests|QuickChatCatalogPresentationTests"' > "$PR130115_QA_ROOT/test-command.txt"
+          exit_code=0
+          node scripts/test-macos-native.mts default --package-path apps/macos --build-system native \
+            --enable-code-coverage --disable-index-store -Xswiftc -gline-tables-only --skip-build \
+            --experimental-maximum-parallelization-width 3 \
+            --skip 'AppStateIsolationTests|ProfileChatPreferencesTests|QuickChatCatalogPresentationTests' \
+            > "$PR130115_QA_ROOT/default.log" 2>&1 || exit_code=$?
+          printf 'native_exit=%s\n' "$exit_code" > "$PR130115_QA_ROOT/native-exit.txt"
+          tail -c 8192 "$PR130115_QA_ROOT/default.log"
+          exit "$exit_code"
+
+      - name: Record all outcomes, pristine source, counts, and launcher cleanup
+        id: receipt
+        if: always()
+        env:
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          INITIALIZE_OUTCOME: ${{ steps.initialize.outcome }}
+          NODE_OUTCOME: ${{ steps.node.outcome }}
+          TOOLCHAIN_OUTCOME: ${{ steps.toolchain.outcome }}
+          DEPENDENCIES_OUTCOME: ${{ steps.dependencies.outcome }}
+          ASSETS_OUTCOME: ${{ steps.assets.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          INVENTORY_OUTCOME: ${{ steps.inventory.outcome }}
+          NATIVE_OUTCOME: ${{ steps.native.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          qa_root="${PR130115_QA_ROOT:-$RUNNER_TEMP/pr130115-paired-native/$QA_LABEL}"
+          mkdir -p "$qa_root"
+          printf '%s\n' \
+            "checkout=$CHECKOUT_OUTCOME" "initialize=$INITIALIZE_OUTCOME" "node=$NODE_OUTCOME" \
+            "toolchain=$TOOLCHAIN_OUTCOME" "dependencies=$DEPENDENCIES_OUTCOME" "assets=$ASSETS_OUTCOME" \
+            "build=$BUILD_OUTCOME" "inventory=$INVENTORY_OUTCOME" "native=$NATIVE_OUTCOME" > "$qa_root/outcomes.txt"
+          git status --porcelain --untracked-files=all > "$qa_root/status-after.txt" 2>&1 || true
+          git diff --binary > "$qa_root/tracked-diff-after.patch" 2>&1 || true
+          find -H /tmp -maxdepth 1 -type d -name 'oc-test-*' -print | LC_ALL=C sort > "$qa_root/native-resources-after.txt"
+          if [[ -f "$qa_root/native-resources-before.txt" ]]; then
+            comm -13 "$qa_root/native-resources-before.txt" "$qa_root/native-resources-after.txt" > "$qa_root/native-resources-retained.txt"
+          fi
+          if [[ -f "$qa_root/default.log" ]]; then
+            LC_ALL=C grep -E 'Test run with [0-9]+ tests|Test run with [0-9]+ test|Executed [0-9]+ tests|recorded an issue|failed after|Swift exited 0 without valid test completion|retained resources|delete-keychain failed' \
+              "$qa_root/default.log" > "$qa_root/result-lines.txt" || true
+          fi
+          if [[ -f "$qa_root/source-sha256.txt" ]]; then
+            shasum -a 256 --check "$qa_root/source-sha256.txt" > "$qa_root/source-check-after.txt" 2>&1
+          fi
+          test "$NATIVE_OUTCOME" = success
+          test ! -s "$qa_root/status-after.txt"
+          test -f "$qa_root/native-resources-retained.txt"
+          test ! -s "$qa_root/native-resources-retained.txt"
+
+      - name: Upload paired evidence even when a phase fails
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr130115-paired-native-${{ matrix.label }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr130115-paired-native/${{ matrix.label }}
+          if-no-files-found: error
+          retention-days: 14
