@@ -1,0 +1,90 @@
+diff --git a/apps/ios/Tests/SettingsHubTests.swift b/apps/ios/Tests/SettingsHubTests.swift
+index 98f3d41..0b38d88 100644
+--- a/apps/ios/Tests/SettingsHubTests.swift
++++ b/apps/ios/Tests/SettingsHubTests.swift
+@@ -761,8 +761,23 @@ final class SettingsHubVisualProofTests: XCTestCase {
+         var originalFrame: CGRect?
+         var originalView: WKWebView?
+         var bodyText = "not evaluated"
++        let observationStart = ContinuousClock.now
++        var observedStates: [String] = []
++        var previousObservedState: String?
++        defer {
++            print("[CF-QA-NAV] navigation: \(observedStates.joined(separator: " | "))")
++            print("[CF-QA-NAV] fixture: \(fixture.diagnosticEvents.joined(separator: " | "))")
++        }
+         do {
+             try await waitForDashboardCondition {
++                let observedView = Self.findWebView(in: controller.view)
++                let observedState = "view=\(observedView != nil); loading=\(observedView?.isLoading == true); " +
++                    "fixtureURL=\(observedView?.url == fixtureURL); progress=\(observedView?.estimatedProgress ?? 0); " +
++                    "scene=\(scene.activationState.rawValue)"
++                if observedState != previousObservedState, observedStates.count < 32 {
++                    observedStates.append("\(observationStart.duration(to: .now)): \(observedState)")
++                    previousObservedState = observedState
++                }
+                 guard let webView = Self.findWebView(in: controller.view) else { return false }
+                 return webView.url == fixtureURL && !webView.isLoading
+             }
+@@ -799,6 +814,8 @@ final class SettingsHubVisualProofTests: XCTestCase {
+                 "url=\(currentView?.url?.absoluteString ?? "nil")",
+                 "loading=\(currentView?.isLoading == true)",
+                 "HTTP requests=\(fixture.requestCount)",
++                "navigation observations=\(observedStates.joined(separator: " | "))",
++                "fixture observations=\(fixture.diagnosticEvents.joined(separator: " | "))",
+                 "body=\(bodyText.prefix(300))",
+             ].joined(separator: "; ")
+             try? await self.attach(controller.view, named: "settings-older-dashboard-native-banner-failure")
+@@ -843,6 +860,13 @@ private final class SettingsHubHTTPFixture {
+     private var clients: [UUID: Client] = [:]
+     private var stopped = false
+     private(set) var requestCount = 0
++    private(set) var diagnosticEvents: [String] = []
++    private let observationStart = ContinuousClock.now
++
++    private func observe(_ event: String) {
++        guard self.diagnosticEvents.count < 32 else { return }
++        self.diagnosticEvents.append("\(self.observationStart.duration(to: .now)): \(event)")
++    }
+ 
+     init(html: String) throws {
+         let parameters = NWParameters.tcp
+@@ -853,12 +877,14 @@ private final class SettingsHubHTTPFixture {
+             "Content-Length: \(body.count)\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+         self.response = Data(header.utf8) + body
+         self.listener.newConnectionHandler = { [weak self] connection in
++            let acceptedAt = ContinuousClock.now
+             Task { @MainActor [weak self] in
+                 guard let self, !self.stopped, self.clients.count < 8 else {
+                     connection.cancel()
+                     return
+                 }
+                 let id = UUID()
++                self.observe("accepted; actorDeliveryDelay=\(acceptedAt.duration(to: .now))")
+                 self.clients[id] = Client(connection: connection)
+                 connection.start(queue: .main)
+                 self.receive(id)
+@@ -878,6 +904,7 @@ private final class SettingsHubHTTPFixture {
+             throw error
+         }
+         let port = try XCTUnwrap(listener.port)
++        self.observe("listener ready")
+         return try XCTUnwrap(URL(string: "http://127.0.0.1:\(port.rawValue)/settings"))
+     }
+ 
+@@ -898,10 +925,14 @@ private final class SettingsHubHTTPFixture {
+                 guard let self, var client = self.clients[id] else { return }
+                 if let data {
+                     client.request.append(data)
++                    self.observe("received bytes=\(data.count); total=\(client.request.count)")
+                 }
++                if let error { self.observe("receive error=\(error)") }
++                if complete { self.observe("receive complete") }
+                 self.clients[id] = client
+                 if client.request.range(of: Data("\r\n\r\n".utf8)) != nil {
+                     self.requestCount += 1
++                    self.observe("complete HTTP headers")
+                     client.connection.send(content: self.response, completion: .contentProcessed { [weak self] _ in
+                         Task { @MainActor [weak self] in self?.close(id) }
+                     })
+

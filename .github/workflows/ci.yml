@@ -828,6 +828,34 @@ jobs:
           git status --porcelain --untracked-files=all > "$EVIDENCE_DIR/source-after-generation.txt"
           [[ ! -s "$EVIDENCE_DIR/source-after-generation.txt" ]]
 
+      - name: Apply the reviewed synthetic navigation observation overlay
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SOURCE_SHA" ]]
+          git diff --quiet "$EXPECTED_SOURCE_SHA" --
+          git diff --cached --quiet "$EXPECTED_SOURCE_SHA" --
+          [[ -z "$(git status --porcelain --untracked-files=all)" ]]
+          target=apps/ios/Tests/SettingsHubTests.swift
+          patch_path="$QA_TOOLING_DIR/qa/cloudflare-native-completion-20261006/navigation-observation.patch"
+          [[ "$(shasum -a 256 "$target" | awk '{ print $1 }')" == e04f2523419e67ee34ba8dc814ec4fa53cabf5a3eca230597de07fc245a37451 ]]
+          [[ "$(shasum -a 256 "$patch_path" | awk '{ print $1 }')" == 653d63c938eeca147ba599872aba55f11f767b481c6f1602b27bbddfaada7043 ]]
+          git apply --check "$patch_path"
+          git apply "$patch_path"
+          [[ "$(git status --porcelain --untracked-files=all)" == " M $target" ]]
+          git diff --cached --quiet
+          [[ "$(shasum -a 256 "$target" | awk '{ print $1 }')" == defa9ec3476c0bfb3f6246cdc0c2b8a940c01600b055a5bf46ea06765f4e960e ]]
+          git diff --binary --no-ext-diff -- "$target" > "$EVIDENCE_DIR/navigation-overlay.applied.patch"
+          cp "$patch_path" "$EVIDENCE_DIR/navigation-observation.patch"
+          {
+            echo 'proof_kind=cloudflare-navigation-instrumented'
+            echo 'instrumentation_is_product_repair=false'
+            echo 'instrumented_pass_proves_original_timing=false'
+            echo 'navigation_overlay_base_sha256=e04f2523419e67ee34ba8dc814ec4fa53cabf5a3eca230597de07fc245a37451'
+            echo 'navigation_overlay_patch_sha256=653d63c938eeca147ba599872aba55f11f767b481c6f1602b27bbddfaada7043'
+            echo 'navigation_overlay_target_sha256=defa9ec3476c0bfb3f6246cdc0c2b8a940c01600b055a5bf46ea06765f4e960e'
+          } >> "$EVIDENCE_DIR/preflight.txt"
+          echo 'CF_NAVIGATION_OVERLAY_APPLIED=true' >> "$GITHUB_ENV"
+
       - name: Build selected Cloudflare and ingress test products
         run: |
           set -euo pipefail
@@ -1025,6 +1053,20 @@ jobs:
           grep -Fqx "qa_verifier_sha256=$qa_verifier_sha256" "$EVIDENCE_DIR/preflight.txt"
           git -C "$QA_TOOLING_DIR" status --porcelain --untracked-files=all > "$EVIDENCE_DIR/qa-tooling-final-status.txt"
           [[ ! -s "$EVIDENCE_DIR/qa-tooling-final-status.txt" ]]
+          if [[ "${CF_NAVIGATION_OVERLAY_APPLIED:-false}" == true ]]; then
+            target=apps/ios/Tests/SettingsHubTests.swift
+            [[ "$(git status --porcelain --untracked-files=all)" == " M $target" ]]
+            git diff --cached --quiet "$EXPECTED_SOURCE_SHA" --
+            [[ "$(shasum -a 256 "$target" | awk '{ print $1 }')" == defa9ec3476c0bfb3f6246cdc0c2b8a940c01600b055a5bf46ea06765f4e960e ]]
+            git diff --binary --no-ext-diff -- "$target" > "$EVIDENCE_DIR/navigation-overlay.final.patch"
+            cmp -s "$EVIDENCE_DIR/navigation-overlay.applied.patch" "$EVIDENCE_DIR/navigation-overlay.final.patch"
+            patch_path="$QA_TOOLING_DIR/qa/cloudflare-native-completion-20261006/navigation-observation.patch"
+            [[ "$(shasum -a 256 "$patch_path" | awk '{ print $1 }')" == 653d63c938eeca147ba599872aba55f11f767b481c6f1602b27bbddfaada7043 ]]
+            git apply --reverse --check "$patch_path"
+            git apply --reverse "$patch_path"
+            [[ "$(shasum -a 256 "$target" | awk '{ print $1 }')" == e04f2523419e67ee34ba8dc814ec4fa53cabf5a3eca230597de07fc245a37451 ]]
+            echo 'navigation_overlay_cleanup=verified-original-source-restored' >> "$EVIDENCE_DIR/preflight.txt"
+          fi
           git diff --quiet "$EXPECTED_SOURCE_SHA" --
           git diff --cached --quiet "$EXPECTED_SOURCE_SHA" --
           mkdir -p "$EVIDENCE_DIR"
