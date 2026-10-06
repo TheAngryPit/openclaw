@@ -604,7 +604,7 @@ jobs:
     env:
       CI: "true"
       INPUT_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-      EXPECTED_SOURCE_SHA: 7c51cbbddaba415e905d58c016612a0972130235
+      EXPECTED_SOURCE_SHA: c6da5f742bdb0e850e023216af9c4ad5e140357e
       EXPECTED_XCTEST_ID: SettingsHubVisualProofTests/testIngressAuthorizedDashboardEntryPointsLoadTheSelectedGatewayPage()
       SELECTED_TEST: OpenClawTests/SettingsHubVisualProofTests/testIngressAuthorizedDashboardEntryPointsLoadTheSelectedGatewayPage
       QA_TOOLING_DIR: ${{ github.workspace }}/apps/ios/build/cloudflare-qa-tools-${{ github.run_id }}-${{ github.run_attempt }}
@@ -616,7 +616,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TheAngryPit/openclaw
-          ref: 7c51cbbddaba415e905d58c016612a0972130235
+          ref: c6da5f742bdb0e850e023216af9c4ad5e140357e
           fetch-depth: 1
           persist-credentials: false
           submodules: false
