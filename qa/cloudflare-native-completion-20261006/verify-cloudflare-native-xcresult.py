@@ -9,7 +9,7 @@ import subprocess
 import sys
 
 
-EXPECTED_SOURCE = "c6da5f742bdb0e850e023216af9c4ad5e140357e"
+EXPECTED_SOURCE = "3c07fe17649715937b822ea0e1ed9cabd8c7c5ad"
 REQUIRED_SUITES = {
     "CloudflareAccessClientTests",
     "CloudflareAccessBrowserPresenterTests",

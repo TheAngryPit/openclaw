@@ -2,7 +2,7 @@
 
 This directory contains the xcresult verifier used by the secretless
 `cloudflare-native` workflow job. The job pins product source to
-`TheAngryPit/openclaw@c6da5f742bdb0e850e023216af9c4ad5e140357e` and checks out
+`TheAngryPit/openclaw@3c07fe17649715937b822ea0e1ed9cabd8c7c5ad` and checks out
 this verifier from the workflow commit recorded by `github.workflow_sha`.
 
 ## Coverage and limits
