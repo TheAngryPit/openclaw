@@ -1,0 +1,75 @@
+diff --git a/apps/macos/Sources/OpenClaw/TalkMLXSpeechSynthesizer.swift b/apps/macos/Sources/OpenClaw/TalkMLXSpeechSynthesizer.swift
+index f73e297..b2b56b9 100644
+--- a/apps/macos/Sources/OpenClaw/TalkMLXSpeechSynthesizer.swift
++++ b/apps/macos/Sources/OpenClaw/TalkMLXSpeechSynthesizer.swift
+@@ -1 +1,2 @@
++import Darwin
+ import Dispatch
+@@ -175,2 +176,8 @@ actor TalkMLXSpeechSynthesizer {
+         let activeID = self.activeID
++        if ProcessInfo.processInfo.environment["OPENCLAW_MLX_TTS_PID_FILE"] != nil {
++            let observation = #"[pr130115-mlx-trace] {"event":"shutdown.capture","transport":\#(transport != nil),"active":\#(activeID != nil)}"# + "\n"
++            observation.withCString { buffer in
++                _ = Darwin.write(STDOUT_FILENO, buffer, observation.utf8.count)
++            }
++        }
+         self.transport = nil
+@@ -191,2 +198,9 @@ actor TalkMLXSpeechSynthesizer {
+         let transport = try await transportFactory()
++        let traceSyntheticHelper = ProcessInfo.processInfo.environment["OPENCLAW_MLX_TTS_PID_FILE"] != nil
++        if traceSyntheticHelper {
++            let observation = #"[pr130115-mlx-trace] {"event":"factory.returned","current":\#(self.activeID == id && self.cancelRequestedID != id)}"# + "\n"
++            observation.withCString { buffer in
++                _ = Darwin.write(STDOUT_FILENO, buffer, observation.utf8.count)
++            }
++        }
+         // A factory can complete after shutdown has admitted another request.
+@@ -199,2 +213,8 @@ actor TalkMLXSpeechSynthesizer {
+         self.transport = transport
++        if traceSyntheticHelper {
++            let observation = #"[pr130115-mlx-trace] {"event":"transport.published"}"# + "\n"
++            observation.withCString { buffer in
++                _ = Darwin.write(STDOUT_FILENO, buffer, observation.utf8.count)
++            }
++        }
+         do {
+@@ -560,3 +580,18 @@ private actor ProcessMLXTTSTransport: MLXTTSTransport {
+     func close() async {
+-        guard !self.isClosed else { return }
++        let traceSyntheticHelper = ProcessInfo.processInfo.environment["OPENCLAW_MLX_TTS_PID_FILE"] != nil
++        if traceSyntheticHelper {
++            let observation = #"[pr130115-mlx-trace] {"event":"close.enter","already":\#(self.isClosed)}"# + "\n"
++            observation.withCString { buffer in
++                _ = Darwin.write(STDOUT_FILENO, buffer, observation.utf8.count)
++            }
++        }
++        guard !self.isClosed else {
++            if traceSyntheticHelper {
++                let observation = #"[pr130115-mlx-trace] {"event":"close.already-closing-return"}"# + "\n"
++                observation.withCString { buffer in
++                    _ = Darwin.write(STDOUT_FILENO, buffer, observation.utf8.count)
++                }
++            }
++            return
++        }
+         self.isClosed = true
+@@ -566,2 +601,8 @@ private actor ProcessMLXTTSTransport: MLXTTSTransport {
+         await self.process.terminate()
++        if traceSyntheticHelper {
++            let observation = #"[pr130115-mlx-trace] {"event":"process.await-completed"}"# + "\n"
++            observation.withCString { buffer in
++                _ = Darwin.write(STDOUT_FILENO, buffer, observation.utf8.count)
++            }
++        }
+         await self.output.finish()
+diff --git a/apps/macos/Tests/OpenClawIPCTests/TalkMLXSpeechSynthesizerTests.swift b/apps/macos/Tests/OpenClawIPCTests/TalkMLXSpeechSynthesizerTests.swift
+index 376f117..d2282db 100644
+--- a/apps/macos/Tests/OpenClawIPCTests/TalkMLXSpeechSynthesizerTests.swift
++++ b/apps/macos/Tests/OpenClawIPCTests/TalkMLXSpeechSynthesizerTests.swift
+@@ -46,2 +46,6 @@ struct TalkMLXSpeechSynthesizerTests {
+                 timeout: .milliseconds(100))
++            let observation = #"[pr130115-mlx-trace] {"event":"helper.gone-sample","gone":\#(helperWasReaped)}"# + "\n"
++            observation.withCString { buffer in
++                _ = Darwin.write(STDOUT_FILENO, buffer, observation.utf8.count)
++            }
+             if !helperWasReaped {
