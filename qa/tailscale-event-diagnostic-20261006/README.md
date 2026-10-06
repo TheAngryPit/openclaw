@@ -26,4 +26,10 @@ The observed result must remain split by platform. The macOS guard can fail whil
 - Missing/out-of-scope/symlink evidence directory, absent event file, or output collision: requested diagnostic export fails closed without overwriting.
 - Opt-in variable absent: existing launcher behavior and cleanup are unchanged.
 
-Static tests only are in scope here. No launcher, product source, or hook is executed locally. Native event chronology remains unproven until a public GitHub-hosted run uploads the JSONL.
+No launcher, product source, or hook is executed locally. The original diagnostic was checked statically; the hosted run below now provides the retained event chronology, without establishing the cause of the empty run.
+
+## Follow-up after the captured failure
+
+Run 37427510239 retained a valid schema-6.3.0 stream with two complete runs: an empty start/end at lines 1/2 followed by the selected seven-test start/end at lines 11/38. The unchanged single-run completion guard rejected the second start. The next QA invocation selects Swift Testing explicitly with the supported `--disable-xctest --enable-swift-testing` options because the pinned suite uses `import Testing`; it still requires the original completion guard and all seven distinct xUnit cases to pass. This caller change is not yet a proven fix until the next hosted run confirms the chronology and test identities.
+
+That run's iOS build separately failed with `Missing pinned Watch toolchain`. The workflow now installs the toolchain declared in `OpenClawWatchRTC/rust-toolchain.toml` with `rust-src`, using the existing canonical CI setup. iOS build admission requires that prerequisite to succeed. No Watch target, product assertion, or failure status is disabled, and the Cloudflare job's already-correct Rust setup is unchanged.

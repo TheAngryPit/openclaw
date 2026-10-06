@@ -240,6 +240,18 @@ jobs:
           git status --porcelain --untracked-files=all > "$EVIDENCE_DIR/source-status-after-generation.txt"
           [[ ! -s "$EVIDENCE_DIR/source-status-after-generation.txt" ]]
 
+      - name: Install the source-pinned Watch Rust toolchain
+        id: watch-toolchain
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          watch_toolchain="$(awk -F '"' '/^channel =/ { print $2; exit }' apps/shared/OpenClawWatchRTC/rust-toolchain.toml)"
+          test -n "$watch_toolchain"
+          rustup toolchain install "$watch_toolchain" --profile minimal --component rust-src
+          rustup run "$watch_toolchain" rustc -vV > "$EVIDENCE_DIR/watch-rust-toolchain.txt"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          printf 'watch_rust_toolchain=%s\n' "$watch_toolchain" >> "$EVIDENCE_DIR/provenance.txt"
+
       - name: Apply the reviewed observational launcher overlay
         id: native-diagnostic-overlay
         run: |
@@ -292,6 +304,9 @@ jobs:
           set -euo pipefail
           source scripts/lib/swift-toolchain.sh
           export OPENCLAW_SWIFT_TESTING_EVENT_DIAGNOSTIC_DIR="$EVIDENCE_DIR"
+          swift test --help > "$EVIDENCE_DIR/swift-test-help.txt"
+          grep -Fq -- '--disable-xctest' "$EVIDENCE_DIR/swift-test-help.txt"
+          grep -Fq -- '--enable-swift-testing' "$EVIDENCE_DIR/swift-test-help.txt"
           run_apple_command_logged "$EVIDENCE_DIR/openclawkit-test.log" node scripts/test-macos-native.mts default \
             --package-path apps/shared/OpenClawKit \
             --scratch-path "$OPENCLAWKIT_SCRATCH" \
@@ -299,6 +314,8 @@ jobs:
             -Xswiftc -gline-tables-only \
             --skip-build \
             --no-parallel \
+            --disable-xctest \
+            --enable-swift-testing \
             --filter GatewayNativeTransportDeviceAuthTests \
             --xunit-output="$EVIDENCE_DIR/openclawkit-native-tests.xml"
 
@@ -336,6 +353,8 @@ jobs:
 
           if not identities:
               raise SystemExit("SwiftPM xUnit report contains zero executed native test cases")
+          if len(identities) != 7 or len(set(identities)) != 7:
+              raise SystemExit("Pinned GatewayNativeTransportDeviceAuthTests must execute all seven distinct cases")
           if failures or skipped:
               raise SystemExit(f"Native test failures={failures}; skipped={skipped}")
 
@@ -357,7 +376,7 @@ jobs:
 
       - name: Build the three selected iOS test suites once
         id: ios-build
-        if: ${{ always() && !cancelled() && steps.ios-preparation-gate.outcome == 'success' }}
+        if: ${{ always() && !cancelled() && steps.ios-preparation-gate.outcome == 'success' && steps.watch-toolchain.outcome == 'success' }}
         run: |
           set -euo pipefail
           source scripts/lib/swift-toolchain.sh
