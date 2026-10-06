@@ -406,7 +406,11 @@ jobs:
             -only-testing:OpenClawTests/GatewayConnectionControllerTests \
             -only-testing:OpenClawTests/GatewaySettingsStoreTests \
             -showBuildTimingSummary \
-            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_IDENTITY=- \
+            CODE_SIGN_STYLE=Manual \
+            PROVISIONING_PROFILE= \
+            PROVISIONING_PROFILE_SPECIFIER= \
             build-for-testing
 
       - name: Run the selected iOS suites serially on the recorded simulator
@@ -427,7 +431,11 @@ jobs:
             -only-testing:OpenClawTests/PersonalGatewayAuthenticationTests \
             -only-testing:OpenClawTests/GatewayConnectionControllerTests \
             -only-testing:OpenClawTests/GatewaySettingsStoreTests \
-            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_IDENTITY=- \
+            CODE_SIGN_STYLE=Manual \
+            PROVISIONING_PROFILE= \
+            PROVISIONING_PROFILE_SPECIFIER= \
             test-without-building
 
       - name: Require all three iOS suites to pass with structured positive counts
