@@ -56,6 +56,7 @@ jobs:
       INPUT_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
       WORKFLOW_SHA: ${{ github.workflow_sha }}
       WORKFLOW_REF: ${{ github.workflow_ref }}
+      QA_TOOLING_DIR: ${{ github.workspace }}/apps/ios/build/tailscale-qa-tools-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
       - name: Validate the exact request and public hosted macOS runner
@@ -103,6 +104,34 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
           submodules: false
+
+      - name: Checkout the exact QA workflow revision for diagnostic provenance
+        id: checkout-workflow
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.workflow_sha }}
+          path: apps/ios/build/tailscale-qa-tools-${{ github.run_id }}-${{ github.run_attempt }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+          sparse-checkout: |
+            qa/tailscale-event-diagnostic-20261006
+          sparse-checkout-cone-mode: true
+
+      - name: Verify diagnostic patch provenance
+        id: verify-diagnostic-patch
+        run: |
+          set -euo pipefail
+          workflow_source_sha="$(git -C "$QA_TOOLING_DIR" rev-parse HEAD)"
+          [[ "$workflow_source_sha" == "$WORKFLOW_SHA" ]]
+          patch_path="$QA_TOOLING_DIR/qa/tailscale-event-diagnostic-20261006/tooling/launcher-event-stream-diagnostic.patch"
+          test -f "$patch_path"
+          cp "$patch_path" "$EVIDENCE_DIR/launcher-event-stream-diagnostic.patch"
+          patch_sha256="$(shasum -a 256 "$EVIDENCE_DIR/launcher-event-stream-diagnostic.patch" | awk '{ print $1 }')"
+          [[ "$patch_sha256" == "69c6190ff796f4f8159aff76ce557153f6549c0a2dd2c74fd72c4786ba77ce42" ]]
+          printf 'diagnostic_workflow_source_sha=%s\ndiagnostic_patch_sha256=%s\n' \
+            "$workflow_source_sha" "$patch_sha256" >> "$EVIDENCE_DIR/provenance.txt"
 
       - name: Verify source identity and clean checkout
         run: |
@@ -199,6 +228,7 @@ jobs:
           printf 'mermaid_resources_file_count=%s\n' "$resource_count" >> "$EVIDENCE_DIR/provenance.txt"
 
       - name: Generate the iOS Xcode project from the pinned source
+        id: ios-preparation-gate
         run: |
           set -euo pipefail
           source scripts/lib/swift-toolchain.sh
@@ -209,6 +239,41 @@ jobs:
           git diff --cached --quiet "$EXPECTED_SOURCE_SHA" --
           git status --porcelain --untracked-files=all > "$EVIDENCE_DIR/source-status-after-generation.txt"
           [[ ! -s "$EVIDENCE_DIR/source-status-after-generation.txt" ]]
+
+      - name: Apply the reviewed observational launcher overlay
+        id: native-diagnostic-overlay
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SOURCE_SHA" ]]
+          git diff --quiet "$EXPECTED_SOURCE_SHA" --
+          git diff --cached --quiet "$EXPECTED_SOURCE_SHA" --
+          [[ -z "$(git status --porcelain --untracked-files=all)" ]]
+          base_launcher_sha256="$(shasum -a 256 scripts/test-macos-native.mts | awk '{ print $1 }')"
+          [[ "$base_launcher_sha256" == "dacb9fad271e9ed0438dbf8d58a9c80e072f55533eff863db0f572a2684c065f" ]]
+          patch_path="$EVIDENCE_DIR/launcher-event-stream-diagnostic.patch"
+          patch_sha256="$(shasum -a 256 "$patch_path" | awk '{ print $1 }')"
+          [[ "$patch_sha256" == "69c6190ff796f4f8159aff76ce557153f6549c0a2dd2c74fd72c4786ba77ce42" ]]
+          git apply --check "$patch_path"
+          git apply "$patch_path"
+          [[ "$(git diff --name-only)" == "scripts/test-macos-native.mts" ]]
+          git diff --cached --quiet
+          [[ "$(git status --porcelain --untracked-files=all)" == " M scripts/test-macos-native.mts" ]]
+          git diff --binary --no-ext-diff -- scripts/test-macos-native.mts \
+            > "$EVIDENCE_DIR/launcher-overlay.applied.patch"
+          launcher_sha256="$(shasum -a 256 scripts/test-macos-native.mts | awk '{ print $1 }')"
+          overlay_diff_sha256="$(shasum -a 256 "$EVIDENCE_DIR/launcher-overlay.applied.patch" | awk '{ print $1 }')"
+          {
+            printf 'diagnostic_overlay_base_source_sha=%s\n' "$EXPECTED_SOURCE_SHA"
+            printf 'diagnostic_overlay_base_launcher_sha256=%s\n' "$base_launcher_sha256"
+            printf 'diagnostic_overlay_patch_sha256=%s\n' "$patch_sha256"
+            printf 'diagnostic_overlay_launcher_sha256=%s\n' "$launcher_sha256"
+            printf 'diagnostic_overlay_diff_sha256=%s\n' "$overlay_diff_sha256"
+          } >> "$EVIDENCE_DIR/provenance.txt"
+          {
+            printf 'DIAGNOSTIC_OVERLAY_APPLIED=true\n'
+            printf 'DIAGNOSTIC_OVERLAY_LAUNCHER_SHA256=%s\n' "$launcher_sha256"
+            printf 'DIAGNOSTIC_OVERLAY_DIFF_SHA256=%s\n' "$overlay_diff_sha256"
+          } >> "$GITHUB_ENV"
 
       - name: Build the native OpenClawKit test product once
         run: |
@@ -226,6 +291,7 @@ jobs:
         run: |
           set -euo pipefail
           source scripts/lib/swift-toolchain.sh
+          export OPENCLAW_SWIFT_TESTING_EVENT_DIAGNOSTIC_DIR="$EVIDENCE_DIR"
           run_apple_command_logged "$EVIDENCE_DIR/openclawkit-test.log" node scripts/test-macos-native.mts default \
             --package-path apps/shared/OpenClawKit \
             --scratch-path "$OPENCLAWKIT_SCRATCH" \
@@ -290,6 +356,8 @@ jobs:
           cat "$EVIDENCE_DIR/openclawkit-native-summary.json" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Build the three selected iOS test suites once
+        id: ios-build
+        if: ${{ always() && !cancelled() && steps.ios-preparation-gate.outcome == 'success' }}
         run: |
           set -euo pipefail
           source scripts/lib/swift-toolchain.sh
@@ -309,6 +377,7 @@ jobs:
 
       - name: Run the selected iOS suites serially on the recorded simulator
         id: ios-test
+        if: ${{ always() && !cancelled() && steps.ios-preparation-gate.outcome == 'success' && steps.ios-build.outcome == 'success' }}
         run: |
           set -euo pipefail
           source scripts/lib/swift-toolchain.sh
@@ -422,13 +491,32 @@ jobs:
           set -euo pipefail
           actual_sha="$(git rev-parse HEAD)"
           [[ "$actual_sha" == "$EXPECTED_SOURCE_SHA" ]]
-          git diff --quiet "$EXPECTED_SOURCE_SHA" --
           git diff --cached --quiet "$EXPECTED_SOURCE_SHA" --
           git status --porcelain --untracked-files=all > "$EVIDENCE_DIR/source-status-final.txt"
-          [[ ! -s "$EVIDENCE_DIR/source-status-final.txt" ]]
+          if [[ "${DIAGNOSTIC_OVERLAY_APPLIED:-false}" == "true" ]]; then
+            [[ "$(git status --porcelain --untracked-files=all)" == " M scripts/test-macos-native.mts" ]]
+            [[ "$(git diff --name-only)" == "scripts/test-macos-native.mts" ]]
+            git diff --binary --no-ext-diff -- scripts/test-macos-native.mts \
+              > "$EVIDENCE_DIR/launcher-overlay.final.patch"
+            final_launcher_sha256="$(shasum -a 256 scripts/test-macos-native.mts | awk '{ print $1 }')"
+            final_overlay_diff_sha256="$(shasum -a 256 "$EVIDENCE_DIR/launcher-overlay.final.patch" | awk '{ print $1 }')"
+            [[ "$final_launcher_sha256" == "$DIAGNOSTIC_OVERLAY_LAUNCHER_SHA256" ]]
+            [[ "$final_overlay_diff_sha256" == "$DIAGNOSTIC_OVERLAY_DIFF_SHA256" ]]
+            cmp -s "$EVIDENCE_DIR/launcher-overlay.applied.patch" "$EVIDENCE_DIR/launcher-overlay.final.patch"
+            source_status_after=diagnostic-overlay-only
+            printf 'diagnostic_overlay_final_launcher_sha256=%s\n' "$final_launcher_sha256" >> "$EVIDENCE_DIR/provenance.txt"
+            printf 'diagnostic_overlay_final_diff_sha256=%s\n' "$final_overlay_diff_sha256" >> "$EVIDENCE_DIR/provenance.txt"
+          else
+            git diff --quiet "$EXPECTED_SOURCE_SHA" --
+            [[ ! -s "$EVIDENCE_DIR/source-status-final.txt" ]]
+            source_status_after=clean-no-overlay
+          fi
           {
             echo "source_sha_after=$actual_sha"
-            echo "source_status_after=clean"
+            echo "source_status_after=$source_status_after"
+            printf 'native_macos_test_outcome=%s\n' '${{ steps.native-urlsession-test.outcome }}'
+            printf 'ios_build_outcome=%s\nios_test_outcome=%s\n' \
+              '${{ steps.ios-build.outcome }}' '${{ steps.ios-test.outcome }}'
           } >> "$EVIDENCE_DIR/provenance.txt"
           shasum -a 256 \
             .github/actions/setup-node-env/action.yml \
@@ -467,12 +555,12 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
   cloudflare-native:
-    name: Ingress-authorized dashboard entrypoints (iOS simulator)
+    name: Cloudflare native auth and dashboard QA (iOS simulator)
     if: ${{ github.repository == 'TheAngryPit/openclaw' && github.event_name == 'workflow_dispatch' && inputs.proof_kind == 'cloudflare-native' }}
     runs-on: xcode-27
     timeout-minutes: 150
     concurrency:
-      group: cloudflare-pr158051-native-entrypoint
+      group: cloudflare-pr158051-native-completion
       cancel-in-progress: false
     permissions:
       contents: read
@@ -485,6 +573,9 @@ jobs:
       EXPECTED_SOURCE_SHA: 7c51cbbddaba415e905d58c016612a0972130235
       EXPECTED_XCTEST_ID: SettingsHubVisualProofTests/testIngressAuthorizedDashboardEntryPointsLoadTheSelectedGatewayPage()
       SELECTED_TEST: OpenClawTests/SettingsHubVisualProofTests/testIngressAuthorizedDashboardEntryPointsLoadTheSelectedGatewayPage
+      QA_TOOLING_DIR: ${{ github.workspace }}/apps/ios/build/cloudflare-qa-tools-${{ github.run_id }}-${{ github.run_attempt }}
+      QA_VERIFIER_PATH: ${{ github.workspace }}/apps/ios/build/cloudflare-qa-tools-${{ github.run_id }}-${{ github.run_attempt }}/qa/cloudflare-native-completion-20261006/verify-cloudflare-native-xcresult.py
+      RESTART_RESULT_ROOT: ${{ github.workspace }}/apps/ios/build/LifecycleTestResults
     steps:
       - name: Checkout immutable public fork source
         id: checkout-source
@@ -495,6 +586,19 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
           submodules: false
+
+      - name: Checkout the exact workflow revision for QA verifier provenance
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.workflow_sha }}
+          path: apps/ios/build/cloudflare-qa-tools-${{ github.run_id }}-${{ github.run_attempt }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+          sparse-checkout: |
+            qa/cloudflare-native-completion-20261006
+          sparse-checkout-cone-mode: true
 
       - name: Verify target and start evidence receipt
         run: |
@@ -509,9 +613,19 @@ jobs:
           [[ -z "$(git status --porcelain --untracked-files=all)" ]]
           EVIDENCE_DIR="$RUNNER_TEMP/openclaw-cloudflare-pr158051-evidence"
           RESULT_BUNDLE="$RUNNER_TEMP/openclaw-cloudflare-pr158051.xcresult"
-          DERIVED_DATA="$RUNNER_TEMP/openclaw-cloudflare-pr158051-derived"
-          printf 'EVIDENCE_DIR=%s\nRESULT_BUNDLE=%s\nDERIVED_DATA=%s\n' "$EVIDENCE_DIR" "$RESULT_BUNDLE" "$DERIVED_DATA" >> "$GITHUB_ENV"
+          SUITE_RESULT_BUNDLE="$RUNNER_TEMP/openclaw-cloudflare-pr158051-suites.xcresult"
+          RESTART_LOG="$EVIDENCE_DIR/access-restart.log"
+          [[ ! -e "$EVIDENCE_DIR" && ! -e "$RESULT_BUNDLE" && ! -e "$SUITE_RESULT_BUNDLE" ]]
+          qa_workflow_sha="$(git -C "$QA_TOOLING_DIR" rev-parse --verify HEAD)"
+          [[ "$qa_workflow_sha" == "$GITHUB_WORKFLOW_SHA" ]]
+          git -C "$QA_TOOLING_DIR" status --porcelain --untracked-files=all > "$RUNNER_TEMP/cloudflare-qa-tool-status.txt"
+          [[ ! -s "$RUNNER_TEMP/cloudflare-qa-tool-status.txt" ]]
+          test -f "$QA_VERIFIER_PATH"
+          qa_verifier_sha256="$(shasum -a 256 "$QA_VERIFIER_PATH" | awk '{ print $1 }')"
+          printf 'EVIDENCE_DIR=%s\nRESULT_BUNDLE=%s\nSUITE_RESULT_BUNDLE=%s\nRESTART_LOG=%s\n' \
+            "$EVIDENCE_DIR" "$RESULT_BUNDLE" "$SUITE_RESULT_BUNDLE" "$RESTART_LOG" >> "$GITHUB_ENV"
           mkdir -p "$EVIDENCE_DIR"
+          cp "$QA_VERIFIER_PATH" "$EVIDENCE_DIR/verify-cloudflare-native-xcresult.py"
           {
             echo "source_repository=TheAngryPit/openclaw"
             echo "source_sha=$actual_sha"
@@ -527,6 +641,9 @@ jobs:
             echo "runner_image_version=${ImageVersion:-unknown}"
             echo "runner_disk=$(df -h "$RUNNER_TEMP" | tail -n 1)"
             echo "selected_test=$SELECTED_TEST"
+            echo "qa_verifier_workflow_sha=$qa_workflow_sha"
+            echo "qa_verifier_sha256=$qa_verifier_sha256"
+            echo "qa_verifier_checkout_credentials_persisted=false"
             echo "source_checkout_credentials_persisted=false"
             echo "workflow_permissions=contents:read"
             echo "checkout_action=actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
@@ -611,6 +728,24 @@ jobs:
           done <<'FILES'
           .github/actions/setup-node-env/action.yml
           apps/ios/Tests/SettingsHubTests.swift
+          apps/ios/Tests/CloudflareAccessClientTests.swift
+          apps/ios/Tests/CloudflareAccessBrowserPresenterTests.swift
+          apps/ios/Tests/CloudflareAccessTransferTests.swift
+          apps/ios/Tests/CloudflareAccessSessionStoreTests.swift
+          apps/ios/Tests/GatewayAccessDeviceAuthBindingTests.swift
+          apps/ios/Tests/GatewayIngressControllerTests.swift
+          apps/ios/Tests/GatewayIngressActivationTests.swift
+          apps/ios/Tests/GatewayIngressWireTests.swift
+          apps/ios/Tests/GatewayIngressLoginPreparationTests.swift
+          apps/ios/Tests/GatewayAccessRestartTests.swift
+          apps/ios/Sources/Gateway/CloudflareAccessClient.swift
+          apps/ios/Sources/Gateway/CloudflareAccessBrowserPresenter.swift
+          apps/ios/Sources/Gateway/CloudflareAccessTransfer.swift
+          apps/ios/Sources/Gateway/CloudflareAccessSessionStore.swift
+          apps/ios/Sources/Gateway/GatewayAccessDeviceAuthBinding.swift
+          apps/ios/Sources/Gateway/GatewayIngressController.swift
+          apps/ios/Sources/Settings/SettingsHubScreen.swift
+          apps/ios/project.yml
           scripts/ios-configure-signing.sh
           scripts/ios-access-restart-proof.py
           scripts/ios-simulator-prepare.sh
@@ -651,18 +786,31 @@ jobs:
           git status --porcelain --untracked-files=all > "$EVIDENCE_DIR/source-after-generation.txt"
           [[ ! -s "$EVIDENCE_DIR/source-after-generation.txt" ]]
 
-      - name: Build only the selected test products
+      - name: Build selected Cloudflare and ingress test products
         run: |
           set -euo pipefail
           source scripts/lib/swift-toolchain.sh
+          selectors=(
+            OpenClawTests/SettingsHubVisualProofTests/testIngressAuthorizedDashboardEntryPointsLoadTheSelectedGatewayPage
+            OpenClawTests/CloudflareAccessClientTests
+            OpenClawTests/CloudflareAccessBrowserPresenterTests
+            OpenClawTests/CloudflareAccessTransferTests
+            OpenClawTests/CloudflareAccessSessionStoreTests
+            OpenClawTests/GatewayAccessDeviceAuthBindingTests
+            OpenClawTests/GatewayIngressControllerTests
+            OpenClawTests/GatewayIngressLoginPreparationTests
+            OpenClawTests/SettingsHubVisualProofTests/testOlderDashboardShowsNativeGatewayUpgradeBanner
+            OpenClawTests/GatewayAccessRestartTests/testAcknowledgedSignOutSurvivesProcessRestart
+          )
+          args=()
+          for selector in "${selectors[@]}"; do args+=("-only-testing:$selector"); done
           run_apple_command_logged "$EVIDENCE_DIR/build.log" xcodebuild \
             -project apps/ios/OpenClaw.xcodeproj \
             -scheme OpenClaw \
             -configuration Debug \
             -destination "platform=iOS Simulator,id=${IOS_SIMULATOR_ID:?}" \
-            -derivedDataPath "$DERIVED_DATA" \
             -parallel-testing-enabled NO \
-            -only-testing:"$SELECTED_TEST" \
+            "${args[@]}" \
             -showBuildTimingSummary \
             build-for-testing
 
@@ -676,7 +824,6 @@ jobs:
             -scheme OpenClaw \
             -configuration Debug \
             -destination "platform=iOS Simulator,id=${IOS_SIMULATOR_ID:?}" \
-            -derivedDataPath "$DERIVED_DATA" \
             -resultBundlePath "$RESULT_BUNDLE" \
             -parallel-testing-enabled NO \
             -collect-test-diagnostics never \
@@ -769,12 +916,73 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "Exact selected-test xcresult gate: **passed** ($EXPECTED_XCTEST_ID)." >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Run Cloudflare auth, ingress lifecycle, and older-dashboard suites
+        id: cloudflare-suites
+        run: |
+          set -euo pipefail
+          source scripts/lib/swift-toolchain.sh
+          selectors=(
+            OpenClawTests/CloudflareAccessClientTests
+            OpenClawTests/CloudflareAccessBrowserPresenterTests
+            OpenClawTests/CloudflareAccessTransferTests
+            OpenClawTests/CloudflareAccessSessionStoreTests
+            OpenClawTests/GatewayAccessDeviceAuthBindingTests
+            OpenClawTests/GatewayIngressControllerTests
+            OpenClawTests/GatewayIngressLoginPreparationTests
+            OpenClawTests/SettingsHubVisualProofTests/testOlderDashboardShowsNativeGatewayUpgradeBanner
+          )
+          args=()
+          for selector in "${selectors[@]}"; do args+=("-only-testing:$selector"); done
+          run_apple_command_logged "$EVIDENCE_DIR/test-cloudflare-suites.log" xcodebuild \
+            -project apps/ios/OpenClaw.xcodeproj \
+            -scheme OpenClaw \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${IOS_SIMULATOR_ID:?}" \
+            -resultBundlePath "$SUITE_RESULT_BUNDLE" \
+            -parallel-testing-enabled NO \
+            -collect-test-diagnostics never \
+            "${args[@]}" \
+            test-without-building
+
+      - name: Require expected suites, identities, and zero skips
+        id: cloudflare-suite-verification
+        if: ${{ always() && steps.cloudflare-suites.outcome != 'skipped' }}
+        run: |
+          set -euo pipefail
+          python3 "$QA_VERIFIER_PATH" \
+            --result-bundle "$SUITE_RESULT_BUNDLE" \
+            --simulator "$IOS_SIMULATOR_ID" \
+            --source-root "$GITHUB_WORKSPACE" \
+            > "$EVIDENCE_DIR/cloudflare-suites-verification.json"
+          cat "$EVIDENCE_DIR/cloudflare-suites-verification.json" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify acknowledged sign-out across two actual app processes
+        id: access-restart
+        if: ${{ steps.cloudflare-suites.outcome == 'success' && steps.cloudflare-suite-verification.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RESTART_RESULT_ROOT"
+          shopt -s nullglob
+          existing=("$RESTART_RESULT_ROOT"/AccessRestart-*.xcresult)
+          [[ ${#existing[@]} -eq 0 ]]
+          python3 scripts/ios-access-restart-proof.py "$IOS_SIMULATOR_ID" 2>&1 | tee "$RESTART_LOG"
+          grep -Eq "^ACCESS_RESTART passed source=${EXPECTED_SOURCE_SHA} seed_pid=[1-9][0-9]* verify_pid=[1-9][0-9]* app_sha256=[0-9a-f]{64} test_sha256=[0-9a-f]{64}$" "$RESTART_LOG"
+          results=("$RESTART_RESULT_ROOT"/AccessRestart-*.xcresult)
+          [[ ${#results[@]} -eq 1 && -d "${results[0]}" ]]
+          cat "$RESTART_LOG" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Verify source remains pristine after build
         if: ${{ always() && steps.checkout-source.outcome == 'success' }}
         run: |
           set -euo pipefail
           actual_sha="$(git rev-parse HEAD)"
           [[ "$actual_sha" == "$EXPECTED_SOURCE_SHA" ]]
+          qa_workflow_sha="$(git -C "$QA_TOOLING_DIR" rev-parse --verify HEAD)"
+          [[ "$qa_workflow_sha" == "$GITHUB_WORKFLOW_SHA" ]]
+          qa_verifier_sha256="$(shasum -a 256 "$QA_VERIFIER_PATH" | awk '{ print $1 }')"
+          grep -Fqx "qa_verifier_sha256=$qa_verifier_sha256" "$EVIDENCE_DIR/preflight.txt"
+          git -C "$QA_TOOLING_DIR" status --porcelain --untracked-files=all > "$EVIDENCE_DIR/qa-tooling-final-status.txt"
+          [[ ! -s "$EVIDENCE_DIR/qa-tooling-final-status.txt" ]]
           git diff --quiet "$EXPECTED_SOURCE_SHA" --
           git diff --cached --quiet "$EXPECTED_SOURCE_SHA" --
           mkdir -p "$EVIDENCE_DIR"
@@ -786,10 +994,12 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: cloudflare-pr158051-native-entrypoint-${{ github.run_id }}-${{ github.run_attempt }}
+          name: cloudflare-pr158051-native-completion-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/openclaw-cloudflare-pr158051-evidence
             ${{ runner.temp }}/openclaw-cloudflare-pr158051.xcresult
+            ${{ runner.temp }}/openclaw-cloudflare-pr158051-suites.xcresult
+            ${{ github.workspace }}/apps/ios/build/LifecycleTestResults/AccessRestart-*.xcresult
           if-no-files-found: warn
           retention-days: 14
   profile-proof:

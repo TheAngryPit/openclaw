@@ -1,0 +1,55 @@
+diff --git a/scripts/test-macos-native.mts b/scripts/test-macos-native.mts
+--- a/scripts/test-macos-native.mts
++++ b/scripts/test-macos-native.mts
+@@ -1,6 +1,6 @@
+ // CI resource owner; the disposable credentialless runner is the isolation boundary.
+-import { randomUUID } from "node:crypto";
++import { createHash, randomUUID } from "node:crypto";
+ import fs from "node:fs";
+ import path from "node:path";
+ import { root as openCaptureRoot } from "@openclaw/fs-safe/root";
+ import { runWithFailedTrailer } from "./lib/failed-trailer.mts";
+@@ -274,8 +274,43 @@
+         } catch (error) {
+           process.exitCode = 1;
+           console.error("[macos-native] Swift exited 0 without valid test completion", error);
+         }
+       }
++      const diagnosticPath = env.OPENCLAW_SWIFT_TESTING_EVENT_DIAGNOSTIC_DIR;
++      if (diagnosticPath) {
++        try {
++          const diagnosticDirectory = path.resolve(diagnosticPath);
++          const runnerTemp = fs.realpathSync(env.RUNNER_TEMP);
++          const diagnosticParent = fs.realpathSync(path.dirname(diagnosticDirectory));
++          const diagnosticStat = fs.lstatSync(diagnosticDirectory);
++          if (
++            path.dirname(diagnosticDirectory) !== runnerTemp ||
++            diagnosticParent !== runnerTemp ||
++            !diagnosticStat.isDirectory() ||
++            diagnosticStat.isSymbolicLink()
++          ) {
++            throw new Error("Diagnostic directory must be a real direct child of RUNNER_TEMP");
++          }
++          const bytes = fs.readFileSync(eventStreamPath);
++          const fileName = "swift-testing-events.jsonl";
++          fs.writeFileSync(path.join(diagnosticDirectory, fileName), bytes, {
++            flag: "wx",
++            mode: 0o600,
++          });
++          const digest = createHash("sha256").update(bytes).digest("hex");
++          fs.writeFileSync(
++            path.join(diagnosticDirectory, `${fileName}.sha256`),
++            `${digest}  ${fileName}\n`,
++            { flag: "wx", mode: 0o600 },
++          );
++          console.error(
++            `[macos-native] Swift Testing event stream diagnostic exported (${bytes.byteLength} bytes, sha256=${digest})`,
++          );
++        } catch (error) {
++          process.exitCode ||= 1;
++          console.error("[macos-native] Failed to export requested Swift Testing event diagnostic", error);
++        }
++      }
+     } finally {
+       // A completed failed create may leave a database. Never delete it until every child closed.
+       if (canRemove && fs.existsSync(keychain)) {
