@@ -313,11 +313,7 @@ extension GatewayConnectionController {
                 GatewayStableIdentifier.matches($0.stableID, stableID)
             }), let fingerprint = GatewayTLSStore.loadFingerprint(stableID: stableID)
             else { return nil }
-            let target = if let serviceEndpointResolver {
-                await serviceEndpointResolver(gateway.endpoint)
-            } else {
-                await resolveServiceEndpoint(gateway.endpoint)
-            }
+            let target = await self.resolveServiceEndpoint(gateway.endpoint)
             guard let target,
                   let url = buildGatewayURL(host: target.host, port: target.port, useTLS: true)
             else { return nil }
@@ -330,23 +326,45 @@ extension GatewayConnectionController {
                     storeKey: stableID))
         }
 
+        let instanceID = GatewaySettingsStore.currentInstanceID()
         let credentials = GatewaySettingsStore.loadGatewayCredentials(
-            instanceId: GatewaySettingsStore.currentInstanceID(),
+            instanceId: instanceID,
             gatewayStableID: stableID)
+        func isCurrent() -> Bool {
+            guard !Task.isCancelled, self.currentScenePhase == .active,
+                  !self.hasPendingForgetCleanup(stableID: stableID),
+                  UserDefaults.standard.string(forKey: "node.instanceId") == instanceID
+            else { return false }
+            let registry = GatewaySettingsStore.loadGatewayRegistry()
+            guard !GatewayStableIdentifier.matches(registry.activeStableID, stableID),
+                  registry.connectedStableIDs.contains(where: { GatewayStableIdentifier.matches($0, stableID) }),
+                  let current = registry.entries.first(where: { $0.id == entry.id }),
+                  current.kind == entry.kind, current.host == entry.host, current.port == entry.port,
+                  current.useTLS == entry.useTLS, current.contextPath == entry.contextPath
+            else { return false }
+            let currentCredentials = GatewaySettingsStore.loadGatewayCredentials(
+                instanceId: instanceID, gatewayStableID: stableID)
+            return currentCredentials.token == credentials.token &&
+                currentCredentials.bootstrapToken == credentials.bootstrapToken &&
+                currentCredentials.password == credentials.password &&
+                currentCredentials.suppressStoredDeviceAuth == credentials.suppressStoredDeviceAuth &&
+                GatewayTLSStore.loadFingerprint(stableID: stableID) == route.1?.expectedFingerprint
+        }
         let nodeOptions = await makeConnectOptions(
             deviceAuthGatewayID: GatewaySettingsStore.authenticationOwnerID(routeStableID: stableID),
             allowStoredDeviceAuth: !credentials.suppressStoredDeviceAuth)
         // Endpoint and permission work may outlive Forget's initial invalidation.
         // Its retained registry row is cleanup ownership, not fresh admission authority.
-        guard !Task.isCancelled, !hasPendingForgetCleanup(stableID: stableID) else { return nil }
+        guard isCurrent() else { return nil }
         let ingressAuthorization: GatewayIngressAuthorization?
         do {
-            ingressAuthorization = try await ingress.prepare(
+            ingressAuthorization = try await self.prepareGatewayIngress(
                 route: .init(url: route.0, stableID: stableID, tls: route.1),
                 userInitiated: false,
-                admissionCheckpoint: admissionCheckpoint)
+                admissionCheckpoint: admissionCheckpoint,
+                canRetry: isCurrent)
         } catch { return nil }
-        guard !Task.isCancelled, !hasPendingForgetCleanup(stableID: stableID) else { return nil }
+        guard isCurrent() else { return nil }
         return GatewayConnectConfig(
             url: route.0,
             stableID: stableID,

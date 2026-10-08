@@ -43,30 +43,33 @@ extension SettingsProTab {
 
     var diagnosticChecksCard: some View {
         Section("Checks") {
+            let run = self.diagnosticsRunPresentation
             self.diagnosticCheckRow(
                 icon: "stethoscope",
                 title: "Last Run",
                 detail: .verbatim(self.diagnosticsLastRunText),
-                value: .verbatim(self.diagnosticsRunValue),
-                color: self.diagnosticsRunColor)
+                value: .verbatim(run.value),
+                color: run.color)
+            let gateway = self.gatewayStatusPresentation
             self.diagnosticCheckRow(
                 icon: "antenna.radiowaves.left.and.right",
                 title: "Gateway Link",
-                detail: .verbatim(self.gatewayStatusDetail),
-                value: .verbatim(self.gatewayStatusValue),
-                color: self.gatewayStatusColor)
+                detail: .verbatim(gateway.detail),
+                value: .verbatim(gateway.value),
+                color: gateway.color)
             self.diagnosticCheckRow(
                 icon: "dot.radiowaves.left.and.right",
                 title: "Discovery",
                 detail: .verbatim(self.gatewayController.discoveryStatusText),
                 value: .verbatim(self.gatewayController.gateways.count.formatted()),
                 color: self.gatewayController.gateways.isEmpty ? .secondary : OpenClawBrand.accent)
+            let talkConfig = self.gatewayTalkConfigPresentation
             self.diagnosticCheckRow(
                 icon: "waveform",
                 title: "Talk Config",
-                detail: .verbatim(self.gatewayTalkConfigDetail),
-                value: .verbatim(self.gatewayTalkConfigValue),
-                color: self.gatewayTalkConfigColor)
+                detail: .verbatim(talkConfig.detail),
+                value: .verbatim(talkConfig.value),
+                color: talkConfig.color)
             self.diagnosticCheckRow(
                 icon: "bell",
                 title: "Notifications",
@@ -270,8 +273,7 @@ extension SettingsProTab {
             gateway.stableID,
             instanceId: self.instanceId.trimmingCharacters(in: .whitespacesAndNewlines),
             allowManualOverride: false)
-        GatewaySettingsStore.savePreferredGatewayStableID(gateway.stableID)
-        GatewaySettingsStore.saveLastDiscoveredGatewayStableID(gateway.stableID)
+        GatewaySettingsStore.saveDiscoveredGatewayStableID(gateway.stableID, preferred: true)
         if let err = await self.gatewayController.connectWithDiagnostics(gateway) {
             self.setupStatusText = err
         }
@@ -477,11 +479,7 @@ extension SettingsProTab {
             self.setupStatusText = String(localized: "Failed: host required")
             return
         }
-        guard self.manualPortIsValid else {
-            self.setupStatusText = String(localized: "Failed: invalid port")
-            return
-        }
-        guard let port = self.resolvedManualPort(host: host) else {
+        guard self.manualPortIsValid, let port = self.resolvedManualPort(host: host) else {
             self.setupStatusText = String(localized: "Failed: invalid port")
             return
         }
@@ -607,6 +605,29 @@ extension SettingsProTab {
         return nil
     }
 
+    static func gatewayAccessAttention(
+        in registry: GatewaySettingsStore.GatewayRegistry,
+        ingress: GatewayIngressController) -> GatewayIngressController.Attention?
+    {
+        guard let selected = registry.activeEntry,
+              let attention = ingress.attention,
+              GatewayStableIdentifier.matches(selected.stableID, attention.stableID)
+        else { return nil }
+        return attention
+    }
+
+    static func gatewayAccessSessionTarget(
+        in registry: GatewaySettingsStore.GatewayRegistry,
+        ingress: GatewayIngressController) -> (stableID: String, origin: CloudflareAccessOrigin)?
+    {
+        // Access belongs to the selected saved profile, not the editable manual
+        // credential fields. Resolve its durable grant origin through the ingress owner.
+        guard let selected = registry.activeEntry,
+              let origin = ingress.sessionOrigin(stableID: selected.stableID)
+        else { return nil }
+        return (selected.stableID, origin)
+    }
+
     var manualGatewayEnabledBinding: Binding<Bool> {
         Binding(
             get: { self.manualGatewayEnabled },
@@ -620,48 +641,28 @@ extension SettingsProTab {
             })
     }
 
-    var gatewayTokenBinding: Binding<String> {
+    func gatewayCredentialBinding(
+        _ field: WritableKeyPath<GatewayConnectionController.ManualAuthOverride.Fields, String>) -> Binding<String>
+    {
         Binding(
-            get: { self.gatewayAuthFields.token },
-            set: { self.persistGatewayToken($0) })
-    }
-
-    var gatewayPasswordBinding: Binding<String> {
-        Binding(
-            get: { self.gatewayAuthFields.password },
-            set: { self.persistGatewayPassword($0) })
+            get: { self.gatewayAuthFields[keyPath: field] },
+            set: { value in
+                self.gatewayAuthFields[keyPath: field] = value
+                guard !self.suppressCredentialPersist else { return }
+                self.gatewayAuthFields.persist(
+                    instanceId: self.instanceId.trimmingCharacters(in: .whitespacesAndNewlines),
+                    targetStableID: self.gatewayCredentialTargetStableID)
+            })
     }
 
     var manualHostBinding: Binding<String> {
         Binding(
             get: { self.manualGatewayHost },
             set: { value in
-                let previousStableID = self.currentManualGatewayStableID
-                self.manualGatewayContextPath = nil
-                self.manualGatewayHost = value
-                if GatewayStableIdentifier.key(previousStableID) !=
-                    GatewayStableIdentifier.key(self.currentManualGatewayStableID)
-                {
-                    self.gatewayAuthFields = .init()
+                self.updateManualTarget {
+                    self.manualGatewayHost = value
                 }
             })
-    }
-
-    func persistGatewayToken(_ value: String) {
-        self.gatewayAuthFields.token = value
-        self.persistGatewayCredentials(for: self.gatewayCredentialTargetStableID)
-    }
-
-    func persistGatewayPassword(_ value: String) {
-        self.gatewayAuthFields.password = value
-        self.persistGatewayCredentials(for: self.gatewayCredentialTargetStableID)
-    }
-
-    private func persistGatewayCredentials(for stableID: String?) {
-        guard !self.suppressCredentialPersist else { return }
-        self.gatewayAuthFields.persist(
-            instanceId: self.instanceId.trimmingCharacters(in: .whitespacesAndNewlines),
-            targetStableID: stableID)
     }
 
     func title(for route: SettingsRoute) -> String {
@@ -695,17 +696,23 @@ extension SettingsProTab {
         Binding(
             get: { self.manualGatewayPortText },
             set: { newValue in
-                let previousStableID = self.currentManualGatewayStableID
-                self.manualGatewayContextPath = nil
-                let filtered = newValue.filter(\.isNumber)
-                self.manualGatewayPortText = filtered
-                self.manualGatewayPort = Int(filtered) ?? 0
-                if GatewayStableIdentifier.key(previousStableID) !=
-                    GatewayStableIdentifier.key(self.currentManualGatewayStableID)
-                {
-                    self.gatewayAuthFields = .init()
+                self.updateManualTarget {
+                    let filtered = newValue.filter(\.isNumber)
+                    self.manualGatewayPortText = filtered
+                    self.manualGatewayPort = Int(filtered) ?? 0
                 }
             })
+    }
+
+    private func updateManualTarget(_ update: () -> Void) {
+        let previousStableID = self.currentManualGatewayStableID
+        self.manualGatewayContextPath = nil
+        update()
+        if GatewayStableIdentifier.key(previousStableID) !=
+            GatewayStableIdentifier.key(self.currentManualGatewayStableID)
+        {
+            self.gatewayAuthFields = .init()
+        }
     }
 
     var manualPortIsValid: Bool {
@@ -821,23 +828,15 @@ extension SettingsProTab {
         self.gatewayRegistry.entries.isEmpty && !self.appModel.isLocalGatewayFixtureEnabled
     }
 
-    var gatewayStatusDetail: String {
+    var gatewayStatusPresentation: (detail: String, value: String, color: Color) {
         if self.appModel.isAppleReviewDemoModeEnabled {
-            return String(localized: "Apple Review demo mode")
+            return (String(localized: "Apple Review demo mode"), String(localized: "demo"), OpenClawBrand.accent)
         }
-        return self.gatewayConnected
-            ? String(localized: "Connected")
-            : self.appModel.gatewayDisplayStatusText
-    }
-
-    var gatewayStatusValue: String {
-        if self.appModel.isAppleReviewDemoModeEnabled { return String(localized: "demo") }
-        return self.gatewayConnected ? String(localized: "online") : String(localized: "offline")
-    }
-
-    var gatewayStatusColor: Color {
-        if self.appModel.isAppleReviewDemoModeEnabled { return OpenClawBrand.accent }
-        return self.gatewayConnected ? OpenClawBrand.ok : .secondary
+        let connected = self.gatewayConnected
+        return (
+            connected ? String(localized: "Connected") : self.appModel.gatewayDisplayStatusText,
+            connected ? String(localized: "online") : String(localized: "offline"),
+            connected ? OpenClawBrand.ok : .secondary)
     }
 
     var gatewayDiagnosticConnected: Bool {
@@ -861,21 +860,15 @@ extension SettingsProTab {
             : String(localized: "Connect to the gateway.")
     }
 
-    var gatewayTalkConfigDetail: String {
-        if self.appModel.isAppleReviewDemoModeEnabled { return String(localized: "Demo mode only") }
-        return self.appModel.talkMode.gatewayTalkTransportLabel
-    }
-
-    var gatewayTalkConfigValue: String {
-        if self.appModel.isAppleReviewDemoModeEnabled { return String(localized: "demo") }
-        return self.appModel.talkMode.gatewayTalkConfigLoaded
-            ? String(localized: "loaded")
-            : String(localized: "missing")
-    }
-
-    var gatewayTalkConfigColor: Color {
-        if self.appModel.isAppleReviewDemoModeEnabled { return .secondary }
-        return self.appModel.talkMode.gatewayTalkConfigLoaded ? OpenClawBrand.ok : .secondary
+    var gatewayTalkConfigPresentation: (detail: String, value: String, color: Color) {
+        if self.appModel.isAppleReviewDemoModeEnabled {
+            return (String(localized: "Demo mode only"), String(localized: "demo"), .secondary)
+        }
+        let loaded = self.appModel.talkMode.gatewayTalkConfigLoaded
+        return (
+            self.appModel.talkMode.gatewayTalkTransportLabel,
+            loaded ? String(localized: "loaded") : String(localized: "missing"),
+            loaded ? OpenClawBrand.ok : .secondary)
     }
 
     var gatewayAddress: String {
@@ -933,16 +926,11 @@ extension SettingsProTab {
         return String(localized: "partial")
     }
 
-    var diagnosticsRunValue: String {
-        guard let diagnosticsIssueCount else { return String(localized: "pending") }
-        return diagnosticsIssueCount == 0
-            ? String(localized: "pass")
-            : diagnosticsIssueCount.formatted()
-    }
-
-    var diagnosticsRunColor: Color {
-        guard let diagnosticsIssueCount else { return .secondary }
-        return diagnosticsIssueCount == 0 ? OpenClawBrand.ok : OpenClawBrand.warn
+    var diagnosticsRunPresentation: (value: String, color: Color) {
+        guard let diagnosticsIssueCount else { return (String(localized: "pending"), .secondary) }
+        return (
+            diagnosticsIssueCount == 0 ? String(localized: "pass") : diagnosticsIssueCount.formatted(),
+            diagnosticsIssueCount == 0 ? OpenClawBrand.ok : OpenClawBrand.warn)
     }
 
     var notificationDisclosureAccepted: Bool {

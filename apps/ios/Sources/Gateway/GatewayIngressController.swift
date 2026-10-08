@@ -198,6 +198,7 @@ final class GatewayIngressController {
         let preCommitOrdinary = self.routes[key]?.ordinaryAdmission
         // A cached host grant must not make an independently admitted profile depend
         // on browser sign-out or expiry. Existing service headers and WARP go first.
+        Self.logger.info("Access challenge discovery started")
         let ordinaryChallenge = try await client.discover(
             gatewayURL: route.url,
             customHeaders: self.customHeaders(route.stableID))
@@ -280,12 +281,20 @@ final class GatewayIngressController {
     }
 
     func hasSession(stableID: String) -> Bool {
-        guard let origin = origin(stableID: stableID) else { return false }
-        return self.sessions.snapshot(for: origin) != nil
+        self.sessionOrigin(stableID: stableID) != nil
     }
 
-    func signOut(stableID: String) async {
-        guard let origin = origin(stableID: stableID) else { return }
+    func sessionOrigin(stableID: String) -> CloudflareAccessOrigin? {
+        guard let origin = origin(stableID: stableID),
+              self.sessions.snapshot(for: origin) != nil
+        else { return nil }
+        return origin
+    }
+
+    func signOut(stableID: String, expectedOrigin: CloudflareAccessOrigin? = nil) async {
+        guard let origin = origin(stableID: stableID),
+              expectedOrigin == nil || expectedOrigin == origin
+        else { return }
         _ = self.retireManagedAdmissions(origin: origin, revision: self.sessions.currentRevision(for: origin))
         if self.foregroundIntent?.application.origin == origin {
             self.cancelSignIn()
@@ -481,7 +490,6 @@ final class GatewayIngressController {
         else { return nil }
         return Route(url: url, stableID: profile.stableID, tls: tls)
     }
-
     private func origin(stableID: String) -> CloudflareAccessOrigin? {
         let key = GatewayStableIdentifier.Key(stableID)
         // A replacement route cannot take ownership until the saved grant is retired.
@@ -841,7 +849,6 @@ final class GatewayIngressController {
         else { return nil }
         return cookie
     }
-
     private func headers(
         for url: URL,
         registration: Registration,

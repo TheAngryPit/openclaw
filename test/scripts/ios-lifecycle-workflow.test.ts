@@ -501,6 +501,12 @@ describe.skipIf(process.platform === "win32")("iOS Access simulator workflow", (
       commands.filter((command) => command.tool === "python3").map((command) => command.args),
     ).toEqual([["scripts/ios-access-restart-proof.py", "watch-fixture"]]);
     if (phase === "smoke") {
+      expect(commands.at(-1)).toEqual({
+        tool: "python3",
+        args: ["scripts/ios-access-restart-proof.py", "watch-fixture"],
+        destination: "platform=iOS Simulator,id=watch-fixture",
+        settings: "ARCHS = arm64\nCOMPILER_INDEX_STORE_ENABLE = NO\n",
+      });
       expect(tests[0]?.args.filter((arg) => arg.startsWith("-only-testing:"))).toEqual(
         authSelectors,
       );
@@ -967,7 +973,6 @@ describe("iOS Access process restart proof", () => {
       .map((args) => args[args.indexOf("-resultBundlePath") + 1]);
     expect(new Set(resultPaths).size).toBe(2);
   });
-
   it("rejects xcodebuild failure even when the result records and final receipt would pass", () => {
     const { error, commands, receiptRetained } = runRestartProof("xcodebuild-failed");
     expect(error).toContain("exit status 65");

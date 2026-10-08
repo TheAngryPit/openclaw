@@ -236,7 +236,6 @@ struct CloudflareAccessSessionStoreTests {
             for: #require(URL(string: "https://gateway.example.test:9443/settings")),
             now: expiry.addingTimeInterval(-1)) == nil)
     }
-
     @Test func `reauthentication revokes completed shared grants before retirement can suspend`() async throws {
         let memory = MemoryStore()
         let application = try CloudflareAccessTestTokens.application()
