@@ -153,7 +153,7 @@ it("preserves an unsaved display-name draft when unrelated negotiated scopes cha
   });
   const harness = createConnectedContext(request, {
     id: modelAccountProfile.id,
-    name: modelAccountProfile.displayName,
+    name: modelAccountProfile.displayName ?? undefined,
   });
   harness.emitHello(gatewayHelloForMethods([], ["operator.admin"]));
   const page = mountProfilePage(harness.context);
