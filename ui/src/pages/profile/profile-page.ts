@@ -192,9 +192,11 @@ export class ProfilePage extends OpenClawLightDomElement {
     this.requestUpdate();
     if (identitySourceChanged) {
       this.advanceIdentityRequest(identityTargetChanged);
-      this.ownProfile = null;
-      this.displayName = "";
-      this.gitCoauthorEnabled = true;
+      if (identityTargetChanged || writeAccessChanged) {
+        this.ownProfile = null;
+        this.displayName = "";
+        this.gitCoauthorEnabled = true;
+      }
       this.identityLoading = false;
       this.identityBusy = null;
       this.identityError = null;

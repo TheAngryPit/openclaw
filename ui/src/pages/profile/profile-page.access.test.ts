@@ -5,6 +5,7 @@ import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import { i18n } from "../../i18n/index.ts";
 import { gatewayHelloForMethods } from "../../test-helpers/gateway-methods.ts";
+import { waitForFast } from "../../test-helpers/wait-for.ts";
 import {
   createConnectedContext,
   modelAccountProfile,
@@ -137,3 +138,36 @@ it.each(["operator.admin", "operator.read"])(
     expect(page.querySelector(".settings-row__value")?.textContent).toBe("operator.sessions.read");
   },
 );
+
+it("preserves an unsaved display-name draft when unrelated negotiated scopes change", async () => {
+  const reload = createDeferred<{ profile: typeof modelAccountProfile }>();
+  let selfReads = 0;
+  const request = vi.fn(async (method: string) => {
+    if (method === "users.self") {
+      return ++selfReads === 1 ? { profile: modelAccountProfile } : reload.promise;
+    }
+    if (method === "users.listModelAccounts") {
+      return { profileId: modelAccountProfile.id, accounts: [], links: [] };
+    }
+    throw new Error(`unexpected method: ${method}`);
+  });
+  const harness = createConnectedContext(request, {
+    id: modelAccountProfile.id,
+    name: modelAccountProfile.displayName,
+  });
+  harness.emitHello(gatewayHelloForMethods([], ["operator.admin"]));
+  const page = mountProfilePage(harness.context);
+
+  const input = () => page.querySelector<HTMLInputElement>(".identity-name-control input");
+  const refresh = () => page.querySelector<HTMLButtonElement>(".profile-refresh");
+  await waitForFast(() => expect(input()?.value).toBe(modelAccountProfile.displayName));
+  input()!.value = "Unsaved profile draft";
+  input()!.dispatchEvent(new Event("input", { bubbles: true }));
+  await page.updateComplete;
+
+  harness.emitHello(gatewayHelloForMethods([], ["operator.admin", "operator.read"]));
+  await waitForFast(() => expect(refresh()?.disabled).toBe(true));
+  reload.resolve({ profile: modelAccountProfile });
+  await waitForFast(() => expect(refresh()?.disabled).toBe(false));
+  expect(input()?.value).toBe("Unsaved profile draft");
+});
