@@ -36,6 +36,7 @@ extension GatewayConnectionController {
             appModel.applyGatewayConnectConfig(refreshedConfig, expectedGeneration: generation)
         }
     }
+
     func buildGatewayURL(
         host: String,
         port: Int,

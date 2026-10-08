@@ -513,6 +513,7 @@ extension GatewayConnectionController {
             await self.connectDiscoveredGateway(gateway, forceReconnect: true)
         }
     }
+
     @discardableResult
     func retryGatewayIngress(_ attention: GatewayIngressController.Attention) async -> ConnectionAttemptResult {
         let admissionCheckpoint = self.ingress.admissionCheckpoint()
