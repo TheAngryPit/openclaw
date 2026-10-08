@@ -380,41 +380,6 @@ final class NativeGatewayWebSocketFixture: @unchecked Sendable {
         })
     }
 
-    func releaseHTTPResponses() {
-        let pending = self.pendingHTTP
-        self.pendingHTTP.removeAll()
-        for (index, response) in pending {
-            self.sendHTTP(response.1, request: response.0, index: index)
-        }
-    }
-
-    private func respondHTTP(_ request: Request, index: Int) {
-        let response = self.httpResponse?(request) ?? HTTPResponse(status: 404)
-        if response.holdHeaders {
-            // The verdict belongs to request arrival, even if credentials change before release.
-            self.pendingHTTP[index] = (request, response)
-            return
-        }
-        self.sendHTTP(response, request: request, index: index)
-    }
-
-    private func sendHTTP(_ response: HTTPResponse, request: Request, index: Int) {
-        guard let client = self.clients[index] else { return }
-        var headers = response.headers
-        headers["Content-Length"] = String(response.body.count)
-        headers["Connection"] = "close"
-        let head = (["HTTP/1.1 \(response.status) Fixture"] +
-            headers.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" } + ["", ""])
-            .joined(separator: "\r\n")
-        var data = Data(head.utf8)
-        if request.method != "HEAD", !response.holdBody { data.append(response.body) }
-        client.connection.send(content: data, completion: .contentProcessed { [weak self] error in
-            MainActor.assumeIsolated {
-                if error != nil || !response.holdBody { self?.close(index) }
-            }
-        })
-    }
-
     private func processFrames(_ index: Int) {
         while var client = self.clients[index],
               let frame = Self.takeFrame(from: &client.buffer)
