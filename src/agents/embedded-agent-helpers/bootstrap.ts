@@ -3,12 +3,11 @@
  */
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import { sanitizeGoogleAssistantFirstOrdering } from "../../shared/google-turn-ordering.js";
 import { sliceUtf16Safe, truncateUtf16Safe } from "../../utils.js";
 import { resolveAgentConfig } from "../agent-scope.js";
-import type { AgentMessage } from "../runtime/index.js";
 import type { WorkspaceBootstrapFile } from "../workspace.js";
 import type { EmbeddedContextFile } from "./context-file.js";
+export { sanitizeGoogleAssistantFirstOrdering as sanitizeGoogleTurnOrdering } from "../../shared/google-turn-ordering.js";
 
 type ContentBlockWithSignature = {
   thought_signature?: unknown;
@@ -210,7 +209,7 @@ function buildAgentsPolicyDigest(
   };
 }
 
-function trimAgentsBootstrapContent(trimmed: string, maxChars: number): TrimBootstrapResult {
+function trimAgentsBootstrapContent(trimmed: string, maxChars: number): string {
   let headChars = Math.floor(maxChars * AGENTS_POLICY_HEAD_RATIO);
   let tailChars = Math.floor(maxChars * AGENTS_POLICY_TAIL_RATIO);
   let digestBudget = Math.floor(maxChars * AGENTS_POLICY_DIGEST_RATIO);
@@ -267,12 +266,7 @@ function trimAgentsBootstrapContent(trimmed: string, maxChars: number): TrimBoot
     rendered = render();
   }
 
-  return {
-    content: rendered.length > maxChars ? truncateUtf16Safe(rendered, maxChars) : rendered,
-    truncated: true,
-    maxChars,
-    originalLength: trimmed.length,
-  };
+  return rendered.length > maxChars ? truncateUtf16Safe(rendered, maxChars) : rendered;
 }
 
 function trimBootstrapContent(
@@ -281,16 +275,17 @@ function trimBootstrapContent(
   maxChars: number,
 ): TrimBootstrapResult {
   const trimmed = content.trimEnd();
+  const finish = (value: string, truncated = true): TrimBootstrapResult => ({
+    content: value,
+    truncated,
+    maxChars,
+    originalLength: trimmed.length,
+  });
   if (trimmed.length <= maxChars) {
-    return {
-      content: trimmed,
-      truncated: false,
-      maxChars,
-      originalLength: trimmed.length,
-    };
+    return finish(trimmed, false);
   }
   if (fileName?.toLowerCase() === AGENTS_BOOTSTRAP_FILENAME.toLowerCase()) {
-    return trimAgentsBootstrapContent(trimmed, maxChars);
+    return finish(trimAgentsBootstrapContent(trimmed, maxChars));
   }
 
   const markerTemplate = (headChars: number, tailChars: number) =>
@@ -366,18 +361,10 @@ function trimBootstrapContent(
     contentWithMarker.length > maxChars
       ? truncateUtf16Safe(contentWithMarker, maxChars)
       : contentWithMarker;
-  return {
-    content: boundedContent,
-    truncated: true,
-    maxChars,
-    originalLength: trimmed.length,
-  };
+  return finish(boundedContent);
 }
 
 function clampToBudget(content: string, budget: number): string {
-  if (budget <= 0) {
-    return "";
-  }
   if (content.length <= budget) {
     return content;
   }
@@ -459,6 +446,18 @@ export function buildBootstrapContextFiles(
   return result;
 }
 
-export function sanitizeGoogleTurnOrdering(messages: AgentMessage[]): AgentMessage[] {
-  return sanitizeGoogleAssistantFirstOrdering(messages);
+/** Builds bounded context files from already-resolved bootstrap file metadata. */
+export function buildBootstrapContextForFiles(
+  bootstrapFiles: WorkspaceBootstrapFile[],
+  params: {
+    config?: OpenClawConfig;
+    agentId?: string | null;
+    warn?: (message: string) => void;
+  },
+): EmbeddedContextFile[] {
+  return buildBootstrapContextFiles(bootstrapFiles, {
+    maxChars: resolveBootstrapMaxChars(params.config, params.agentId),
+    totalMaxChars: resolveBootstrapTotalMaxChars(params.config, params.agentId),
+    warn: params.warn,
+  });
 }
