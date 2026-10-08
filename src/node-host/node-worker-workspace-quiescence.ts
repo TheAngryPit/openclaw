@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { withTimeout } from "@openclaw/fs-safe/advanced";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { workspaceQuiescenceArgv } from "../gateway/worker-environments/workspace-quiescence-scripts.js";
@@ -30,9 +31,7 @@ type Lease = {
   context: LeaseContext;
   child: ChildProcess;
   identity?: NodeWorkerProcessIdentity;
-  ready: Promise<void>;
   done: Promise<void>;
-  started: Promise<void>;
   operations: Promise<unknown>;
   acquisitionWaiters: number;
   acknowledged: boolean;
@@ -40,12 +39,17 @@ type Lease = {
   released: boolean;
   releaseWorkspace: () => void;
   releasing?: Promise<void>;
-  control?: { action: "renew" | "release"; receipt: ReturnType<typeof createDeferredCore<string>> };
+  control?: {
+    id?: string;
+    action: NodeWorkerWorkspaceQuiescenceInput["action"];
+    receipt: ReturnType<typeof createDeferredCore<void>>;
+  };
 };
 
 /** Infrastructure leases outlive commands and environment-owned preview processes. */
 export class NodeWorkerWorkspaceQuiescence {
   private readonly leases = new Map<string, Lease>();
+  private idle?: Lease;
   private readonly controls = new Map<Promise<void>, number>();
   private readonly supervisor = getProcessSupervisor();
   private closed = false;
@@ -69,10 +73,6 @@ export class NodeWorkerWorkspaceQuiescence {
     };
     assertCurrent();
     const operation = context.input.quiescence!;
-    // Windows already uses a shared-host SQLite lease without freezing or a detached child.
-    if (process.platform === "win32") {
-      return this.runScript(context, operation, signal);
-    }
     const key = JSON.stringify([
       context.input.gatewayNamespace,
       context.input.environmentId,
@@ -88,9 +88,12 @@ export class NodeWorkerWorkspaceQuiescence {
         lease.nonce !== operation.nonce &&
         (lease.exited || (!lease.acknowledged && lease.acquisitionWaiters === 0))
       ) {
-        // Recover a failed or abandoned acquisition, never another caller's live lease.
-        // Cancellation bounds this observer, not the retained exact-nonce recovery.
+        // Recover abandoned acquisition without cancelling its exact-nonce recovery.
         await observe(this.release(lease));
+        lease = this.leases.get(key);
+      }
+      if (!lease && this.idle && this.idle.key !== key) {
+        await observe(this.retireHelper(this.idle));
         lease = this.leases.get(key);
       }
       if (lease && lease.nonce !== operation.nonce) {
@@ -100,7 +103,7 @@ export class NodeWorkerWorkspaceQuiescence {
       lease ??= this.acquire(key, context, operation);
       lease.acquisitionWaiters++;
       try {
-        await observe(lease.ready);
+        await observe(lease.operations);
         assertCurrent();
         this.assertActive(lease);
         lease.acknowledged = true;
@@ -128,30 +131,28 @@ export class NodeWorkerWorkspaceQuiescence {
     const owned = lease;
     const renewal = owned.operations.then(async () => {
       assertCurrent();
-      const result = await this.control(owned, operation);
+      await this.control(owned, operation);
       assertCurrent();
       this.assertActive(owned);
-      return result;
+      return "renewed " + owned.nonce + "\n";
     });
     owned.operations = renewal.catch(() => undefined);
-    // Cancellation bounds the observer; an accepted control remains in the lease's
-    // queue until its acknowledgement or child exit lets release settle it.
+    // Cancellation bounds observation; release still joins accepted controls.
     return observe(renewal);
   }
 
   async close(): Promise<void> {
     this.closed = true;
     const leases = [...this.leases.values()];
-    if (leases.length === 0 && this.controls.size === 0) {
-      return;
+    if (this.idle) {
+      void this.retireHelper(this.idle);
     }
     const recoveryTimeoutMs = Math.max(
       1,
       ...this.controls.values(),
       ...leases.map((lease) => lease.context.input.timeoutMs ?? DEFAULT_CONTROL_TIMEOUT_MS),
     );
-    // Bound shutdown observation, not the last resumer. Timed-out recovery keeps
-    // its lease/control and workspace holds until actual cleanup settles.
+    // Timeout cannot surrender the last resumer's workspace custody.
     const outcomes = await withTimeout(
       Promise.allSettled([...this.controls.keys(), ...leases.map((lease) => this.release(lease))]),
       recoveryTimeoutMs,
@@ -178,11 +179,30 @@ export class NodeWorkerWorkspaceQuiescence {
   }
 
   private retire(lease: Lease): void {
-    if (!lease.exited || !lease.released || this.leases.get(lease.key) !== lease) {
+    if (!lease.released || this.leases.get(lease.key) !== lease) {
       return;
     }
     this.leases.delete(lease.key);
     lease.releaseWorkspace();
+    if (!lease.exited) {
+      if (!this.closed && !this.idle && lease.identity) {
+        this.idle = lease;
+      } else {
+        void this.retireHelper(lease);
+      }
+    }
+  }
+
+  private retireHelper(lease: Lease): Promise<void> {
+    if (this.idle === lease) {
+      this.idle = undefined;
+    }
+    this.controls.set(lease.done, lease.context.input.timeoutMs ?? DEFAULT_CONTROL_TIMEOUT_MS);
+    void lease.done.then(() => this.controls.delete(lease.done));
+    if (lease.child.connected) {
+      lease.child.send({ type: "workspace-quiescence-retire", nonce: lease.nonce });
+    }
+    return lease.done;
   }
 
   private acquire(
@@ -190,120 +210,136 @@ export class NodeWorkerWorkspaceQuiescence {
     context: LeaseContext,
     operation: Extract<NodeWorkerWorkspaceQuiescenceInput, { action: "acquire" }>,
   ): Lease {
+    const idle = this.idle?.key === key && !this.idle.exited ? this.idle : undefined;
+    if (idle) {
+      this.idle = undefined;
+    }
     const ready = createDeferredCore();
     const done = createDeferredCore();
-    const started = createDeferredCore();
     const releaseWorkspace = context.retainWorkspace();
     let child: ChildProcess;
     try {
-      // Fixed recovery-only code, owned directly by this persistent native runtime.
-      // Never spawn it below a command anchor or install the harness PID as its watchdog.
-      child = spawn(
-        process.execPath,
-        workspaceQuiescenceArgv(context.workspaceDir, operation, "shared-host", "owned").slice(1),
-        { cwd: context.workspaceDir, env: context.env, stdio: ["ignore", "pipe", "pipe", "ipc"] },
-      );
+      // An idle helper must not hold a Windows directory lock on its released workspace.
+      child =
+        idle?.child ??
+        spawn(
+          process.execPath,
+          workspaceQuiescenceArgv(context.workspaceDir, operation, "shared-host", "owned").slice(1),
+          {
+            cwd: path.dirname(process.execPath),
+            env: context.env,
+            stdio: ["ignore", "pipe", "pipe", "ipc"],
+          },
+        );
     } catch (error) {
       releaseWorkspace();
       throw error;
     }
-    const lease: Lease = {
+    const acquired: Lease = {
       key,
       context,
       nonce: operation.nonce,
       child,
-      ready: ready.promise,
-      done: done.promise,
-      started: started.promise,
-      operations: Promise.resolve(),
+      identity: idle?.identity,
+      done: idle?.done ?? done.promise,
+      operations: ready.promise,
+      control: { action: "acquire", receipt: ready },
       acquisitionWaiters: 0,
       acknowledged: false,
       exited: false,
       released: false,
       releaseWorkspace,
     };
-    this.leases.set(key, lease);
-    void lease.ready.catch(() => undefined);
+    this.leases.set(key, acquired);
+    if (idle) {
+      acquired.operations = this.control(acquired, operation);
+    }
+    void acquired.operations.catch(() => undefined);
+    if (idle) {
+      return acquired;
+    }
     let stderr = "";
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr = (stderr + chunk.toString()).slice(-16_384);
     });
     child.stdout?.resume();
-    child.once("spawn", () => {
-      try {
-        lease.identity = requireNodeWorkerProcessIdentity(child.pid!);
-      } catch (error) {
-        ready.reject(error);
-      }
-    });
+    const current = () => {
+      const owner = this.leases.get(key) ?? this.idle;
+      return owner?.child === child ? owner : acquired;
+    };
     child.on("message", (message: unknown) => {
+      const lease = current();
       if (!isRecord(message) || message.nonce !== lease.nonce) {
         return;
       }
-      if (message.type === "workspace-quiescence-ready") {
-        started.resolve();
-        try {
-          this.assertActive(lease);
-          ready.resolve();
-        } catch (error) {
-          ready.reject(error);
-        }
-      } else if (message.type === "workspace-quiescence-retired") {
+      if (message.type === "workspace-quiescence-retired") {
+        lease.control?.receipt.reject(
+          new Error("workspace quiescence lease expired during control"),
+        );
         lease.released = true;
+        this.retire(lease);
       } else if (
         message.type === "workspace-quiescence-result" &&
         lease.control &&
-        lease.control.action === message.action
+        lease.control.action === message.action &&
+        lease.control.id === message.id
       ) {
-        const { action, receipt } = lease.control;
-        if (typeof message.error === "string") {
-          receipt.reject(new Error(message.error));
-        } else {
-          receipt.resolve(action === "renew" ? "renewed " + lease.nonce + "\n" : "");
+        const { receipt } = lease.control;
+        lease.control = undefined;
+        try {
+          if (typeof message.error === "string") {
+            throw new Error(message.error);
+          }
+          lease.identity ??= requireNodeWorkerProcessIdentity(child.pid!);
+          receipt.resolve();
+        } catch (error) {
+          receipt.reject(error);
         }
       }
     });
-    child.once("error", (error) => ready.reject(error));
+    child.once("error", (error) => {
+      stderr ||= error.message;
+    });
     child.once("close", (code) => {
+      const lease = current();
       lease.exited = true;
-      started.resolve();
+      if (this.idle === lease) {
+        this.idle = undefined;
+      }
       // Spawn refusal has no lease; failed expiry still requires explicit recovery.
       lease.released = !child.pid || (code === 0 && lease.released);
-      ready.reject(new Error(stderr || "workspace quiescence watchdog exited before readiness"));
       lease.control?.receipt.reject(
-        new Error("workspace quiescence watchdog exited during control"),
+        new Error(stderr || "workspace quiescence watchdog exited during control"),
       );
       this.retire(lease);
       done.resolve();
     });
-    return lease;
+    return acquired;
   }
 
   private release(lease: Lease): Promise<void> {
     lease.releasing ??= (async () => {
-      await lease.operations;
-      await lease.started;
-      if (lease.released) {
+      await lease.operations.catch(() => undefined);
+      if (this.leases.get(lease.key) === lease) {
+        const operation = { action: "release", nonce: lease.nonce } as const;
+        try {
+          await this.control(lease, operation);
+        } catch (error) {
+          if (!lease.released) {
+            if (!lease.exited) {
+              throw error;
+            }
+            // A dead helper cannot acknowledge recovery; the standalone owner validates
+            // and removes its empty lease without signalling any recorded PID.
+            await this.runScript(lease.context, operation);
+          }
+        }
+        lease.released = true;
+        this.retire(lease);
+      }
+      if (this.closed) {
         await lease.done;
       }
-      if (this.leases.get(lease.key) !== lease) {
-        // Spawn refusal or completed expiry already retired this exact owner.
-        return;
-      }
-      const operation = { action: "release", nonce: lease.nonce } as const;
-      try {
-        await this.control(lease, operation);
-      } catch (error) {
-        if (!lease.exited) {
-          throw error;
-        }
-        // A dead helper cannot acknowledge recovery; the standalone owner validates
-        // and removes its empty lease without signalling any recorded PID.
-        await this.runScript(lease.context, operation);
-      }
-      await lease.done;
-      lease.released = true;
-      this.retire(lease);
     })().catch((error: unknown) => {
       lease.releasing = undefined;
       throw error;
@@ -313,27 +349,23 @@ export class NodeWorkerWorkspaceQuiescence {
 
   private async control(
     lease: Lease,
-    operation: Exclude<NodeWorkerWorkspaceQuiescenceInput, { action: "acquire" }>,
-  ): Promise<string> {
+    operation: NodeWorkerWorkspaceQuiescenceInput,
+  ): Promise<void> {
     this.assertActive(lease, operation.action === "release");
-    const receipt = createDeferredCore<string>();
-    lease.control = { action: operation.action, receipt };
-    try {
-      lease.child.send({ type: "workspace-quiescence-control", ...operation }, (error) => {
-        if (error) {
-          receipt.reject(error);
-        }
-      });
-      return await receipt.promise;
-    } finally {
-      lease.control = undefined;
-    }
+    const receipt = createDeferredCore();
+    const id = randomUUID();
+    lease.control = { id, action: operation.action, receipt };
+    lease.child.send({ type: "workspace-quiescence-control", id, ...operation }, (error) => {
+      if (error) {
+        receipt.reject(error);
+      }
+    });
+    return receipt.promise;
   }
 
   private async runScript(
     context: LeaseContext,
     operation: NodeWorkerWorkspaceQuiescenceInput,
-    signal?: AbortSignal,
   ): Promise<string> {
     const runId = randomUUID();
     const scopeKey = "workspace-quiescence-control:" + runId;
@@ -356,10 +388,7 @@ export class NodeWorkerWorkspaceQuiescence {
         throw error;
       }
     };
-    const abort = () => this.supervisor.cancel(runId);
-    signal?.addEventListener("abort", abort, { once: true });
     try {
-      signal?.throwIfAborted();
       releaseWorkspace = context.retainWorkspace();
       const run = await this.supervisor.spawn({
         mode: "child",
@@ -377,18 +406,13 @@ export class NodeWorkerWorkspaceQuiescence {
         stdinMode: "pipe-closed",
         timeoutMs: context.input.timeoutMs ?? DEFAULT_CONTROL_TIMEOUT_MS,
         maxCapturedOutputChars: 16_384,
-        assertCurrent: () => signal?.throwIfAborted(),
       });
-      if (signal?.aborted) {
-        abort();
-      }
       const result = await run.wait();
       if (result.exitCode !== 0 || result.exitSignal !== null) {
         throw new Error(result.stderr || "workspace quiescence operation failed");
       }
       return result.stdout;
     } finally {
-      signal?.removeEventListener("abort", abort);
       await finishControl();
     }
   }

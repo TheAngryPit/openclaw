@@ -1,4 +1,3 @@
-/** Node-host command dispatcher for system commands, approvals, env policy, and plugin commands. */
 import fs from "node:fs";
 import path from "node:path";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
@@ -8,6 +7,7 @@ import {
 } from "@openclaw/normalization-core/string-coerce";
 import { normalizeStringEntries } from "@openclaw/normalization-core/string-normalization";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
+import { validateSystemRunExecutionContext } from "../../packages/gateway-protocol/src/system-run-execution-context.js";
 import { DEFAULT_ASK, DEFAULT_SECURITY } from "../infra/exec-approvals-config.js";
 import {
   analyzeArgvCommand,
@@ -75,6 +75,7 @@ import { invokeNodeWorkerSupervisorCommand } from "./node-worker-supervisor-comm
 import type { NodeWorkerSupervisorControl } from "./node-worker-supervisor-contract.js";
 import type { NodeWorkerWorkspaceRuntime } from "./node-worker-workspace.js";
 import { invokeRegisteredNodeHostCommand as invokePlugin } from "./plugin-node-host.js";
+import { preferMacAppExecHost } from "./runtime-manifest.js";
 import { resolveNodeHostedSkillDirectory } from "./skills.js";
 
 const MCP_ERROR_MESSAGE_MAX_CHARS = 1_024;
@@ -90,36 +91,22 @@ type NodeHostPrivateInvokeRuntime = NodeHostInvokeRuntime & {
   workerComputer?: NodeWorkerComputer;
 };
 
-const execHostEnforced =
-  normalizeLowercaseStringOrEmpty(process.env.OPENCLAW_NODE_EXEC_HOST ?? "") === "app";
-const execHostFallbackAllowed =
-  normalizeLowercaseStringOrEmpty(process.env.OPENCLAW_NODE_EXEC_FALLBACK ?? "") !== "0";
-const preferMacAppExecHost = process.platform === "darwin" && execHostEnforced;
-
 type SystemWhichParams = {
   bins: string[];
 };
 
-type McpToolsCallParams = {
-  server: string;
-  tool: string;
-  arguments?: Record<string, unknown>;
-};
+type McpToolsCallParams = ReturnType<typeof decodeMcpToolsCallParams>;
 
 type SystemExecApprovalsSetParams = {
   file: ExecApprovalsFile;
   baseHash?: string | null;
 };
 
-type SystemRunPrepareParams = {
+type SystemRunPrepareParams = Parameters<typeof buildSystemRunApprovalPlan>[0] & {
   security?: ExecSecurity;
   ask?: ExecAsk;
-  command?: unknown;
-  rawCommand?: unknown;
-  cwd?: unknown;
   env?: Record<string, string> | null;
-  agentId?: unknown;
-  sessionKey?: unknown;
+  executionContext?: unknown;
   strictInlineEval?: unknown;
 };
 
@@ -216,11 +203,6 @@ function requireExecApprovalsBaseHash(
   }
 }
 
-function resolveEnvPath(env?: Record<string, string>): string[] {
-  const raw = env?.PATH ?? env?.Path ?? process.env.PATH ?? process.env.Path ?? DEFAULT_NODE_PATH;
-  return raw.split(path.delimiter).filter(Boolean);
-}
-
 function resolveExecutable(bin: string, env?: Record<string, string>) {
   if (bin.includes("/") || bin.includes("\\")) {
     return null;
@@ -238,7 +220,9 @@ function resolveExecutable(bin: string, env?: Record<string, string>) {
           .split(";")
           .map((ext) => normalizeLowercaseStringOrEmpty(ext))
       : [""];
-  for (const dir of resolveEnvPath(env)) {
+  const envPath =
+    env?.PATH ?? env?.Path ?? process.env.PATH ?? process.env.Path ?? DEFAULT_NODE_PATH;
+  for (const dir of envPath.split(path.delimiter).filter(Boolean)) {
     for (const ext of extensions) {
       const candidate = path.join(dir, bin + ext);
       if (fs.existsSync(candidate)) {
@@ -296,7 +280,6 @@ function createNodeHostInvocationClient(
   };
 }
 
-/** Handles one node-host command invocation payload and returns serialized results. */
 export async function handleInvoke(
   frame: NodeInvokeRequestPayload,
   client: NodeHostClient,
@@ -570,6 +553,12 @@ async function dispatchInvoke(
         decodeParams<SystemRunPrepareParams>(frame.paramsJSON),
         frame.nodeId,
       );
+      if (
+        params.executionContext !== undefined &&
+        (preferMacAppExecHost || !validateSystemRunExecutionContext(params.executionContext))
+      ) {
+        throw new Error("executionContext invalid or unsupported");
+      }
       const { getRuntimeConfig } = await import("../config/config.js");
       const execPolicy = await resolveEffectiveSystemRunExecPolicy({
         cfg: getRuntimeConfig(),
@@ -658,8 +647,6 @@ async function dispatchInvoke(
     params,
     skillBins,
     signal: runtime.signal,
-    execHostEnforced,
-    execHostFallbackAllowed,
     runCommand,
     sendNodeEvent: (event, payload) => sendNodeEvent(client, event, payload),
     sendInvokeResult: response.send,
@@ -667,7 +654,7 @@ async function dispatchInvoke(
   });
 }
 
-function decodeMcpToolsCallParams(raw?: string | null): McpToolsCallParams {
+function decodeMcpToolsCallParams(raw?: string | null) {
   const value = decodeParams<unknown>(raw);
   if (!isRecord(value)) {
     throw new Error("INVALID_REQUEST: MCP tool params must be an object");

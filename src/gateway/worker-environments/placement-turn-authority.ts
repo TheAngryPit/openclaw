@@ -1,13 +1,24 @@
 import type { DatabaseSync } from "node:sqlite";
+import { racePromiseWithAbortSignal } from "../../infra/abort-signal.js";
 import { stageSqliteTransactionState } from "../../infra/sqlite-post-commit.js";
 import { assertTransactionUsable } from "../../infra/sqlite-transaction.js";
 import type { DatabasePathIdentity } from "../../infra/sqlite-worker-identity.js";
+import { getAsyncWorkSignal } from "../../shared/async-work-scope.js";
+import { createDeferredCore } from "../../shared/deferred.js";
 import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
+import { freezeJsonSnapshot } from "../../shared/immutable-data.js";
+import { notifyListeners, registerListener } from "../../shared/listeners.js";
 import {
   registerOpenClawStateDatabaseLifecycleListener,
   requireOpenClawStateDatabaseIdentity,
 } from "../../state/openclaw-state-db-cache.js";
 import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
+import {
+  affectsPlacementObservation,
+  applyPlacementReadPublication,
+  hasPendingPublication,
+  retainSessionPlacementRead,
+} from "./placement-read-authority.js";
 import {
   isCurrentPlacementTurnClaim,
   sameWorkerSessionTurnClaim,
@@ -16,62 +27,21 @@ import {
   type WorkerSessionTurnClaim,
   type WorkerSessionTurnClaimFacts,
 } from "./placement-record.js";
+import type {
+  ClaimChange,
+  PlacementAuthorityOwner,
+  PlacementTurnClaimAuthority,
+  RetainedClaim,
+  WorkspaceResultFacts,
+  WorkspaceResultPostimage,
+} from "./placement-turn-authority.types.js";
 import {
   isCurrentWorkerWorkspacePendingResultOwner,
   matchesWorkspaceResultClaim,
 } from "./placement-workspace-result-owner.js";
 import type { WorkerWorkspacePendingResult } from "./placement-workspace-result.types.js";
 
-export type PlacementTurnClaimAuthority = {
-  readonly claim: WorkerSessionTurnClaim;
-  readonly identity: Readonly<{ agentId: string; sessionKey: string }>;
-  isCurrent: () => boolean;
-  onRevoked: (listener: () => void) => () => void;
-  release: () => void;
-};
-
-type ClaimChange = {
-  sessionId: string;
-  sequence?: number;
-} & (
-  | {
-      kind: "claim";
-      facts?: WorkerSessionTurnClaimFacts;
-      workspaceResult?: WorkspaceResultPostimage;
-      workspacePlacement?: WorkerSessionPlacementRecord;
-    }
-  | { kind: "workspace-result"; facts?: WorkspaceResultPostimage }
-  | { kind: "journal"; uncertain?: true }
-  | { kind: "tools"; claimId: string; authority?: ToolAuthority }
-);
-type WorkspaceResultPostimage = {
-  placement: WorkerSessionPlacementRecord;
-  pendingResult: WorkerWorkspacePendingResult | undefined;
-};
-type WorkspaceResultFacts = WorkspaceResultPostimage & {
-  pendingResult: WorkerWorkspacePendingResult;
-};
-type ToolAuthority = { claim: WorkerSessionTurnClaim; toolNames: readonly string[] };
-type RetainedClaim = {
-  claim: WorkerSessionTurnClaim;
-  facts?: WorkerSessionTurnClaimFacts;
-  createdSequence: number;
-  publicationSequence: number;
-  revoked: boolean;
-  released: boolean;
-  listeners: Set<() => void>;
-};
-type PlacementAuthorityOwner = {
-  identity: DatabasePathIdentity;
-  active: boolean;
-  claims: Map<string, Set<RetainedClaim>>;
-  observations: Map<string, Set<{ revoked: boolean }>>;
-  pending: Set<ClaimChange>;
-  sequence: number;
-  published: Map<string, number>;
-  tools: Map<string, { sequence: number; authority?: ToolAuthority }>;
-  workspaceResults: Map<string, WorkspaceResultFacts>;
-};
+export type { PlacementTurnClaimAuthority } from "./placement-turn-authority.types.js";
 
 function notifyRevoked(claim: RetainedClaim): void {
   if (!claim.revoked) {
@@ -79,18 +49,14 @@ function notifyRevoked(claim: RetainedClaim): void {
   }
   const listeners = [...claim.listeners];
   claim.listeners.clear();
-  for (const listener of listeners) {
-    try {
-      listener();
-    } catch {
-      // Cleanup observers cannot undo the authoritative revocation.
-    }
-  }
+  notifyListeners(listeners, undefined);
 }
 
 function closeOwner(owner: PlacementAuthorityOwner): void {
   owner.active = false;
   owner.pending.clear();
+  owner.settlementListeners.forEach((listener) => listener());
+  owner.settlementListeners.clear();
   owner.published.clear();
   owner.tools.clear();
   owner.workspaceResults.clear();
@@ -103,6 +69,7 @@ function closeOwner(owner: PlacementAuthorityOwner): void {
   }
   owner.claims.clear();
   owner.observations.clear();
+  owner.placementReaders.clear();
 }
 
 const owners = resolveGlobalSingleton(
@@ -126,7 +93,9 @@ function ownerFor(identity: DatabasePathIdentity): PlacementAuthorityOwner {
     active: true,
     claims: new Map(),
     observations: new Map(),
+    placementReaders: new Map(),
     pending: new Set(),
+    settlementListeners: new Set(),
     sequence: 0,
     published: new Map(),
     tools: new Map(),
@@ -164,6 +133,7 @@ function prunePublication(owner: PlacementAuthorityOwner, sessionId: string): vo
     !owner.claims.has(sessionId) &&
     !owner.workspaceResults.has(sessionId) &&
     !owner.observations.has(sessionId) &&
+    !owner.placementReaders.has(sessionId) &&
     ![...owner.pending].some((change) => change.sessionId === sessionId)
   ) {
     owner.published.delete(sessionId);
@@ -175,9 +145,11 @@ function prunePublication(owner: PlacementAuthorityOwner, sessionId: string): vo
 
 function commitChange(owner: PlacementAuthorityOwner, change: ClaimChange, sequence: number): void {
   owner.pending.delete(change);
+  owner.settlementListeners.forEach((listener) => listener());
   if (!owner.active) {
     return;
   }
+  applyPlacementReadPublication(owner, change, sequence);
   const tools = owner.tools.get(change.sessionId);
   if (change.kind === "tools") {
     if (sequence > (tools?.sequence ?? -1)) {
@@ -189,8 +161,13 @@ function commitChange(owner: PlacementAuthorityOwner, change: ClaimChange, seque
     prunePublication(owner, change.sessionId);
     return;
   }
-  for (const observation of owner.observations.get(change.sessionId) ?? []) {
-    observation.revoked = true;
+  for (const sessionId of [change.sessionId, undefined]) {
+    if (affectsPlacementObservation(change, sessionId)) {
+      for (const observation of owner.observations.get(sessionId) ?? []) {
+        observation.revoked = true;
+        observation.indeterminate ||= change.indeterminate === true;
+      }
+    }
   }
   if (sequence > (owner.published.get(change.sessionId) ?? -1)) {
     const result =
@@ -204,10 +181,13 @@ function commitChange(owner: PlacementAuthorityOwner, change: ClaimChange, seque
     if (change.kind === "journal" && !change.uncertain) {
       // Journal-only commits leave the exact placement and pending result unchanged.
     } else if (result?.pendingResult) {
-      owner.workspaceResults.set(change.sessionId, {
-        placement: result.placement,
-        pendingResult: result.pendingResult,
-      });
+      owner.workspaceResults.set(
+        change.sessionId,
+        Object.freeze({
+          placement: result.placement,
+          pendingResult: result.pendingResult,
+        }),
+      );
     } else if (
       !result &&
       placement &&
@@ -215,10 +195,13 @@ function commitChange(owner: PlacementAuthorityOwner, change: ClaimChange, seque
       isCurrentWorkerWorkspacePendingResultOwner(placement, retained.pendingResult)
     ) {
       // Drain keeps exact result custody. Read at commit so earlier clears stay cleared.
-      owner.workspaceResults.set(change.sessionId, {
-        placement,
-        pendingResult: retained.pendingResult,
-      });
+      owner.workspaceResults.set(
+        change.sessionId,
+        Object.freeze({
+          placement,
+          pendingResult: retained.pendingResult,
+        }),
+      );
     } else {
       // Native writers without a complete postimage cannot preserve prepared custody.
       owner.workspaceResults.delete(change.sessionId);
@@ -244,10 +227,6 @@ function commitChange(owner: PlacementAuthorityOwner, change: ClaimChange, seque
   ) {
     owner.tools.set(change.sessionId, { sequence });
   }
-  owner.published.set(
-    change.sessionId,
-    Math.max(owner.published.get(change.sessionId) ?? 0, sequence),
-  );
   for (const retained of owner.claims.get(change.sessionId) ?? []) {
     if (sequence <= retained.createdSequence) {
       continue;
@@ -263,28 +242,34 @@ function commitChange(owner: PlacementAuthorityOwner, change: ClaimChange, seque
   prunePublication(owner, change.sessionId);
 }
 
-/** Retain placement custody across a read-worker wait and pending claim commits. */
-export function observePlacementAuthority(pathname: string, sessionId: string) {
+function capturePlacementObservation(pathname: string, sessionId?: string) {
   const context = captureOpenClawStateWorkerContext({ path: pathname });
   const owner = ownerFor(context.admission.identity);
-  const observation = { revoked: false };
-  const observations = owner.observations.get(sessionId) ?? new Set<{ revoked: boolean }>();
+  const observation = { revoked: false, indeterminate: false };
+  const observations = owner.observations.get(sessionId) ?? new Set<typeof observation>();
   observations.add(observation);
   owner.observations.set(sessionId, observations);
   let released = false;
-  return {
+  const changedMessage =
+    sessionId === undefined
+      ? "Worker placement inventory changed"
+      : `Session ${sessionId} placement authority changed`;
+  const assertUsable = () => {
+    context.admission.assertCurrent();
+    if (
+      released ||
+      observation.indeterminate ||
+      !owner.active ||
+      owners.get(owner.identity.key) !== owner
+    ) {
+      throw new Error(changedMessage);
+    }
+  };
+  const authority = {
     assertCurrent(this: void) {
-      context.admission.assertCurrent();
-      if (
-        released ||
-        observation.revoked ||
-        !owner.active ||
-        owners.get(owner.identity.key) !== owner ||
-        [...owner.pending].some(
-          (change) => change.kind !== "tools" && change.sessionId === sessionId,
-        )
-      ) {
-        throw new Error(`Session ${sessionId} placement authority changed`);
+      assertUsable();
+      if (observation.revoked || hasPendingPublication(owner, sessionId)) {
+        throw new Error(changedMessage);
       }
     },
     release(this: void) {
@@ -293,9 +278,79 @@ export function observePlacementAuthority(pathname: string, sessionId: string) {
       if (observations.size === 0 && owner.observations.get(sessionId) === observations) {
         owner.observations.delete(sessionId);
       }
-      prunePublication(owner, sessionId);
+      if (sessionId !== undefined) {
+        prunePublication(owner, sessionId);
+      }
     },
   };
+  return { authority, observation, owner, assertUsable };
+}
+
+/** Omit the session to fence non-local placements, including creations after an empty read. */
+function observePlacementAuthority(pathname: string, sessionId?: string) {
+  return capturePlacementObservation(pathname, sessionId).authority;
+}
+
+/** Refresh only unconsumed reads; retained observations and uncertain writes stay fenced. */
+export async function preparePlacementAuthorityRead<T>(
+  pathname: string,
+  sessionId: string | undefined,
+  read: () => Promise<T>,
+) {
+  return await preparePlacementRead(pathname, sessionId, read, (value, { authority }) => ({
+    value,
+    ...authority,
+  }));
+}
+
+async function preparePlacementRead<T, Result>(
+  pathname: string,
+  sessionId: string | undefined,
+  read: () => Promise<T>,
+  consume: (value: T, captured: ReturnType<typeof capturePlacementObservation>) => Result,
+): Promise<Result> {
+  const captured = capturePlacementObservation(pathname, sessionId);
+  const { authority, observation, owner, assertUsable } = captured;
+  const signal = getAsyncWorkSignal();
+  const assertReading = () => {
+    signal?.throwIfAborted();
+    assertUsable();
+  };
+  try {
+    for (;;) {
+      assertReading();
+      while (hasPendingPublication(owner, sessionId)) {
+        const settled = createDeferredCore();
+        const unsubscribe = registerListener(owner.settlementListeners, settled.resolve);
+        try {
+          await racePromiseWithAbortSignal(settled.promise, signal);
+        } finally {
+          unsubscribe();
+        }
+        assertReading();
+      }
+      observation.revoked = false;
+      const value = await read();
+      assertReading();
+      if (!observation.revoked && !hasPendingPublication(owner, sessionId)) {
+        return consume(value, captured);
+      }
+    }
+  } catch (error) {
+    authority.release();
+    throw error;
+  }
+}
+
+/** Retain writer postimages, rather than invalidating a destination on ordinary turn claims. */
+export async function prepareSessionPlacementRead(
+  pathname: string,
+  sessionId: string,
+  read: () => Promise<WorkerSessionPlacementRecord | undefined>,
+) {
+  return await preparePlacementRead(pathname, sessionId, read, (placement, captured) => {
+    return retainSessionPlacementRead(sessionId, placement, captured);
+  });
 }
 
 function stageChange(db: DatabaseSync, change: ClaimChange): void {
@@ -315,6 +370,7 @@ function stageChange(db: DatabaseSync, change: ClaimChange): void {
       },
       rollback() {
         owner.pending.delete(change);
+        owner.settlementListeners.forEach((listener) => listener());
         prunePublication(owner, change.sessionId);
         try {
           assertTransactionUsable(db);
@@ -329,16 +385,20 @@ function stageChange(db: DatabaseSync, change: ClaimChange): void {
   }
 }
 
-/** Fence host authority before granting the worker's commit; settle only its exact receipt. */
+/** Fence before granting commit; null prior state proves absence, undefined stays fenced. */
 export function stagePlacementTurnClaimWorkerPublication(
   identity: DatabasePathIdentity,
   facts: WorkerSessionTurnClaimFacts,
   workspaceResult?: WorkspaceResultPostimage,
+  previousState?: WorkerSessionTurnClaimFacts["state"] | null,
+  workspacePlacement?: WorkerSessionPlacementRecord,
 ): { commit: () => void; rollback: () => void; invalidate: () => void } {
   return stageWorkerChange(identity, {
     kind: "claim",
+    localOnly: facts.state === "local" && (previousState === null || previousState === "local"),
     sessionId: facts.sessionId,
-    facts: structuredClone(facts),
+    facts: freezeJsonSnapshot(facts),
+    workspacePlacement: freezeJsonSnapshot(workspacePlacement),
     workspaceResult: captureWorkspaceResultPostimage(facts.sessionId, workspaceResult),
   });
 }
@@ -354,7 +414,7 @@ function captureWorkspaceResultPostimage(
   ) {
     throw new Error("Workspace result publication has a different session owner");
   }
-  return facts ? structuredClone(facts) : undefined;
+  return freezeJsonSnapshot(facts);
 }
 
 /** Pending-result changes invalidate read observations without revoking turn authority. */
@@ -377,6 +437,19 @@ export function stagePlacementWorkspaceJournalWorkerPublication(
   return stageWorkerChange(identity, { kind: "journal", sessionId });
 }
 
+export function stagePlacementRetirementWorkerPublication(
+  identity: DatabasePathIdentity,
+  sessionId: string,
+  previousState: WorkerSessionTurnClaimFacts["state"],
+) {
+  return stageWorkerChange(identity, {
+    kind: "claim",
+    sessionId,
+    localOnly: previousState === "local",
+    retired: true,
+  });
+}
+
 /** Current result custody is published by its writer; discovery snapshots grant no authority. */
 export function readPlacementWorkspaceResultAuthority(
   identity: DatabasePathIdentity,
@@ -394,7 +467,7 @@ export function readPlacementWorkspaceResultAuthority(
   ) {
     return undefined;
   }
-  return structuredClone(facts);
+  return facts;
 }
 
 /** Bind the worker read to the original store before yielding and reject obsolete snapshots. */
@@ -430,7 +503,7 @@ export async function preparePlacementWorkspaceResultAuthority(
       pendingResult &&
       isCurrentWorkerWorkspacePendingResultOwner(placement, pendingResult)
     ) {
-      owner.workspaceResults.set(claim.sessionId, structuredClone({ placement, pendingResult }));
+      owner.workspaceResults.set(claim.sessionId, freezeJsonSnapshot({ placement, pendingResult }));
     } else {
       owner.workspaceResults.delete(claim.sessionId);
     }
@@ -515,10 +588,12 @@ function stageWorkerChange(identity: DatabasePathIdentity, input: ClaimChange) {
     rollback: () =>
       settle(() => {
         owner.pending.delete(change);
+        owner.settlementListeners.forEach((listener) => listener());
         prunePublication(owner, change.sessionId);
       }),
     invalidate: () =>
       settle(() => {
+        change.indeterminate = true;
         // Uncertain claim/tool writes revoke that incarnation. Workspace-only writes
         // invalidate read observations while preserving the separate turn authority.
         if (change.kind === "tools") {
@@ -541,28 +616,30 @@ function stageWorkerChange(identity: DatabasePathIdentity, input: ClaimChange) {
 export function publishPlacementTurnClaimState(
   db: DatabaseSync,
   record: WorkerSessionPlacementRecord,
+  previousState?: WorkerSessionTurnClaimFacts["state"] | null,
 ): void {
-  const { sessionId, agentId, sessionKey, state, executionMode, environmentId, activeOwnerEpoch } =
-    record;
+  const snapshot = freezeJsonSnapshot(structuredClone(record));
   stageChange(db, {
     kind: "claim",
-    sessionId,
-    workspacePlacement: structuredClone(record),
-    facts: {
-      sessionId,
-      agentId,
-      sessionKey,
-      state,
-      executionMode,
-      environmentId,
-      activeOwnerEpoch,
-      turnClaim: record.turnClaim ? { ...record.turnClaim } : null,
-    },
+    localOnly: snapshot.state === "local" && (previousState === null || previousState === "local"),
+    sessionId: snapshot.sessionId,
+    workspacePlacement: snapshot,
+    facts: snapshot,
   });
 }
 
-export function publishPlacementTurnClaimCleared(db: DatabaseSync, sessionId: string): void {
-  stageChange(db, { kind: "claim", sessionId });
+export function publishPlacementTurnClaimCleared(
+  db: DatabaseSync,
+  sessionId: string,
+  previousState?: WorkerSessionTurnClaimFacts["state"] | null,
+  retired?: true,
+): void {
+  stageChange(db, {
+    kind: "claim",
+    sessionId,
+    localOnly: previousState === null || previousState === "local",
+    retired,
+  });
 }
 
 export function publishPlacementWorkspaceResultState(db: DatabaseSync, sessionId: string): void {
@@ -629,20 +706,14 @@ export async function preparePlacementTurnClaimAuthority(
       return false;
     }
   };
-  const assertCurrent = () => {
-    if (!isCurrent()) {
-      throw new Error(`Session ${claim.sessionId} turn claim authority changed`);
-    }
-  };
   try {
     const projection = await read([claim.sessionId]);
     context.admission.assertCurrent();
     // Committed publications received during the read supersede its older snapshot.
     retained.facts ??= projection.placements.get(claim.sessionId);
-    assertCurrent();
     const facts = retained.facts;
-    if (!facts) {
-      throw new Error(`Session ${claim.sessionId} turn claim is unavailable`);
+    if (!facts || !isCurrent()) {
+      throw new Error(`Session ${claim.sessionId} turn claim authority changed`);
     }
     return {
       claim,
@@ -656,8 +727,7 @@ export async function preparePlacementTurnClaimAuthority(
           listener();
           return () => {};
         }
-        retained.listeners.add(listener);
-        return () => retained.listeners.delete(listener);
+        return registerListener(retained.listeners, listener);
       },
       release,
     };

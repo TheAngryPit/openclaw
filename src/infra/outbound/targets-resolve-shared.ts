@@ -18,7 +18,7 @@ export type OutboundTargetResolution = { ok: true; to: string } | { ok: false; e
 /**
  * Inputs shared by direct and heartbeat outbound target resolution.
  */
-type ResolveOutboundTargetParams = {
+export type ResolveOutboundTargetParams = {
   channel: string;
   to?: string;
   allowFrom?: string[];
@@ -91,21 +91,18 @@ export function resolveOutboundTargetWithPlugin(params: {
   }
 
   const resolveTarget = plugin.outbound?.resolveTarget;
-  if (resolveTarget) {
-    return resolveTarget({
-      cfg: params.target.cfg,
-      to: effectiveTo,
-      allowFrom,
-      accountId: params.target.accountId ?? undefined,
-      mode: params.target.mode ?? "explicit",
-    });
-  }
-
-  if (effectiveTo) {
-    return { ok: true, to: effectiveTo };
-  }
-  return {
-    ok: false,
-    error: missingTargetError(plugin.meta.label ?? params.target.channel, hint),
-  };
+  return resolveTarget
+    ? resolveTarget({
+        cfg: params.target.cfg,
+        to: effectiveTo,
+        allowFrom,
+        accountId: params.target.accountId ?? undefined,
+        mode: params.target.mode ?? "explicit",
+      })
+    : effectiveTo
+      ? { ok: true, to: effectiveTo }
+      : {
+          ok: false,
+          error: missingTargetError(plugin.meta.label ?? params.target.channel, hint),
+        };
 }

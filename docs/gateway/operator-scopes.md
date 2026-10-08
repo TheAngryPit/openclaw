@@ -53,9 +53,12 @@ Session-scoped readers can read shared GitHub publication options and receipts
 for sessions they can view through `sessions.github.options` and
 `sessions.github.status`. For these narrow callers, the shared publication option
 is available only when the session has a current managed worktree or repository
-workspace with a supported GitHub remote. Unavailable targets do not hide existing
-shared receipts. Reopen the chat or reconnect after the managed workspace changes
-to refresh its options. Personal account discovery and personal receipts still
+workspace with a supported GitHub remote. Positive worktree target discovery reuses
+verified Git metadata for up to 15 seconds; worktree ownership, registry changes,
+and session access are checked on every request. Publication always resolves the
+current Git remote again. Unavailable targets do not hide existing shared receipts.
+Reopen the chat or reconnect after the managed workspace changes to refresh its
+options. Personal account discovery and personal receipts still
 require `operator.read` and the authenticated owner. Identity, role, access grant,
 connection, and session visibility are rechecked before returning awaited reads.
 
@@ -140,6 +143,9 @@ an access policy supplied by a plugin.
   gateway: {
     roles: {
       default: "guest",
+      assignments: {
+        byGithubLogin: { octocat: "maintainer" },
+      },
       definitions: {
         maintainer: {
           sessions: { others: "write" },
@@ -164,10 +170,22 @@ assignment. Assignment changes immediately invalidate and close that profile's
 active Gateway connections. Reconnecting applies the current role and scope
 ceiling. A committed change still retires the previous access if returning the
 result fails. An authorized self-downgrade receives its response before its
-connection closes. `gateway.roles.default` is required whenever roles are configured,
-must name an existing definition, and applies to profiles without a valid
-assigned role. Omitting `gateway.roles` entirely leaves solo and shared-secret
-deployments unchanged.
+connection closes.
+
+Use `gateway.roles.assignments.byGithubLogin` to declare assignments before a
+person's first login or share the same mapping across Gateways. Keys are GitHub
+logins, matched case-insensitively after trimming; malformed logins and duplicate
+normalized logins are rejected. Every mapped role must exist in `definitions`.
+A valid explicit `users.setRole` assignment wins, followed by the mapping for the
+profile's cached verified primary GitHub identity, then `gateway.roles.default`. Profiles without
+a cached GitHub identity never match this mapping. Clearing an explicit assignment
+with `role: null` exposes the configured mapping or default again.
+
+`users.list` keeps `role` as the explicit assignment and reports `effectiveRole`
+with `roleSource` (`"assigned"`, `"githubLogin"`, or `"default"`).
+`gateway.roles.default` is required whenever roles are configured and must name
+an existing definition. Omitting `gateway.roles` entirely leaves solo and
+shared-secret deployments unchanged.
 
 Set a role's optional `accessPolicyPlugin` to the exact plugin ID when that plugin
 must confirm the person's current access. For example, the Visitor Access plugin
@@ -183,7 +201,8 @@ roles without this binding and the Gateway owner retain their existing access.
 Restore the required plugin to admit the bound role. Removing or changing the
 binding applies through the same live role-policy update described below.
 
-With live configuration reload enabled, edits to `gateway.roles` and
+With live configuration reload enabled, edits to `gateway.roles` (including
+GitHub login assignments) and
 `gateway.auth.identityScopes` apply without restarting the Gateway. Existing
 Gateway clients reconnect to receive the current scope ceiling, except for changes
 confined to model policies as described below and identity-scope edits that leave

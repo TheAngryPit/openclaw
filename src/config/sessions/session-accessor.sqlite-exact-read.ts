@@ -38,6 +38,7 @@ import {
   toDatabaseOptions,
   type SessionSqliteTargetResolutionCache,
 } from "./session-accessor.sqlite-scope.js";
+import { readSessionWorktreeOwnerFactsInDatabase } from "./session-accessor.sqlite-worktree-owner.js";
 import type { SessionEntryReadScope } from "./session-accessor.types.js";
 import {
   assertCanonicalSqliteSessionKeysCurrent,
@@ -239,7 +240,11 @@ export function assertCapturedSessionEntryReadSource(
   database?: Pick<OpenClawAgentDatabase, "agentId" | "path" | "db">,
 ): void {
   if (typeof source.databaseIdentity === "string" && (!database || database.path !== source.path)) {
-    assertExistingDatabaseIdentity(source.path, `file:${source.databaseIdentity}`);
+    assertExistingDatabaseIdentity(
+      source.path,
+      `file:${source.databaseIdentity}`,
+      source.databaseBirthtime,
+    );
   }
   if (!database) {
     if (typeof source.databaseIdentity === "symbol") {
@@ -299,7 +304,6 @@ export function retainSessionEntryKeyAbsence(params: {
     }
   };
   try {
-    assertSourceCurrent();
     assertCurrent();
     return { assertCurrent, release: source.claim.release };
   } catch (error) {
@@ -320,10 +324,11 @@ export function loadExactSessionEntry(scope: SessionEntryReadScope): ExactSessio
 /** Reads exact candidates for one logical session through a single store admission. */
 export function loadExactSessionEntryCandidates(
   scope: (
-    | (Omit<SessionEntryReadScope, "sessionKey"> & { readOnly: boolean })
-    | (PhysicalSessionEntryReadScope & { readOnly: true })
+    | (Omit<SessionEntryReadScope, "sessionKey" | "projection"> & { readOnly: boolean })
+    | (Omit<PhysicalSessionEntryReadScope, "projection"> & { readOnly: true })
   ) & {
     sessionKeys: readonly string[];
+    projection?: SessionEntryReadScope["projection"] | "worktree";
     onReadSource?: (source: CapturedSessionEntryReadSource) => void;
     expectedSource?: CapturedSessionEntryReadSource;
   },
@@ -346,10 +351,14 @@ export function loadExactSessionEntryCandidates(
     if (scope.expectedSource) {
       assertCapturedSessionEntryReadSource(scope.expectedSource, database);
     }
-    const entries = sessionKeys.flatMap((key) => {
-      const entry = readExactSessionEntryRow(database, key, scope.projection, "canonical")?.entry;
-      return entry ? [{ sessionKey: key, entry }] : [];
-    });
+    const projection = scope.projection;
+    const entries =
+      projection === "worktree"
+        ? readSessionWorktreeOwnerFactsInDatabase(database, sessionKeys)
+        : sessionKeys.flatMap((key) => {
+            const entry = readExactSessionEntryRow(database, key, projection, "canonical")?.entry;
+            return entry ? [{ sessionKey: key, entry }] : [];
+          });
     scope.onReadSource?.({
       agentId: database.agentId,
       path: database.path,
@@ -362,6 +371,9 @@ export function loadExactSessionEntryCandidates(
     return read(openOpenClawAgentDatabase(options));
   }
   const result = withOpenClawAgentDatabaseReadOnly(read, options);
+  if (scope.projection === "worktree" && !result.found && result.reason !== "database-missing") {
+    throw new SessionMetadataUnavailableError(result.reason);
+  }
   return result.found ? result.value : [];
 }
 
@@ -411,7 +423,9 @@ export type ExactSessionEntryBatchScope = Omit<
   onReadSource?: (source: SessionEntryReadSource) => void;
 };
 
-function groupExactSessionEntryReadRequests(scopes: readonly ExactSessionEntryBatchScope[]) {
+export function loadExactSessionEntryCandidatesReadOnlyBatch(
+  scopes: readonly ExactSessionEntryBatchScope[],
+): Array<Result<ExactSessionEntry[], unknown>> {
   const results: Array<Result<ExactSessionEntry[], unknown> | undefined> = [];
   const targetCache: SessionSqliteTargetResolutionCache = new Map();
   const groups = new Map<
@@ -450,13 +464,6 @@ function groupExactSessionEntryReadRequests(scopes: readonly ExactSessionEntryBa
       results[index] = err(error);
     }
   }
-  return { groups, results };
-}
-
-export function loadExactSessionEntryCandidatesReadOnlyBatch(
-  scopes: readonly ExactSessionEntryBatchScope[],
-): Array<Result<ExactSessionEntry[], unknown>> {
-  const { groups, results } = groupExactSessionEntryReadRequests(scopes);
   for (const group of groups.values()) {
     try {
       const read = withOpenClawAgentDatabaseReadOnly(

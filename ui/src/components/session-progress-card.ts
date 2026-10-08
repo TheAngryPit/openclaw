@@ -115,7 +115,10 @@ class ProgressActivityTimeDirective extends AsyncDirective {
   }
 
   protected override disconnected(): void {
-    this.stopTimer();
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
   }
 
   protected override reconnected(): void {
@@ -128,13 +131,6 @@ class ProgressActivityTimeDirective extends AsyncDirective {
       return;
     }
     this.timer = setInterval(() => this.setValue(this.renderTime()), 30_000);
-  }
-
-  private stopTimer(): void {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = undefined;
-    }
   }
 
   private renderTime() {
@@ -310,6 +306,32 @@ function renderSteps(card: ProgressCard, hasActiveRun: boolean, sessionStatus?: 
   </ol>`;
 }
 
+function renderProgressCardAction(
+  card: ProgressCard,
+  action: "dismiss" | "clear-saved",
+  onAction?: (card: ProgressCard) => void,
+) {
+  if (!onAction) {
+    return nothing;
+  }
+  const label = t(
+    action === "dismiss" ? "sessionProgressCard.dismiss" : "sessionProgressCard.clearSaved",
+  );
+  return html`<button
+    class="rail-header__action session-progress-card__${action}"
+    type="button"
+    aria-label=${label}
+    title=${label}
+    @click=${(event: MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      onAction(card);
+    }}
+  >
+    ${action === "dismiss" ? icons.x : icons.trash}
+  </button>`;
+}
+
 export function renderSessionProgressCard(
   card: ProgressCard | null | undefined,
   placement: SessionProgressCardPlacement,
@@ -366,36 +388,8 @@ export function renderSessionProgressCard(
     ? (`sessionProgressCard.activity.${TERMINAL_RUN_OUTCOMES[sessionStatus!]!}` as const)
     : "sessionProgressCard.activity.updated";
   const lastActivity = progressActivityTime(activityTimestamp, activityKey);
-  const dismiss = onDismiss
-    ? html`<button
-        class="rail-header__action session-progress-card__dismiss"
-        type="button"
-        aria-label=${t("sessionProgressCard.dismiss")}
-        title=${t("sessionProgressCard.dismiss")}
-        @click=${(event: MouseEvent) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onDismiss?.(card);
-        }}
-      >
-        ${icons.x}
-      </button>`
-    : nothing;
-  const clearSaved = onClearSaved
-    ? html`<button
-        class="rail-header__action session-progress-card__clear-saved"
-        type="button"
-        aria-label=${t("sessionProgressCard.clearSaved")}
-        title=${t("sessionProgressCard.clearSaved")}
-        @click=${(event: MouseEvent) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onClearSaved(card);
-        }}
-      >
-        ${icons.trash}
-      </button>`
-    : nothing;
+  const dismiss = renderProgressCardAction(card, "dismiss", onDismiss);
+  const clearSaved = renderProgressCardAction(card, "clear-saved", onClearSaved);
   if (placement === "composer") {
     const steps = card.steps ?? [];
     const currentStep = currentProgressStep(steps);

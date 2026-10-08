@@ -8,12 +8,7 @@ import {
 } from "openclaw/plugin-sdk/channel-outbound";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
-import {
-  classifyGatewayProbePath,
-  isProtectedPluginRoutePathFromContext,
-  resolvePluginRoutePathContext,
-  resolveGatewayPort,
-} from "openclaw/plugin-sdk/gateway-config-runtime";
+import { resolveGatewayPort } from "openclaw/plugin-sdk/gateway-config-runtime";
 import {
   asObjectRecord,
   collectChannelAccountScopes,
@@ -29,13 +24,16 @@ import {
 } from "./accounts.js";
 import { isNumericTelegramSenderUserId, normalizeTelegramAllowFromEntry } from "./allow-from.js";
 import { lookupTelegramChatId } from "./api-fetch.js";
-import { hasTelegramBotEndpointApiRoot, normalizeTelegramApiRoot } from "./api-root.js";
+import { hasTelegramBotEndpointApiRoot } from "./api-root.js";
 import {
   legacyConfigRules as TELEGRAM_LEGACY_CONFIG_RULES,
   normalizeCompatibilityConfig as normalizeTelegramCompatibilityConfig,
 } from "./doctor-contract.js";
 import { resolveTelegramPreviewStreamMode } from "./preview-streaming.js";
-import { telegramWebhookHost } from "./webhook-legacy.js";
+import {
+  DEFAULT_TELEGRAM_WEBHOOK_PATH,
+  resolveTelegramWebhookPathConflict,
+} from "./webhook-route.js";
 
 type TelegramAllowFromInvalidHit = { path: string; entry: string };
 type TelegramApiRootBotEndpointHit = {
@@ -68,12 +66,8 @@ function collectTelegramAllowFromLists(
     { pathLabel: `${prefix}.allowFrom`, holder: account, key: "allowFrom" },
     { pathLabel: `${prefix}.groupAllowFrom`, holder: account, key: "groupAllowFrom" },
   ];
-  const groups = asObjectRecord(account.groups);
-  if (!groups) {
-    return refs;
-  }
-  for (const groupId of Object.keys(groups)) {
-    const group = asObjectRecord(groups[groupId]);
+  for (const [groupId, value] of Object.entries(asObjectRecord(account.groups) ?? {})) {
+    const group = asObjectRecord(value);
     if (!group) {
       continue;
     }
@@ -82,12 +76,8 @@ function collectTelegramAllowFromLists(
       holder: group,
       key: "allowFrom",
     });
-    const topics = asObjectRecord(group.topics);
-    if (!topics) {
-      continue;
-    }
-    for (const topicId of Object.keys(topics)) {
-      const topic = asObjectRecord(topics[topicId]);
+    for (const [topicId, topicValue] of Object.entries(asObjectRecord(group.topics) ?? {})) {
+      const topic = asObjectRecord(topicValue);
       if (!topic) {
         continue;
       }
@@ -129,22 +119,22 @@ function collectTelegramMalformedGroupsWarnings(params: {
 
 function scanTelegramInvalidAllowFromEntries(cfg: OpenClawConfig): TelegramAllowFromInvalidHit[] {
   const hits: TelegramAllowFromInvalidHit[] = [];
-  const scanList = (pathLabel: string, list: unknown) => {
-    if (!Array.isArray(list)) {
-      return;
-    }
-    for (const entry of list) {
-      const normalized = normalizeTelegramAllowFromEntry(entry);
-      if (!normalized || normalized === "*" || isNumericTelegramSenderUserId(normalized)) {
+  for (const scope of collectChannelAccountScopes({ cfg, channelId: "telegram" })) {
+    for (const { pathLabel, holder, key } of collectTelegramAllowFromLists(
+      scope.prefix,
+      scope.account,
+    )) {
+      const list = holder[key];
+      if (!Array.isArray(list)) {
         continue;
       }
-      hits.push({ path: pathLabel, entry: normalizeOptionalString(String(entry)) ?? "" });
-    }
-  };
-
-  for (const scope of collectChannelAccountScopes({ cfg, channelId: "telegram" })) {
-    for (const ref of collectTelegramAllowFromLists(scope.prefix, scope.account)) {
-      scanList(ref.pathLabel, ref.holder[ref.key]);
+      for (const entry of list) {
+        const normalized = normalizeTelegramAllowFromEntry(entry);
+        if (!normalized || normalized === "*" || isNumericTelegramSenderUserId(normalized)) {
+          continue;
+        }
+        hits.push({ path: pathLabel, entry: normalizeOptionalString(String(entry)) ?? "" });
+      }
     }
   }
   return hits;
@@ -171,10 +161,16 @@ function scanTelegramBotEndpointApiRoots(cfg: OpenClawConfig): TelegramApiRootBo
     if (typeof value !== "string" || !hasTelegramBotEndpointApiRoot(value)) {
       continue;
     }
+    const url = new URL(value.trim());
+    const segments = url.pathname.split("/").filter(Boolean);
+    segments.pop();
+    url.pathname = segments.length > 0 ? `/${segments.join("/")}` : "/";
+    url.search = "";
+    url.hash = "";
     hits.push({
       path: `${scope.prefix}.apiRoot`,
       pathSegments: [...scope.pathSegments, "apiRoot"],
-      normalized: normalizeTelegramApiRoot(value),
+      normalized: url.toString().replace(/\/+$/u, ""),
     });
   }
   return hits;
@@ -189,7 +185,7 @@ function collectTelegramApiRootWarnings(params: {
   }
   const samplePath = sanitizeForLog(params.hits[0]?.path ?? "channels.telegram.apiRoot");
   return [
-    `- ${samplePath} points at a full Telegram bot endpoint; apiRoot must be the Bot API root only. This can make startup calls like deleteWebhook, deleteMyCommands, and setMyCommands fail with 404 even when direct curl commands work.`,
+    `- ${samplePath} points at a full Telegram bot endpoint; apiRoot must be the Bot API root only. Telegram refuses this value until it is repaired.`,
     `- Run "${params.doctorFixCommand}" to remove the trailing /bot<TOKEN> path from Telegram apiRoot.`,
   ];
 }
@@ -429,17 +425,14 @@ async function maybeRepairTelegramAllowFromUsernames(cfg: OpenClawConfig): Promi
         out.push(normalizeOptionalString(String(entry)) ?? "");
       }
     }
-    const deduped: DoctorAllowFromList = [];
-    const seen = new Set<string>();
+    const deduped = new Map<string, DoctorAllowFromList[number]>();
     for (const entry of out) {
       const keyValue = normalizeOptionalString(String(entry)) ?? "";
-      if (!keyValue || seen.has(keyValue)) {
-        continue;
+      if (keyValue && !deduped.has(keyValue)) {
+        deduped.set(keyValue, entry);
       }
-      seen.add(keyValue);
-      deduped.push(entry);
     }
-    holder[key] = deduped;
+    holder[key] = [...deduped.values()];
     for (const replacement of replaced.slice(0, 5)) {
       changes.push(
         `- ${sanitizeForLog(pathLabel)}: resolved ${sanitizeForLog(replacement.from)} -> ${sanitizeForLog(replacement.to)}`,
@@ -553,37 +546,19 @@ export const telegramDoctor: ChannelDoctorAdapter = {
         continue;
       }
       const legacyListener = resolveTelegramLegacyWebhookListener(config.legacyWebhook);
-      const path = config.webhookPath ?? "/telegram-webhook";
-      const pathname = URL.parse(path, "http://localhost")?.pathname ?? path;
-      const probe = classifyGatewayProbePath(pathname);
-      const pathConflict =
-        path === "/healthz"
-          ? "is reserved for webhook listener health checks"
-          : probe === "live" || probe === "ready" || probe === "startup"
-            ? "is reserved for Gateway probes"
-            : isProtectedPluginRoutePathFromContext(resolvePluginRoutePathContext(pathname))
-              ? "requires Gateway authentication"
-              : undefined;
+      const path = config.webhookPath ?? DEFAULT_TELEGRAM_WEBHOOK_PATH;
+      const pathConflict = resolveTelegramWebhookPathConflict(path);
       if (pathConflict) {
         warningNotes.push(
-          `Telegram account "${accountId}" resolves webhookPath to ${path}, which ${pathConflict}. Set webhookPath to /telegram-webhook and update webhookUrl or its reverse-proxy mapping. ${legacyListener && path !== "/healthz" ? "The legacy listener remains available; verify delivery on the new route before setting legacyWebhook: false." : "This account cannot start until its webhook path is changed."}`,
+          `Telegram account "${accountId}" resolves webhookPath to ${path}, which ${pathConflict.message}. Set webhookPath to /telegram-webhook and update webhookUrl or its reverse-proxy mapping. ${legacyListener && pathConflict.kind !== "health" ? "The legacy listener remains available; verify delivery on the new route before setting legacyWebhook: false." : "This account cannot start until its webhook path is changed."}`,
         );
         continue;
       }
       const destination = `Gateway port ${resolveGatewayPort(cfg, env)}${path}`;
-      if (!telegramWebhookHost.getWebhookLegacyListener) {
-        // The shipped host collects warningNotes, but does not render infoNotes.
-        warningNotes.push(
-          legacyListener
-            ? `Telegram account "${accountId}": the 2026.9.6 compatibility listener ${legacyListener.host}:${legacyListener.port} serves this account directly. This host cannot share a legacy port across accounts; use distinct endpoints or move the reverse proxy for ${config.webhookUrl} to ${destination}, verify delivery, then set legacyWebhook: false.`
-            : `Telegram account "${accountId}": legacyWebhook: false disables the 2026.9.6 compatibility listener. Route ${config.webhookUrl} to ${destination}.`,
-        );
-        continue;
-      }
       infoNotes.push(
         legacyListener
           ? `Telegram account "${accountId}": legacy listener ${legacyListener.host}:${legacyListener.port} forwards to ${destination}. Move the reverse proxy for ${config.webhookUrl} to that Gateway route, verify delivery, then set legacyWebhook: false to disable legacy forwarding for this account.`
-          : `Telegram account "${accountId}": legacyWebhook: false disables legacy forwarding for this account. Route ${config.webhookUrl} to ${destination}.`,
+          : `Telegram account "${accountId}": no legacy listener is configured. The advertised webhook URL must reach ${destination}.`,
       );
     }
     return { changeNotes: [], infoNotes, warningNotes };

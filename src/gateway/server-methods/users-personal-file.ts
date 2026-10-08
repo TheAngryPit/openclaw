@@ -116,10 +116,12 @@ function preparePersonalFile(options: GatewayRequestHandlerOptions, requestedAge
       );
     }
     const cfg = context.getRuntimeConfig();
+    const profile = readUserProfileIdentity(canonicalId);
     const policy = resolveOperatorRolePolicyForAssignment(
       canonicalId,
-      readUserProfileIdentity(canonicalId)?.role ?? null,
+      profile?.role ?? null,
       cfg,
+      profile?.githubLogin ?? null,
     );
     if (
       ![
@@ -172,6 +174,7 @@ async function runPersonalFile(
 ) {
   try {
     const target = preparePersonalFile(options, params.agentId);
+    const identity = { agentId: target.agentId, profileId: target.profileId };
     const fsRoot = await root(target.workspaceDir, {
       symlinks: "reject",
       mutationSymlinks: "reject",
@@ -185,8 +188,7 @@ async function runPersonalFile(
         const loaded = await fsRoot.read(target.name);
         target.assertCurrent();
         return {
-          agentId: target.agentId,
-          profileId: target.profileId,
+          ...identity,
           missing: false,
           content: new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(loaded.buffer),
           hash: sha256Hex(loaded.buffer),
@@ -197,8 +199,7 @@ async function runPersonalFile(
           throw error;
         }
         return {
-          agentId: target.agentId,
-          profileId: target.profileId,
+          ...identity,
           missing: true,
           content: "",
           hash: null,
@@ -243,8 +244,7 @@ async function runPersonalFile(
       await fsRoot.write(target.name, write.content, { mkdir: true, overwrite: !previous.missing });
       target.assertCurrent();
       options.respond(true, {
-        agentId: target.agentId,
-        profileId: target.profileId,
+        ...identity,
         missing: false,
         content: write.content,
         hash: sha256Hex(write.content),

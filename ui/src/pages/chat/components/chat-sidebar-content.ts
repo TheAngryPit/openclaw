@@ -123,7 +123,6 @@ function renderSidebarAttachment(
       .label=${content.title}
       .mimeType=${content.mimeType ?? ""}
       .sizeBytes=${source?.sizeBytes ?? content.sizeBytes}
-      .downloadHref=${src ?? ""}
     ></openclaw-chat-pdf-preview>`;
   }
   if (
@@ -132,7 +131,6 @@ function renderSidebarAttachment(
     !isCrossOriginHttpSource(src ?? "")
   ) {
     return html`<openclaw-chat-text-attachment
-      .compact=${true}
       .plainText=${content.plainText ?? false}
       .actions=${content.renderActions?.() ?? nothing}
       .embedSandboxMode=${embedSandboxMode}
@@ -292,6 +290,14 @@ type MarkdownSidebarProps = {
 
 function renderMarkdownSidebar(props: MarkdownSidebarProps) {
   const content = props.content;
+  const renderRawButton = (className = "btn", style?: string) => html`<button
+    @click=${props.onViewRawText}
+    class=${className}
+    type="button"
+    style=${style ?? nothing}
+  >
+    ${t("chat.detailPanel.viewRawText")}
+  </button>`;
   const markdownHtml =
     content?.kind === "markdown" && content.content.trim()
       ? toSanitizedMarkdownHtml(content.content, {
@@ -370,16 +376,7 @@ function renderMarkdownSidebar(props: MarkdownSidebarProps) {
                 })}
                 ${
                   content?.kind === "file" || content?.rawText?.trim()
-                    ? html`
-                        <button
-                          @click=${props.onViewRawText}
-                          class="btn"
-                          type="button"
-                          style="margin-top: 12px;"
-                        >
-                          ${t("chat.detailPanel.viewRawText")}
-                        </button>
-                      `
+                    ? renderRawButton("btn", "margin-top: 12px;")
                     : nothing
                 }
               `
@@ -438,15 +435,7 @@ function renderMarkdownSidebar(props: MarkdownSidebarProps) {
                               ${
                                 content.rawText?.trim()
                                   ? html`
-                                      <div style="margin-top: 12px;">
-                                        <button
-                                          @click=${props.onViewRawText}
-                                          class="btn"
-                                          type="button"
-                                        >
-                                          ${t("chat.detailPanel.viewRawText")}
-                                        </button>
-                                      </div>
+                                      <div style="margin-top: 12px;">${renderRawButton()}</div>
                                     `
                                   : nothing
                               }
@@ -483,19 +472,7 @@ function renderMarkdownSidebar(props: MarkdownSidebarProps) {
                                         `
                                   }
                                 </div>
-                                ${
-                                  props.showingRawText
-                                    ? nothing
-                                    : html`
-                                        <button
-                                          @click=${props.onViewRawText}
-                                          class="btn btn--sm"
-                                          type="button"
-                                        >
-                                          ${t("chat.detailPanel.viewRawText")}
-                                        </button>
-                                      `
-                                }
+                                ${props.showingRawText ? nothing : renderRawButton("btn btn--sm")}
                               </div>
                               ${
                                 markdownHtml

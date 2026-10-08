@@ -64,7 +64,8 @@
   gap: var(--space-3);
 }
 
-.installed-plugins-card__art {
+.installed-plugins-card__art,
+.plugins-tile {
   width: 40px;
   height: 40px;
   flex: 0 0 40px;
@@ -72,6 +73,9 @@
   place-items: center;
   overflow: hidden;
   border-radius: 10px;
+}
+
+.installed-plugins-card__art {
   background: var(--bg);
 }
 
@@ -114,11 +118,6 @@
 
 .plugin-card-title-row :is(h2, h3) {
   min-width: 0;
-}
-
-.installed-plugins-card__status-notice {
-  align-self: center;
-  margin-inline-start: auto;
 }
 
 .plugin-card-author {
@@ -514,7 +513,6 @@
   white-space: nowrap;
 }
 
-/* Labelled control in a toolbar (label text over a settings input/select). */
 .plugins-field {
   display: grid;
   gap: 6px;
@@ -532,8 +530,6 @@
   min-width: 180px;
 }
 
-/* <details> shell keeps the settings-section look while restoring the native
- * expand/collapse the pre-migration skill groups had (cfg-object pattern). */
 .skills-group__summary {
   align-items: center;
   cursor: var(--cursor-action);
@@ -555,8 +551,6 @@
 .skills-group__chevron svg {
   width: 16px;
   height: 16px;
-  fill: none;
-  stroke: currentColor;
   stroke-width: 2px;
 }
 
@@ -664,13 +658,6 @@ h3.settings-row__title {
 }
 
 .plugins-tile {
-  display: grid;
-  width: 40px;
-  height: 40px;
-  flex: 0 0 40px;
-  place-items: center;
-  overflow: hidden;
-  border-radius: 10px;
   background: var(--bg-elevated);
 }
 
@@ -715,7 +702,6 @@ h3.settings-row__title {
   overflow-wrap: anywhere;
 }
 
-/* Row-local message: full-width line under the row's text + controls. */
 .plugin-catalog-card > .plugins-row-message {
   position: relative;
   z-index: 3;
