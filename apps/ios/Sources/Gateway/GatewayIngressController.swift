@@ -490,6 +490,7 @@ final class GatewayIngressController {
         else { return nil }
         return Route(url: url, stableID: profile.stableID, tls: tls)
     }
+
     private func origin(stableID: String) -> CloudflareAccessOrigin? {
         let key = GatewayStableIdentifier.Key(stableID)
         // A replacement route cannot take ownership until the saved grant is retired.
@@ -849,6 +850,7 @@ final class GatewayIngressController {
         else { return nil }
         return cookie
     }
+
     private func headers(
         for url: URL,
         registration: Registration,

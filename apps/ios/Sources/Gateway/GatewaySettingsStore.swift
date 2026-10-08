@@ -55,6 +55,7 @@ enum GatewaySettingsStore {
             "gateway.\(self.rawValue)"
         }
     }
+
     struct GatewayCredentialMetadata: Codable, Equatable {
         let gatewayStableID: String
         let suppressStoredDeviceAuth: Bool

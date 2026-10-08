@@ -1366,6 +1366,7 @@ extension OnboardingWizardView {
             if self.manualPort <= 0 || self.manualPort > 65535 { self.manualPort = 18789 }
         }
     }
+
     private func connectManual(setupAttemptID: GatewaySetupAttempt? = nil) async {
         let admissionCheckpoint = setupAttemptID?.admissionCheckpoint ?? self.gatewayController.ingress
             .admissionCheckpoint()
