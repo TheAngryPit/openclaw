@@ -154,12 +154,26 @@ function checkBindings() {
     fail("candidate source/test hashes are malformed or differ from the exact changed-path set");
   }
   if (
-    manifest.testCases.baselineRegression.expectedFailedTestSuites !== 1 ||
+    manifest.testCases.baselineRegression.expectedTotalTestSuites !== 2 ||
+    manifest.testCases.baselineRegression.expectedFailedTestSuites !== 2 ||
+    manifest.testCases.baselineRegression.expectedPassedTestSuites !== 0 ||
+    manifest.testCases.baselineRegression.expectedPendingTestSuites !== 0 ||
     !manifest.testCases.candidateSelected.fullNames.includes(
       manifest.testCases.baselineRegression.fullNames[0],
     )
   ) {
-    fail("paired proof must compare the same single named baseline regression on candidate");
+    fail("paired proof must compare the same single named baseline regression with exact Vitest hierarchy counts");
+  }
+  if (
+    manifest.changedChecks.coreTestGraphConcurrency !== 1 ||
+    JSON.stringify(manifest.changedChecks.coreTestGraphPrequalificationStripes) !==
+      JSON.stringify(["1/3", "2/3", "3/3"]) ||
+    manifest.changedChecks.coreTestGraphMaximumDurationMs !== processTimeoutMs ||
+    !Array.isArray(manifest.changedChecks.coreTestGraphNames) ||
+    manifest.changedChecks.coreTestGraphNames.length !== 27 ||
+    new Set(manifest.changedChecks.coreTestGraphNames).size !== 27
+  ) {
+    fail("core-test prequalification must preserve three exact canonical stripes, serial graph execution, all 27 graphs, and the normal command deadline");
   }
 }
 
@@ -349,7 +363,13 @@ function processHealthy(result, expectedExitCode) {
   );
 }
 
-async function runProcess(id, executable, args, cwd, timeoutMs = processTimeoutMs) {
+async function runProcess(
+  id,
+  executable,
+  args,
+  cwd,
+  timeoutMs = processTimeoutMs,
+) {
   mkdirSync(outputDir, { recursive: true });
   const stdoutPath = resolve(outputDir, id + ".stdout.log");
   const stderrPath = resolve(outputDir, id + ".stderr.log");
@@ -545,6 +565,10 @@ function parseWrapperReport(report, bytes, wrapper) {
     suiteEntrypoints: report.testResults
       .map((suite) => relative(repoRoot, resolve(repoRoot, suite.name)).split(sep).join("/"))
       .sort(),
+    suiteResults: report.testResults.map((suite) => ({
+      status: suite.status,
+      message: suite.message ?? "",
+    })),
     assertions,
     selected,
     excludedByPattern,
@@ -552,7 +576,10 @@ function parseWrapperReport(report, bytes, wrapper) {
       total: report.numTotalTests,
       passed: report.numPassedTests,
       failed: report.numFailedTests,
+      totalSuites: report.numTotalTestSuites,
+      passedSuites: report.numPassedTestSuites,
       failedSuites: report.numFailedTestSuites,
+      pendingSuites: report.numPendingTestSuites,
       pending: report.numPendingTests ?? null,
       todo: report.numTodoTests ?? null,
       skipped: report.numSkippedTests ?? null,
@@ -622,6 +649,183 @@ function selfTestReportParser() {
       productCodeExecuted: false,
     }),
   );
+  selfTestBaselineSuiteAggregation();
+}
+
+function selfTestBaselineSuiteAggregation() {
+  const baseline = manifest.testCases.baselineRegression;
+  const expectedName = baseline.fullNames[0];
+  const failureMessage = manifest.qualificationBoundary.baselineFailureMustContain;
+  const report = {
+    success: false,
+    numTotalTestSuites: 2,
+    numPassedTestSuites: 0,
+    numFailedTestSuites: 2,
+    numPendingTestSuites: 0,
+    numTotalTests: 2,
+    numPassedTests: 0,
+    numFailedTests: 1,
+    numPendingTests: 1,
+    numTodoTests: 0,
+    testResults: [
+      {
+        name: resolve(repoRoot, baseline.entrypoints[0]),
+        status: "failed",
+        message: "",
+        assertionResults: [
+          {
+            ancestorTitles: ["runGatewayLoop"],
+            title: expectedName.replace(/^runGatewayLoop /, ""),
+            fullName: expectedName,
+            status: "failed",
+            failureMessages: [failureMessage],
+          },
+          {
+            ancestorTitles: ["runGatewayLoop"],
+            title: "an unrelated assertion filtered by the selected pattern",
+            fullName: "runGatewayLoop an unrelated assertion filtered by the selected pattern",
+            status: "skipped",
+            failureMessages: [],
+          },
+        ],
+      },
+    ],
+  };
+  const makeObserved = (input) => {
+    const bytes = Buffer.from(JSON.stringify(input));
+    return {
+      error: null,
+      observed: parseWrapperReport(input, bytes, baseline),
+      process: {
+        exitCode: 1,
+        signal: null,
+        spawnError: null,
+        timedOut: false,
+        overflowed: false,
+        processGroup: { processGroupEmpty: true },
+      },
+    };
+  };
+  const correct = makeObserved(report);
+  if (!qualifyBaseline(correct).valid) {
+    fail("synthetic baseline reporter hierarchy with one exact NeedsLogin assertion did not qualify");
+  }
+  const wrongFailureSuites = makeObserved({ ...report, numFailedTestSuites: 1 });
+  const wrongTotalSuites = makeObserved({ ...report, numTotalTestSuites: 1 });
+  if (qualifyBaseline(wrongFailureSuites).valid || qualifyBaseline(wrongTotalSuites).valid) {
+    fail("synthetic baseline accepted a mismatched Vitest hierarchical suite count");
+  }
+  console.log(
+    JSON.stringify({
+      status: "SYNTHETIC_BASELINE_HIERARCHY_QUALIFIER_PASS",
+      expected: {
+        totalSuites: baseline.expectedTotalTestSuites,
+        failedSuites: baseline.expectedFailedTestSuites,
+        passedSuites: baseline.expectedPassedTestSuites,
+        pendingSuites: baseline.expectedPendingTestSuites,
+        oneExactFailedAssertion: expectedName,
+      },
+      rejectsWrongFailedSuiteCount: true,
+      rejectsWrongTotalSuiteCount: true,
+      productCodeExecuted: false,
+    }),
+  );
+  selfTestCoreTestGraphReceipt();
+  selfTestSelectedCandidateEarlyStop();
+}
+
+function selfTestCoreTestGraphReceipt() {
+  const graphNames = manifest.changedChecks.coreTestGraphNames;
+  const stripes = manifest.changedChecks.coreTestGraphPrequalificationStripes;
+  const tempDir = resolve(outputDir, "synthetic-core-graph-receipt-" + Date.now());
+  mkdirSync(tempDir, { recursive: true });
+  const writeSyntheticRun = (name, outcomes, plannedGraphs = null) => {
+    const stdoutPath = resolve(tempDir, name + ".stdout.log");
+    const stderrPath = resolve(tempDir, name + ".stderr.log");
+    writeFileSync(stdoutPath, "");
+    writeFileSync(
+      stderrPath,
+      [
+        ...(plannedGraphs ? ["[check:changed] core test graphs: " + plannedGraphs.join(", ")] : []),
+        ...outcomes.map((graph) => "[tsgo:" + graph + "] passed in 1.0s"),
+      ].join("\n") + "\n",
+    );
+    return {
+      id: name,
+      exitCode: 0,
+      signal: null,
+      spawnError: null,
+      timedOut: false,
+      overflowed: false,
+      durationMs: 1,
+      processGroup: { processGroupEmpty: true },
+      stdoutPath: relative(workspace, stdoutPath).split(sep).join("/"),
+      stderrPath: relative(workspace, stderrPath).split(sep).join("/"),
+    };
+  };
+  try {
+    const stripeRuns = stripes.map((stripe, index) =>
+      writeSyntheticRun("stripe-" + (index + 1), graphNamesForCoreStripe(stripe)),
+    );
+    const canonical = writeSyntheticRun("canonical", graphNames, graphNames);
+    if (!qualifyCoreTestGraphReuse(stripeRuns, canonical).valid) {
+      fail("synthetic disjoint stripe receipts did not qualify against the unchanged canonical 27-graph check");
+    }
+    const missingStripeRuns = [...stripeRuns];
+    missingStripeRuns[0] = writeSyntheticRun(
+      "missing-stripe-graph",
+      graphNamesForCoreStripe(stripes[0]).slice(1),
+    );
+    if (qualifyCoreTestGraphReuse(missingStripeRuns, canonical).valid) {
+      fail("synthetic stripe receipts accepted a missing canonical graph");
+    }
+  } finally {
+    const normalizedTempDir = resolve(tempDir);
+    if (
+      dirname(normalizedTempDir) !== resolve(outputDir) ||
+      !normalizedTempDir.split(sep).at(-1).startsWith("synthetic-core-graph-receipt-")
+    ) {
+      fail("refusing to remove an unexpected synthetic graph-receipt directory");
+    }
+    rmSync(normalizedTempDir, { recursive: true, force: true });
+  }
+  console.log(
+    JSON.stringify({
+      status: "SYNTHETIC_CORE_TEST_GRAPH_RECEIPT_PASS",
+      graphCount: graphNames.length,
+      checks: ["three-disjoint-round-robin-stripes", "missing-graph-rejected"],
+      productCodeExecuted: false,
+    }),
+  );
+}
+
+function selectedCandidateDownstreamDisposition(qualification) {
+  if (qualification?.valid === true) {
+    return { shouldRun: true, status: "CONTINUE_AFTER_SELECTED_PASS", reason: null };
+  }
+  return {
+    shouldRun: false,
+    status: "NOT_RUN_AFTER_SELECTED_FAILURE",
+    reason: qualification?.reason ?? "selected candidate proof did not qualify",
+  };
+}
+
+function selfTestSelectedCandidateEarlyStop() {
+  const passing = selectedCandidateDownstreamDisposition({ valid: true });
+  const failing = selectedCandidateDownstreamDisposition({
+    valid: false,
+    reason: "selected CLI command did not return structured evidence",
+  });
+  if (
+    passing.shouldRun !== true ||
+    passing.status !== "CONTINUE_AFTER_SELECTED_PASS" ||
+    failing.shouldRun !== false ||
+    failing.status !== "NOT_RUN_AFTER_SELECTED_FAILURE" ||
+    failing.reason !== "selected CLI command did not return structured evidence"
+  ) {
+    fail("synthetic selected-candidate disposition did not preserve fail-closed downstream routing");
+  }
+  console.log(JSON.stringify({ status: "SYNTHETIC_SELECTED_GATE_EARLY_STOP_PASS" }));
 }
 
 async function runVitest(cell, wrapper) {
@@ -662,6 +866,7 @@ async function runVitest(cell, wrapper) {
       ? {
           reportSha256: observed.reportSha256,
           suiteEntrypoints: observed.suiteEntrypoints,
+          suiteResults: observed.suiteResults,
           rawCounts: observed.rawCounts,
           selected: observed.selected.map((item) => ({
             fullName: item.fullName,
@@ -691,7 +896,18 @@ async function runVitestGroup(cell, group) {
   const suiteSetMatches =
     JSON.stringify(suiteEntrypoints) === JSON.stringify(expectedSuites) &&
     new Set(suiteEntrypoints).size === suiteEntrypoints.length;
-  const countFields = ["total", "passed", "failed", "failedSuites", "pending", "todo", "skipped"];
+  const countFields = [
+    "total",
+    "passed",
+    "failed",
+    "totalSuites",
+    "passedSuites",
+    "failedSuites",
+    "pendingSuites",
+    "pending",
+    "todo",
+    "skipped",
+  ];
   const rawCounts = Object.fromEntries(
     countFields.map((field) => {
       const values = observedRuns.map((run) => run.observed.rawCounts[field]);
@@ -744,6 +960,10 @@ function qualifyBaseline(observed) {
       messages,
     );
   const ok =
+    JSON.stringify(result.suiteEntrypoints) ===
+      JSON.stringify([...manifest.testCases.baselineRegression.entrypoints].sort()) &&
+    result.suiteResults.length === 1 &&
+    result.suiteResults[0].status === "failed" &&
     selected.length === 1 &&
     selected[0].fullName === expected[0] &&
     selected[0].status === "failed" &&
@@ -751,8 +971,14 @@ function qualifyBaseline(observed) {
     result.rawCounts.total >= 1 &&
     result.rawCounts.failed === 1 &&
     result.rawCounts.passed === 0 &&
+    result.rawCounts.totalSuites ===
+      manifest.testCases.baselineRegression.expectedTotalTestSuites &&
+    result.rawCounts.passedSuites ===
+      manifest.testCases.baselineRegression.expectedPassedTestSuites &&
     result.rawCounts.failedSuites ===
       manifest.testCases.baselineRegression.expectedFailedTestSuites &&
+    result.rawCounts.pendingSuites ===
+      manifest.testCases.baselineRegression.expectedPendingTestSuites &&
     processHealthy(observed.process, "nonzero") &&
     !nonBehavioralFailure &&
     messages.toLowerCase().includes(behavioralSignal.toLowerCase());
@@ -767,6 +993,117 @@ function qualifyBaseline(observed) {
     failureMessageContainsExpectedSignal: messages
       .toLowerCase()
       .includes(behavioralSignal.toLowerCase()),
+  };
+}
+
+function parseCoreTestGraphReceipt(processResult) {
+  const stdout = existsSync(safeWorkspacePath(processResult.stdoutPath))
+    ? readFileSync(safeWorkspacePath(processResult.stdoutPath), "utf8")
+    : "";
+  const stderr = existsSync(safeWorkspacePath(processResult.stderrPath))
+    ? readFileSync(safeWorkspacePath(processResult.stderrPath), "utf8")
+    : "";
+  const output = stdout + "\n" + stderr;
+  const plans = [...output.matchAll(/^\[check:changed\] core test graphs: (.+)$/gm)].map(
+    (match) => match[1].split(", "),
+  );
+  const outcomes = [...output.matchAll(/^\[tsgo:([a-z0-9-]+)\] (passed|failed \(exit -?\d+\)) in ([\d.]+)s$/gm)].map(
+    (match) => ({ graph: match[1], outcome: match[2], durationSeconds: Number(match[3]) }),
+  );
+  return {
+    planCount: plans.length,
+    plannedGraphs: plans.length === 1 ? plans[0] : [],
+    outcomes,
+    passedGraphs: outcomes.filter((item) => item.outcome === "passed").map((item) => item.graph),
+    failedGraphs: outcomes.filter((item) => item.outcome !== "passed").map((item) => item.graph),
+  };
+}
+
+function graphNamesForCoreStripe(stripeSpec) {
+  const match = /^([1-9]\d*)\/([1-9]\d*)$/u.exec(stripeSpec);
+  if (!match) {
+    return [];
+  }
+  const stripe = Number(match[1]);
+  const stripeCount = Number(match[2]);
+  if (
+    !Number.isSafeInteger(stripe) ||
+    !Number.isSafeInteger(stripeCount) ||
+    stripe > stripeCount ||
+    stripeCount !== manifest.changedChecks.coreTestGraphPrequalificationStripes.length
+  ) {
+    return [];
+  }
+  return manifest.changedChecks.coreTestGraphNames.filter(
+    (_, index) => index % stripeCount === stripe - 1,
+  );
+}
+
+function qualifyCoreTestGraphReuse(prequalifications, checkChanged) {
+  const expected = manifest.changedChecks.coreTestGraphNames;
+  const stripeSpecs = manifest.changedChecks.coreTestGraphPrequalificationStripes;
+  const stripes = prequalifications.map(parseCoreTestGraphReceipt);
+  const canonical = parseCoreTestGraphReceipt(checkChanged);
+  const exactCanonicalReceipt = (receipt) =>
+    receipt.planCount === 1 &&
+    JSON.stringify(receipt.plannedGraphs) === JSON.stringify(expected) &&
+    JSON.stringify([...receipt.passedGraphs].sort()) === JSON.stringify([...expected].sort()) &&
+    receipt.failedGraphs.length === 0 &&
+    receipt.outcomes.length === expected.length &&
+    new Set(receipt.outcomes.map((item) => item.graph)).size === expected.length &&
+    receipt.outcomes.every((item) => Number.isFinite(item.durationSeconds) && item.durationSeconds > 0);
+  const exactStripeReceipts =
+    prequalifications.length === stripeSpecs.length &&
+    stripes.length === stripeSpecs.length &&
+    stripes.every((receipt, index) => {
+      const expectedStripe = graphNamesForCoreStripe(stripeSpecs[index]);
+      return (
+        processHealthy(prequalifications[index], 0) &&
+        prequalifications[index].durationMs <= processTimeoutMs &&
+        receipt.planCount === 0 &&
+        receipt.outcomes.length === expectedStripe.length &&
+        new Set(receipt.outcomes.map((item) => item.graph)).size === expectedStripe.length &&
+        JSON.stringify([...receipt.passedGraphs].sort()) === JSON.stringify([...expectedStripe].sort()) &&
+        receipt.failedGraphs.length === 0 &&
+        receipt.outcomes.every((item) => Number.isFinite(item.durationSeconds) && item.durationSeconds > 0)
+      );
+    });
+  const prequalifiedOutcomes = stripes.flatMap((receipt) => receipt.outcomes);
+  const prequalifiedNames = prequalifiedOutcomes.map((item) => item.graph);
+  const exactPrequalificationUnion =
+    prequalifiedNames.length === expected.length &&
+    new Set(prequalifiedNames).size === expected.length &&
+    JSON.stringify([...prequalifiedNames].sort()) === JSON.stringify([...expected].sort());
+  const valid =
+    processHealthy(checkChanged, 0) &&
+    exactStripeReceipts &&
+    exactPrequalificationUnion &&
+    exactCanonicalReceipt(canonical) &&
+    checkChanged.durationMs <= processTimeoutMs;
+  return {
+    valid,
+    classification: valid ? "ALL_CANONICAL_CORE_TEST_GRAPHS_PREQUALIFIED_AND_RECHECKED" : "CORE_TEST_GRAPH_COVERAGE_NOT_QUALIFIED",
+    reason: valid ? null : "all three disjoint canonical core-test stripes and the unchanged full changed-check must pass the exact 27 graphs within their unchanged normal deadlines",
+    prequalificationConcurrencyPerStripe: manifest.changedChecks.coreTestGraphConcurrency,
+    maximumDurationMsPerCommand: processTimeoutMs,
+    cacheReuseBasis: {
+      canonicalGraphOwner: "scripts/run-tsgo-core-test-shards.mts:selectTsgoCoreTestStripe/createChangedCoreTestCheck",
+      stripeSelector: "selectTsgoCoreTestStripe round-robins the complete TSGO_CORE_TEST_SHARDS registry",
+      prequalificationRunsExcludeRootPartitions: true,
+      compilerArgs: ["-p", "<canonical graph config>", "--incremental"],
+      buildInfoPath: "per-config tsBuildInfoFile under .artifacts/tsgo-cache (all 27 verified unique)",
+      prequalificationAndChangedCheckShareCandidateCheckoutAndCanonicalGraphConfigs: true,
+      prequalificationDoesNotSetSparseGuardOverride: true,
+      unchangedChangedCheckRetainsCanonicalSparseGuardBehavior: true,
+    },
+    prequalificationStripes: stripeSpecs.map((stripe, index) => ({
+      stripe,
+      expectedGraphs: graphNamesForCoreStripe(stripe),
+      receipt: stripes[index] ?? null,
+      process: prequalifications[index] ?? null,
+    })),
+    prequalifiedGraphs: prequalifiedNames,
+    unchangedCanonicalChangedCheck: { ...canonical, process: checkChanged },
   };
 }
 
@@ -813,8 +1150,12 @@ function qualifyFullSuites(observed, wrapper) {
     total > 0 &&
     result.selected.length === total &&
     result.rawCounts.passed === total &&
+    Number.isInteger(result.rawCounts.totalSuites) &&
+    result.rawCounts.totalSuites > 0 &&
+    result.rawCounts.passedSuites === result.rawCounts.totalSuites &&
     result.rawCounts.failed === 0 &&
     result.rawCounts.failedSuites === 0 &&
+    result.rawCounts.pendingSuites === 0 &&
     actualSkipped === 0;
   const ok =
     Array.isArray(observed.runs) &&
@@ -1032,6 +1373,40 @@ async function runLane() {
       evidence.cells.candidateSelectedRegressions,
     );
     evidence.cells.candidateSourceAndTestHashesAfterSelected = verifyCandidateFileHashes();
+    const selectedDisposition = selectedCandidateDownstreamDisposition(
+      evidence.cells.candidateSelectedRegressions.qualification,
+    );
+    if (!selectedDisposition.shouldRun) {
+      const reason = selectedDisposition.reason;
+      const notRun = () => ({
+        status: selectedDisposition.status,
+        reason,
+      });
+      evidence.cells.candidateAffectedSuites = {
+        ...notRun(),
+      };
+      evidence.changedChecks = {
+        ...notRun(),
+        diffCheck: notRun(),
+        plan: notRun(),
+        coreTestGraphPrequalificationStripes: manifest.changedChecks.coreTestGraphPrequalificationStripes.map(
+          (stripe) => ({ stripe, ...notRun() }),
+        ),
+        result: notRun(),
+        formatCheck: notRun(),
+        gates: [
+          "candidate affected full suites",
+          "candidate diff check",
+          "canonical changed-check dry run",
+          "three core-test graph prequalification stripes",
+          "unchanged full canonical changed-check",
+          "candidate format check",
+        ],
+      };
+      const stop = new Error("selected candidate regressions failed qualification; later expensive gates were not run");
+      stop.code = "QA_SELECTED_CANDIDATE_REJECTED";
+      throw stop;
+    }
 
     evidence.cells.candidateAffectedSuites = await runVitestGroup(
       "candidate",
@@ -1069,6 +1444,20 @@ async function runLane() {
     );
     evidence.changedChecks.plan = dryRun;
     evidence.changedChecks.hashesAfterDryRun = verifyCandidateFileHashes();
+    const graphPrequalifications = [];
+    const stripeSpecs = manifest.changedChecks.coreTestGraphPrequalificationStripes;
+    for (const [index, stripe] of stripeSpecs.entries()) {
+      const stripeRun = await runProcess(
+        `candidate-tsgo-core-test-prequalification-${index + 1}-of-${stripeSpecs.length}`,
+        process.execPath,
+        ["scripts/run-tsgo-core-test-shards.mjs", "--stripe", stripe],
+        repoRoot,
+        processTimeoutMs,
+      );
+      graphPrequalifications.push(stripeRun);
+    }
+    evidence.changedChecks.coreTestGraphPrequalificationStripes = graphPrequalifications;
+    evidence.changedChecks.hashesAfterCoreTestGraphPrequalification = verifyCandidateFileHashes();
     const check = await runProcess(
       "candidate-check-changed",
       process.execPath,
@@ -1083,6 +1472,10 @@ async function runLane() {
     );
     evidence.changedChecks.result = check;
     evidence.changedChecks.hashesAfterCheckChanged = verifyCandidateFileHashes();
+    evidence.changedChecks.coreTestGraphCoverage = qualifyCoreTestGraphReuse(
+      graphPrequalifications,
+      check,
+    );
 
     const formatCheck = await runProcess(
       "candidate-format-check",
@@ -1105,6 +1498,7 @@ async function runLane() {
       processHealthy(diffCheck, 0) &&
       processHealthy(dryRun, 0) &&
       processHealthy(check, 0) &&
+      evidence.changedChecks.coreTestGraphCoverage.valid &&
       processHealthy(formatCheck, 0) &&
       JSON.stringify(evidence.cells.candidateSourceAndTestHashesBeforeTests) ===
         JSON.stringify(evidence.changedChecks.hashesAfterFormatCheck) &&
@@ -1117,8 +1511,16 @@ async function runLane() {
         ? "FORMAT_REPAIR_PROPOSAL_REQUIRES_REVIEW"
         : "INCONCLUSIVE_OR_FAILING_QA_GATES";
   } catch (error) {
-    evidence.error = error instanceof Error ? error.message : String(error);
-    evidence.classification = "HARNESS_ERROR";
+    if (error?.code === "QA_SELECTED_CANDIDATE_REJECTED") {
+      evidence.selectedCandidateEarlyStop = {
+        status: "FAIL_CLOSED_AFTER_SELECTED_FAILURE",
+        reason: error.message,
+      };
+      evidence.classification = "INCONCLUSIVE_OR_FAILING_QA_GATES";
+    } else {
+      evidence.error = error instanceof Error ? error.message : String(error);
+      evidence.classification = "HARNESS_ERROR";
+    }
   } finally {
     try {
       evidence.cleanup = await restoreExactOverlays();

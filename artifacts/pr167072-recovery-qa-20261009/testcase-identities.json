@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "status": "READY_FOR_ROOT_REVIEW",
   "sourceRevisionState": {
-    "patchesAndFileHashes": "FINAL_FROZEN_SOURCE_REBOUND_PENDING_ROOT_REVIEW",
+    "patchesAndFileHashes": "FINAL_FROZEN_SOURCE_REBOUND_ROOT_VERIFIED",
     "sourceBaseCommit": "e670b178f9dbdde25a074913d9c97fa9b8b533b6",
     "sourceTree": "task-owned-uncommitted-diff-in-recovery-worktree",
-    "reason": "The tracked sudo fixture is now represented as a modification from its exact e670 blob; all three overlays, all old/new patch blob identities, and twelve LF-normalized source/test hashes are verified. Independent Root review is pending; candidate remains an exact overlay, not a source commit.",
+    "reason": "Root independently applied all three overlays to the pinned base and matched all twelve blobs to frozen source and manifest; the final source review is scoped-clean. QA parser, hierarchy, stripe-union and fail-closed controls passed synthetic verification. Candidate remains an exact overlay, not a source commit; runtime proof is pending.",
     "rebindAfterSourceAudit": false,
     "rootReviewStillRequired": false,
     "dispatchable": true
@@ -34,7 +34,7 @@
     {
       "id": "classification-prerequisite",
       "path": "artifacts/pr167072-recovery-qa-20261009/classification-prerequisite.patch",
-      "sha256": "0a151ca6acc4c03de4451b58f2194568d2d74d789aac3fe2488315e078f3e040",
+      "sha256": "cad60ac47793d2dae50a2ed799c68222324c4e3cc4ce58b4e9e1baeb22d75457",
       "paths": [
         "src/infra/tailscale-backend-ready.ts",
         "src/infra/tailscale.ts",
@@ -44,7 +44,7 @@
     {
       "id": "lifecycle-fix",
       "path": "artifacts/pr167072-recovery-qa-20261009/lifecycle-fix.patch",
-      "sha256": "7f961760792f95067e0fcab920e41953f0e92a5556ef18043d7b796ea0b6c28b",
+      "sha256": "68e139cbfa73f3b92e1755c8dda473808a79d6fea23febda31126aa0494febcd",
       "paths": [
         "src/cli/gateway-cli/run-loop-startup.ts",
         "src/cli/gateway-cli/run-loop.ts",
@@ -55,7 +55,7 @@
     {
       "id": "candidate-tests-overlay",
       "path": "artifacts/pr167072-recovery-qa-20261009/candidate-tests-overlay.patch",
-      "sha256": "3f40f40f66776164ad9b5866ac22ba1f3fc1f37299ccbd2912763fb0fe6e7db0",
+      "sha256": "c09c84fe3c705832685c80fdd893a72075dce1c6318e3138a145356ee48882de",
       "paths": [
         "src/cli/gateway-cli/run-loop-startup.test-support.ts",
         "src/cli/gateway-cli/run-loop.test.ts",
@@ -68,7 +68,7 @@
   "candidateFileSha256": [
     {
       "path": "src/cli/gateway-cli/run-loop-startup.test-support.ts",
-      "sha256": "26aef127ab5bc32969b76ed90895d7d6864df35874cb509965aa3737f261fae8"
+      "sha256": "4526789ccc065a45a89d81a6b9b9f1f5b3b6b9d51ad0cee3dac24927e23f7ec3"
     },
     {
       "path": "src/cli/gateway-cli/run-loop-startup.ts",
@@ -191,7 +191,10 @@
         }
       ],
       "expectedSelectedCount": 1,
-      "expectedFailedTestSuites": 1
+      "expectedTotalTestSuites": 2,
+      "expectedPassedTestSuites": 0,
+      "expectedFailedTestSuites": 2,
+      "expectedPendingTestSuites": 0
     },
     "candidateSelected": {
       "id": "candidate-selected-recovery-regressions",
@@ -320,6 +323,42 @@
   },
   "changedChecks": {
     "base": "e670b178f9dbdde25a074913d9c97fa9b8b533b6",
+    "coreTestGraphNames": [
+      "agents-root",
+      "agents-other",
+      "agents-tools",
+      "gateway-root",
+      "gateway-server",
+      "gateway-other",
+      "infra",
+      "state-logging",
+      "commands",
+      "plugins-platform",
+      "config-cli",
+      "messaging",
+      "services",
+      "other",
+      "ui-pages",
+      "ui-e2e",
+      "ui-other",
+      "packages",
+      "plugin-sdk",
+      "commands-doctor",
+      "cli-update",
+      "gateway-methods",
+      "ui-chat",
+      "agents-sessions",
+      "services-cron",
+      "ui-app",
+      "ui-components"
+    ],
+    "coreTestGraphConcurrency": 1,
+    "coreTestGraphPrequalificationStripes": [
+      "1/3",
+      "2/3",
+      "3/3"
+    ],
+    "coreTestGraphMaximumDurationMs": 1200000,
     "commands": [
       "node scripts/check-changed.mjs --dry-run --base e670b178f9dbdde25a074913d9c97fa9b8b533b6 -- <all 12 exact changedPaths>",
       "node scripts/check-changed.mjs --base e670b178f9dbdde25a074913d9c97fa9b8b533b6 -- <all 12 exact changedPaths>"

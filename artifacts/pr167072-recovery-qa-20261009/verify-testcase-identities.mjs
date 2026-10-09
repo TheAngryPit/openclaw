@@ -13,6 +13,35 @@ const receiptRelative =
 const manifestPath = resolve(workspace, manifestRelative);
 const outputDir = resolve(workspace, receiptRelative);
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+const canonicalCoreTestGraphs = [
+  "agents-root",
+  "agents-other",
+  "agents-tools",
+  "gateway-root",
+  "gateway-server",
+  "gateway-other",
+  "infra",
+  "state-logging",
+  "commands",
+  "plugins-platform",
+  "config-cli",
+  "messaging",
+  "services",
+  "other",
+  "ui-pages",
+  "ui-e2e",
+  "ui-other",
+  "packages",
+  "plugin-sdk",
+  "commands-doctor",
+  "cli-update",
+  "gateway-methods",
+  "ui-chat",
+  "agents-sessions",
+  "services-cron",
+  "ui-app",
+  "ui-components",
+];
 
 function fail(message) {
   throw new Error(message);
@@ -119,6 +148,14 @@ try {
     fail("manifest is unbound or has not reached Root review");
   }
   if (
+    typeof manifest.sourceRevisionState?.rootReviewStillRequired !== "boolean" ||
+    typeof manifest.sourceRevisionState?.dispatchable !== "boolean" ||
+    manifest.sourceRevisionState.dispatchable === manifest.sourceRevisionState.rootReviewStillRequired ||
+    (process.env.GITHUB_ACTIONS === "true" && manifest.sourceRevisionState.rootReviewStillRequired)
+  ) {
+    fail("identity receipt has inconsistent review state or hosted execution lacks Root acceptance");
+  }
+  if (
     manifest.baseline.repository !== process.env.QA_BASELINE_REPOSITORY ||
     manifest.baseline.commit !== process.env.QA_BASELINE_SHA
   ) {
@@ -219,7 +256,10 @@ try {
     baseline.entrypoints.length !== 1 ||
     baseline.fullNames.length !== 1 ||
     baseline.expectedSelectedCount !== 1 ||
-    baseline.expectedFailedTestSuites !== 1 ||
+    baseline.expectedTotalTestSuites !== 2 ||
+    baseline.expectedPassedTestSuites !== 0 ||
+    baseline.expectedFailedTestSuites !== 2 ||
+    baseline.expectedPendingTestSuites !== 0 ||
     baseline.config !== expectedVitestOwnerConfig(baseline.entrypoints[0]) ||
     selected.fullNames.length === 0 ||
     selected.expectedSelectedCount !== selected.fullNames.length ||
@@ -237,6 +277,32 @@ try {
   ) {
     fail("named regression identities, owner routes, and selected counts are inconsistent");
   }
+  const stripeSpecs = manifest.changedChecks.coreTestGraphPrequalificationStripes;
+  const stripeGraphSlices = Array.isArray(stripeSpecs)
+    ? stripeSpecs.map((spec) => {
+        const match = /^([1-9]\d*)\/([1-9]\d*)$/u.exec(spec);
+        if (!match || Number(match[2]) !== stripeSpecs.length) {
+          return [];
+        }
+        const stripe = Number(match[1]);
+        return canonicalCoreTestGraphs.filter((_, index) => index % stripeSpecs.length === stripe - 1);
+      })
+    : [];
+  const stripeUnion = stripeGraphSlices.flat();
+  if (
+    !Array.isArray(manifest.changedChecks.coreTestGraphNames) ||
+    JSON.stringify(manifest.changedChecks.coreTestGraphNames) !==
+      JSON.stringify(canonicalCoreTestGraphs) ||
+    manifest.changedChecks.coreTestGraphConcurrency !== 1 ||
+    JSON.stringify(stripeSpecs) !== JSON.stringify(["1/3", "2/3", "3/3"]) ||
+    stripeGraphSlices.some((slice) => slice.length !== 9) ||
+    stripeUnion.length !== canonicalCoreTestGraphs.length ||
+    new Set(stripeUnion).size !== canonicalCoreTestGraphs.length ||
+    JSON.stringify([...stripeUnion].sort()) !== JSON.stringify([...canonicalCoreTestGraphs].sort()) ||
+    manifest.changedChecks.coreTestGraphMaximumDurationMs !== 20 * 60 * 1000
+  ) {
+    fail("changed-check graph prequalification does not retain three disjoint serial stripes, exact 27-graph coverage, and normal runner bounds");
+  }
 
   const receipt = {
     status: "QA_INPUT_IDENTITIES_VERIFIED",
@@ -253,6 +319,25 @@ try {
       baselineRegression: manifest.testCases.baselineRegression.fullNames,
       candidateSelected: manifest.testCases.candidateSelected.fullNames,
       affectedSuiteEntrypoints: manifest.testCases.candidateAffectedSuites.expectedSuites,
+    },
+    baselineReporterQualification: {
+      totalSuites: baseline.expectedTotalTestSuites,
+      passedSuites: baseline.expectedPassedTestSuites,
+      failedSuites: baseline.expectedFailedTestSuites,
+      pendingSuites: baseline.expectedPendingTestSuites,
+      exactFailedAssertionCount: baseline.expectedSelectedCount,
+    },
+    changedCheckGraphCoverage: {
+      canonicalCoreTestGraphs,
+      prequalificationConcurrencyPerStripe: manifest.changedChecks.coreTestGraphConcurrency,
+      prequalificationStripeSpecs: stripeSpecs,
+      prequalificationStripeGraphSlices: Object.fromEntries(
+        stripeSpecs.map((stripe, index) => [stripe, stripeGraphSlices[index]]),
+      ),
+      normalPerCommandMaximumDurationMs:
+        manifest.changedChecks.coreTestGraphMaximumDurationMs,
+      prequalificationDoesNotSetSparseGuardOverride: true,
+      canonicalChangedCheckStillRequired: true,
     },
     vitestMatchers: {
       baselineRegression: baseline.matcherIdentities,
