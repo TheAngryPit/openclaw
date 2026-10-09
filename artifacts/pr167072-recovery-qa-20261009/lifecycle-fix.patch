@@ -1,0 +1,259 @@
+diff --git a/src/cli/gateway-cli/run-loop-startup.ts b/src/cli/gateway-cli/run-loop-startup.ts
+index 7a4e6853fa9..f3c39593270 100644
+--- a/src/cli/gateway-cli/run-loop-startup.ts
++++ b/src/cli/gateway-cli/run-loop-startup.ts
+@@ -2,6 +2,7 @@ import { clearRuntimeConfigSnapshot } from "../../config/runtime-snapshot.js";
+ import { markGatewayRestartTrace } from "../../gateway/restart-trace.js";
+ import type { GatewayServerOptions, GatewayStartupOperation } from "../../gateway/server-public.js";
+ import { formatErrorMessage } from "../../infra/errors.js";
++import { isAbortError } from "../../infra/abort-signal.js";
+ import { acquireGatewayLock } from "../../infra/gateway-lock.js";
+ import type { GatewayOwnerSupervisor } from "../../infra/gateway-owner-lease.types.js";
+ import type { GatewayRestartEmitter } from "../../infra/restart.js";
+@@ -76,7 +77,7 @@ export function createGatewayRestartRecovery(
+       const stack = error instanceof Error && error.stack ? `\n${error.stack}` : "";
+       logger.error(
+         `gateway startup failed: ${formatErrorMessage(error)}. ` +
+-          `${onFailure && !retryFailed ? "Attempting automatic triage before recovery." : "Automatic recovery is unavailable."}${stack}`,
++          `${onFailure && !retryFailed ? "Attempting automatic startup recovery." : "Automatic recovery is unavailable."}${stack}`,
+       );
+     },
+     reportManualRecovery() {
+@@ -103,9 +104,17 @@ export function createGatewayRestartRecovery(
+         return false;
+       }
+       const controller = new AbortController();
++      const settled = Promise.resolve()
++        .then(() => onFailure(error, controller.signal))
++        .catch((recoveryError: unknown) => {
++          if (controller.signal.aborted && isAbortError(recoveryError)) {
++            return undefined;
++          }
++          throw recoveryError;
++        });
+       work = {
+         controller,
+-        settled: Promise.resolve().then(() => onFailure(error, controller.signal)),
++        settled,
+       };
+       try {
+         const completion = await work.settled;
+@@ -116,19 +125,16 @@ export function createGatewayRestartRecovery(
+           throw error;
+         }
+         if (completion !== "completed") {
+-          logger.info("Automatic triage did not complete a repair; awaiting manual recovery.");
++          logger.info("Automatic startup recovery did not complete; awaiting manual recovery.");
+           return false;
+         }
+-        // Completion proves triage cleanup, not Gateway health. Startup owns that proof.
+-        logger.info("Automatic triage completed; retrying Gateway startup once.");
++        // Recovery completion only admits one retry; startup owns the health proof.
++        logger.info("Automatic startup recovery completed; retrying Gateway startup once.");
+         return true;
+-      } catch (triageError) {
+-        if (controller.signal.aborted) {
+-          return false;
+-        }
+-        logger.error(`Automatic triage failed: ${formatErrorMessage(triageError)}`);
++      } catch (recoveryError) {
++        logger.error(`Automatic startup recovery failed: ${formatErrorMessage(recoveryError)}`);
+         if (supervisor) {
+-          throw triageError;
++          throw recoveryError;
+         }
+         return false;
+       } finally {
+diff --git a/src/cli/gateway-cli/run-loop.ts b/src/cli/gateway-cli/run-loop.ts
+index 5c643c1c10b..7dc4a9c8cec 100644
+--- a/src/cli/gateway-cli/run-loop.ts
++++ b/src/cli/gateway-cli/run-loop.ts
+@@ -11,6 +11,8 @@ import { acquireGatewayLock } from "../../infra/gateway-lock.js";
+ import { consumeGatewaySuspendHandoff } from "../../infra/gateway-suspend-coordinator.js";
+ import type { GatewayRestartIntent } from "../../infra/restart-intent.js";
+ import { findStartupMaintenanceRequiredError } from "../../infra/startup-maintenance-required.js";
++import { TAILSCALE_BACKEND_AUTH_REQUIRED_REASON } from "../../infra/tailscale-backend-auth-required-error.js";
++import { isTailscaleServeAuthenticationRequiredError } from "../../infra/tailscale-backend-ready.js";
+ import { createSubsystemLogger } from "../../logging/subsystem.js";
+ import { runWithProcessCleanupBudget } from "../../process/supervisor/cleanup-budget.js";
+ import type { RuntimeEnv } from "../../runtime.js";
+@@ -1158,10 +1160,10 @@ export async function runGatewayLoop(params: {
+       request("stop", "host lifeline closed");
+     });
+     let isFirstIteration = true;
+-    let retryAfterTriage = false;
++    let retryAfterStartupRecovery = false;
+     for (;;) {
+-      const isTriageRetry = retryAfterTriage;
+-      retryAfterTriage = false;
++      const isStartupRecoveryRetry = retryAfterStartupRecovery;
++      retryAfterStartupRecovery = false;
+       const iterationStartupOperations = isFirstIteration
+         ? startupOperations
+         : createGatewayStartupOperations();
+@@ -1243,25 +1245,43 @@ export async function runGatewayLoop(params: {
+         const failedServer = server;
+         server = null;
+         const maintenanceRequired = findStartupMaintenanceRequiredError(err);
+-        completeBoot(loopCompletion.formatStartupFailureCompletion(err, maintenanceRequired?.code));
++        const canWaitForTailscaleServe =
++          !maintenanceRequired &&
++          !installationReplacement &&
++          !isStartupRecoveryRetry &&
++          Boolean(supervisorMode) &&
++          Boolean(params.onRestartStartupFailure) &&
++          isTailscaleServeAuthenticationRequiredError(err);
+         try {
+           await signals.settle();
+           await failedServer?.close({ reason: "gateway startup failed" });
+         } catch (closeError) {
++          completeBoot(
++            loopCompletion.formatStartupFailureCompletion(err, maintenanceRequired?.code),
++          );
+           throw new GatewayStartupCleanupError(err, closeError);
+         } finally {
+           signals.openStore();
+         }
++        completeBoot(
++          canWaitForTailscaleServe
++            ? loopCompletion.formatStartupFailureCompletion(
++                err,
++                TAILSCALE_BACKEND_AUTH_REQUIRED_REASON,
++              )
++            : loopCompletion.formatStartupFailureCompletion(err, maintenanceRequired?.code),
++        );
+         if (installationReplacement) {
+           await exitReplacedInstallation(installationReplacement);
+           return;
+         }
+         // Keep TCC recovery after clean restart failures (#35862), but never reuse a
+-        // generation whose startup cleanup failed. The outer CLI exits nonzero.
++        // generation whose startup cleanup failed. The outer CLI exits nonzero except
++        // for a supervised Serve prerequisite wait, which only starts after clean cleanup.
+         if (
+           maintenanceRequired ||
+-          !isRestartIteration ||
+-          (isTriageRetry && supervisorMode) ||
++          (!isRestartIteration && !canWaitForTailscaleServe) ||
++          (isStartupRecoveryRetry && supervisorMode) ||
+           err instanceof GatewayStartupCleanupError
+         ) {
+           throw err;
+@@ -1270,14 +1290,18 @@ export async function runGatewayLoop(params: {
+         startupFailedBeforeServerHandle = true;
+         if (!pendingStartupRequest) {
+           // A failed listener must release its lock for daemon restart/stop (#35862).
+-          await releaseLockIfHeld();
++          // A supervised Tailscale Serve prerequisite wait keeps process custody; releasing
++          // it here would admit a second Gateway while this one is parked without a listener.
++          if (!canWaitForTailscaleServe) {
++            await releaseLockIfHeld();
++          }
+         }
+         writeStabilityBundle("gateway.restart_startup_failed", err);
+-        restartRecovery.reportStartupFailure(err, isTriageRetry);
+-        if (!shuttingDown && !isTriageRetry) {
+-          retryAfterTriage = (await restartRecovery.attempt(err)) && !shuttingDown;
++        restartRecovery.reportStartupFailure(err, isStartupRecoveryRetry);
++        if (!shuttingDown && !isStartupRecoveryRetry) {
++          retryAfterStartupRecovery = (await restartRecovery.attempt(err)) && !shuttingDown;
+         }
+-        if (!retryAfterTriage && !shuttingDown) {
++        if (!retryAfterStartupRecovery && !shuttingDown) {
+           restartRecovery.reportManualRecovery();
+         }
+       }
+@@ -1288,8 +1312,8 @@ export async function runGatewayLoop(params: {
+             resolve();
+           };
+           flushPendingStartupRequest({ allowMissingServer: true });
+-          if (retryAfterTriage && !shuttingDown) {
+-            request("restart", "SIGUSR2", "gateway.triage_completed");
++          if (retryAfterStartupRecovery && !shuttingDown) {
++            request("restart", "SIGUSR2", "gateway.startup_recovery_completed");
+           }
+         });
+       }
+diff --git a/src/cli/gateway-cli/run.ts b/src/cli/gateway-cli/run.ts
+index 1f561587c19..c95b930d835 100644
+--- a/src/cli/gateway-cli/run.ts
++++ b/src/cli/gateway-cli/run.ts
+@@ -60,6 +60,10 @@ import {
+   formatGatewayPidList,
+ } from "../../infra/gateway-processes.js";
+ import type { RespawnSupervisor } from "../../infra/supervisor-markers.js";
++import {
++  isTailscaleBackendAuthenticationRequiredError,
++  isTailscaleServeAuthenticationRequiredError,
++} from "../../infra/tailscale-backend-ready.js";
+ import { isTailscaleRouteOwnershipConflictError } from "../../infra/tailscale-route-ownership-error.js";
+ import { parseTcpPort } from "../../infra/tcp-port.js";
+ import { setConsoleSubsystemFilter, setConsoleTimestampPrefix } from "../../logging/console.js";
+@@ -865,6 +869,7 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
+   let triageAttempted = false;
+   const triageStartupFailure = async (error: unknown, signal?: AbortSignal) => {
+     if (
++      isTailscaleBackendAuthenticationRequiredError(error) ||
+       triageAttempted ||
+       !bootRecorded ||
+       signal?.aborted ||
+@@ -891,6 +896,27 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
+     triageAttempted = true;
+     return await triageGatewayStartupFailure(defaultRuntime, error, signal);
+   };
++  const recoverStartupFailure = async (
++    error: unknown,
++    signal: AbortSignal,
++  ): Promise<"completed" | "failed" | void> => {
++    if (isTailscaleServeAuthenticationRequiredError(error)) {
++      if (effectiveTailscaleMode !== "serve" || !supervisor || signal.aborted) {
++        return;
++      }
++      gatewayLog.warn(
++        "Tailscale Serve needs operator sign-in or device approval; Gateway startup is parked until the local backend recovers",
++      );
++      const { waitForManagedTailscaleBackendRunning } = await import("../../infra/tailscale.js");
++      const running = await waitForManagedTailscaleBackendRunning({
++        statusCommand: error.statusCommand,
++        signal,
++        info: (message) => gatewayLog.info(message),
++      });
++      return running ? "completed" : undefined;
++    }
++    return await triageStartupFailure(error, signal);
++  };
+   const beginBoot = async (startedAtMs: number) => {
+     // run-loop calls beginBoot before every startGatewayServer invocation, so
+     // in-process restarts re-evaluate breaker state instead of reusing stale mode.
+@@ -947,7 +973,7 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
+       healthHost,
+       beginBoot,
+       completeBoot,
+-      onRestartStartupFailure: triageStartupFailure,
++      onRestartStartupFailure: recoverStartupFailure,
+       start: async ({ requestHotReloadRecovery, ...startupOptions } = {}) => {
+         const snapshotPreparation = await import("../../config/io.snapshot-preparation.js");
+         const startupConfigSnapshotReadForThisStart = startupConfigSnapshotReadForNextStart;
+diff --git a/src/infra/gateway-boot-lifecycle.kernel.ts b/src/infra/gateway-boot-lifecycle.kernel.ts
+index d92bb63cf0d..1cadb5bf883 100644
+--- a/src/infra/gateway-boot-lifecycle.kernel.ts
++++ b/src/infra/gateway-boot-lifecycle.kernel.ts
+@@ -4,6 +4,7 @@ import type { WorkerOperationHandlers } from "../state/worker-operation-registry
+ import { executeSqliteQueryTakeFirstSync, getNodeSqliteKysely } from "./kysely-sync.js";
+ import { runSqliteDeferredTransactionSync } from "./sqlite-transaction.js";
+ import { GATEWAY_STARTUP_MAINTENANCE_REQUIRED_REASON } from "./startup-maintenance-required.js";
++import { TAILSCALE_BACKEND_AUTH_REQUIRED_REASON } from "./tailscale-backend-auth-required-error.js";
+ 
+ type GatewayBootLifecycleDatabase = Pick<DB, "gateway_boot_lifecycle">;
+ const GATEWAY_BOOT_LOOP_UNCLEAN_THRESHOLD = 3;
+@@ -71,6 +72,10 @@ export function inspectGatewayCrashLoopBreakerInDatabase(db: DatabaseSync, nowMs
+           eb.and([
+             eb("outcome", "=", "startup_failed"),
+             eb("completed_at_ms", ">=", windowStartMs),
++            eb.or([
++              eb("startup_reason", "is", null),
++              eb("startup_reason", "!=", TAILSCALE_BACKEND_AUTH_REQUIRED_REASON),
++            ]),
+           ]),
+         ]),
+       ),

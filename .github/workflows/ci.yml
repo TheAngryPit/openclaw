@@ -27,6 +27,7 @@ on:
           - codex-catalog-paired
           - codex-catalog-conflict-candidate
           - codex-catalog-mlx-diagnostic
+          - tailscale-recovery
       operator_variant:
         description: Explicit provenance label for matched comparisons
         required: true
@@ -40,6 +41,97 @@ permissions:
   contents: read
 
 jobs:
+  pr167072-paired-recovery-qa:
+    name: Tailscale prerequisite recovery paired proof
+    if: ${{ github.repository == 'TheAngryPit/openclaw' && github.event_name == 'workflow_dispatch' && inputs.proof_kind == 'tailscale-recovery' && inputs.candidate_sha == 'e670b178f9dbdde25a074913d9c97fa9b8b533b6' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      QA_RUNNER: ubuntu-24.04
+      QA_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      QA_BASELINE_REPOSITORY: openclaw/openclaw
+      QA_BASELINE_SHA: e670b178f9dbdde25a074913d9c97fa9b8b533b6
+      QA_PRODUCT_DIR: qa-product
+      QA_TEST_MANIFEST: artifacts/pr167072-recovery-qa-20261009/testcase-identities.json
+      QA_OUTPUT_DIR: artifacts/pr167072-recovery-qa-20261009/run-output
+      QA_NODE_VERSION: 24.19.0
+      QA_PNPM_PACKAGE_MANAGER: pnpm@12.5.1+sha512.e3f305bc784a2bc89f5ad3b6138889470fae8d2af5f36b61216ec91c2c3d64089775f9de38aac331044ea40f245cb0d5666392dfdf65824e1907ef6a2c62de5f
+    steps:
+      - name: Verify public hosted runner boundary
+        shell: bash
+        run: |
+          test "$GITHUB_REPOSITORY" = TheAngryPit/openclaw
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+      - name: Checkout exact public QA workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Set up pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24.19.0
+      - name: Verify exact QA inputs before executing product code
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$QA_WORKFLOW_SHA"
+          mkdir -p "$QA_OUTPUT_DIR"
+          node "$GITHUB_WORKSPACE/artifacts/pr167072-recovery-qa-20261009/verify-testcase-identities.mjs"
+      - name: Fetch immutable public canonical baseline without credentials
+        shell: bash
+        run: |
+          mkdir -p "$QA_PRODUCT_DIR"
+          git -C "$QA_PRODUCT_DIR" init
+          git -C "$QA_PRODUCT_DIR" fetch --no-tags --depth=1 "https://github.com/$QA_BASELINE_REPOSITORY.git" "$QA_BASELINE_SHA"
+          git -C "$QA_PRODUCT_DIR" checkout --detach FETCH_HEAD
+          test "$(git -C "$QA_PRODUCT_DIR" rev-parse HEAD)" = "$QA_BASELINE_SHA"
+      - name: Install one common frozen dependency lock
+        working-directory: qa-product
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare "$QA_PNPM_PACKAGE_MANAGER" --activate
+          test "v$QA_NODE_VERSION" = "$(node --version)"
+          test "12.5.1" = "$(corepack pnpm --version)"
+          corepack pnpm install --frozen-lockfile
+      - name: Record observed toolchain
+        working-directory: qa-product
+        shell: bash
+        run: |
+          node -e 'const fs=require("node:fs"),cp=require("node:child_process");const r={runner:process.env.QA_RUNNER,image:process.env.ImageOS,imageVersion:process.env.ImageVersion,node:process.version,pnpm:cp.execFileSync("corepack",["pnpm","--version"],{encoding:"utf8"}).trim(),vitest:cp.execFileSync("corepack",["pnpm","exec","vitest","--version"],{encoding:"utf8"}).trim(),packageManager:process.env.QA_PNPM_PACKAGE_MANAGER,workflowSha:process.env.QA_WORKFLOW_SHA,runId:process.env.GITHUB_RUN_ID};fs.writeFileSync(process.env.GITHUB_WORKSPACE+"/"+process.env.QA_OUTPUT_DIR+"/toolchain.json",JSON.stringify(r,null,2)+"\n");console.log(JSON.stringify(r));'
+      - name: Compare intermediate baseline and exact candidate overlays
+        shell: bash
+        run: node "$GITHUB_WORKSPACE/artifacts/pr167072-recovery-qa-20261009/paired-regression.mjs" run
+      - name: Verify exact overlay reversal and clean source
+        if: always()
+        shell: bash
+        run: |
+          if [ -d "$QA_PRODUCT_DIR/.git" ]; then
+            node "$GITHUB_WORKSPACE/artifacts/pr167072-recovery-qa-20261009/paired-regression.mjs" cleanup
+          else
+            echo "CLEANUP_NOT_APPLICABLE: no product checkout"
+          fi
+      - name: Verify immutable QA tooling after product execution
+        if: always()
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$QA_WORKFLOW_SHA"
+          git diff --quiet "$QA_WORKFLOW_SHA" --
+          git diff --cached --quiet "$QA_WORKFLOW_SHA" --
+          printf 'workflow_sha=%s\ntracked_qa_tooling=pristine\n' "$QA_WORKFLOW_SHA" > "$QA_OUTPUT_DIR/qa-tooling-receipt.txt"
+      - name: Upload structured receipts and bounded diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: issue167072-recovery-qa-${{ github.run_id }}
+          path: artifacts/pr167072-recovery-qa-20261009/run-output/
+          if-no-files-found: warn
+          retention-days: 7
   tailscale-native:
     name: Tailscale authentication native proof (iOS simulator and macOS URLSession)
     if: ${{ github.repository == 'TheAngryPit/openclaw' && github.event_name == 'workflow_dispatch' && inputs.proof_kind == 'tailscale-native' }}

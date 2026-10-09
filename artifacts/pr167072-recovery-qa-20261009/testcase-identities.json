@@ -1,0 +1,228 @@
+{
+  "schemaVersion": 1,
+  "status": "READY_FOR_ROOT_REVIEW",
+  "sourceRevisionState": {
+    "patchesAndFileHashes": "AUDITED_FROZEN_SOURCE_REBOUND_FOR_ROOT_REVIEW",
+    "sourceBaseCommit": "e670b178f9dbdde25a074913d9c97fa9b8b533b6",
+    "sourceTree": "task-owned-uncommitted-diff-in-recovery-worktree",
+    "reason": "Read-only rebound after the test-audit repair batch and Root final source review, including actual waiter composition, external processExec spy cleanup restoration, actual persisted breaker writers, and the sudo fixture. Candidate remains an exact overlay, not a source commit.",
+    "rebindAfterSourceAudit": false,
+    "rootReviewStillRequired": false,
+    "dispatchable": true
+  },
+  "qualificationBoundary": {
+    "baselineKind": "classification-prerequisite-intermediate",
+    "baselineLabel": "Canonical e670 plus only the typed Tailscale-authentication classification prerequisite and the exact reviewed candidate test overlay; lifecycle-fix paths are unchanged in this baseline cell.",
+    "notUnchangedMain": true,
+    "lifecycleFixAppliedToBaseline": false,
+    "baselineMustFailOnlyAt": "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery",
+    "baselineFailureMustContain": "expected 'loop-settled' to be 'recovery'",
+    "candidateRequirement": "The same named waiter regression and four independent owner-boundary regressions pass as five exact selected cases; then every test in all three affected Vitest entrypoint suites passes with positive counts and zero actual skips."
+  },
+  "baseline": {
+    "repository": "openclaw/openclaw",
+    "commit": "e670b178f9dbdde25a074913d9c97fa9b8b533b6",
+    "classificationPrerequisitePatch": "classification-prerequisite.patch"
+  },
+  "candidate": {
+    "identityKind": "exact-task-owned-source-overlays",
+    "candidateCommitRequired": false,
+    "lifecyclePatch": "lifecycle-fix.patch",
+    "testOverlayPatch": "candidate-tests-overlay.patch"
+  },
+  "patches": [
+    {
+      "id": "classification-prerequisite",
+      "path": "artifacts/pr167072-recovery-qa-20261009/classification-prerequisite.patch",
+      "sha256": "b53a26e9d2dc47858474e49713e1a950e5e71577644680558f7a42d3c43319f7",
+      "paths": [
+        "src/infra/tailscale-backend-auth-required-error.ts",
+        "src/infra/tailscale-backend-ready.ts",
+        "src/infra/tailscale.ts"
+      ]
+    },
+    {
+      "id": "lifecycle-fix",
+      "path": "artifacts/pr167072-recovery-qa-20261009/lifecycle-fix.patch",
+      "sha256": "85d8c31e2041f3b8da293a5df512ba0ba9edff01eeffbfb5f3a1f216faa0b1e8",
+      "paths": [
+        "src/cli/gateway-cli/run-loop-startup.ts",
+        "src/cli/gateway-cli/run-loop.ts",
+        "src/cli/gateway-cli/run.ts",
+        "src/infra/gateway-boot-lifecycle.kernel.ts"
+      ]
+    },
+    {
+      "id": "candidate-tests-overlay",
+      "path": "artifacts/pr167072-recovery-qa-20261009/candidate-tests-overlay.patch",
+      "sha256": "23fbb1aacbe48560994183501552de69e02d37d080b7cc32333bb46a71ba5db6",
+      "paths": [
+        "src/cli/gateway-cli/run-loop-startup.test-support.ts",
+        "src/cli/gateway-cli/run-loop.test.ts",
+        "src/infra/gateway-boot-lifecycle.test.ts",
+        "src/infra/tailscale.test.ts",
+        "test/fixtures/tailscale-sudo-fixture.mjs"
+      ]
+    }
+  ],
+  "candidateFileSha256": [
+    {
+      "path": "src/cli/gateway-cli/run-loop-startup.test-support.ts",
+      "sha256": "7dbbf72bfb0a30bdb601c671eedeb44d331e6485eeae99460988513d657f3f1b"
+    },
+    {
+      "path": "src/cli/gateway-cli/run-loop-startup.ts",
+      "sha256": "1c24aaed3c6a1d224d80fad21b24cfe24a1ee820937a2ca25e0d8979291b86d1"
+    },
+    {
+      "path": "src/cli/gateway-cli/run-loop.test.ts",
+      "sha256": "9e4726207005e014020b9e56aeb6cee4aba19229e5d3fb4db798ade9928f535c"
+    },
+    {
+      "path": "src/cli/gateway-cli/run-loop.ts",
+      "sha256": "4ea5f68f680f73efda75687f6eb7c2b42a78771720c167e29bd356334ebf2e13"
+    },
+    {
+      "path": "src/cli/gateway-cli/run.ts",
+      "sha256": "fb996c3df29ed7be818f8f0e1f16d8a93c4088831eb311492c630e5c5cbdab14"
+    },
+    {
+      "path": "src/infra/gateway-boot-lifecycle.kernel.ts",
+      "sha256": "060782df0a6762438d22aa97200849234f6bbfb85354a7ad8806f10f0670c6e5"
+    },
+    {
+      "path": "src/infra/gateway-boot-lifecycle.test.ts",
+      "sha256": "989ad890b8a3ae6135c9de6181b494133bb34d70aca1429912f6de43bd15b5d3"
+    },
+    {
+      "path": "src/infra/tailscale-backend-auth-required-error.ts",
+      "sha256": "7eb379d271e6d4f5f1399ffb25ecc7914bbaacf25a5a69c11062a38efcc4fc04"
+    },
+    {
+      "path": "src/infra/tailscale-backend-ready.ts",
+      "sha256": "9cfd3ccad2f163d4ad8004384889af67dbebabfc29ab79768893ede53a89aa97"
+    },
+    {
+      "path": "src/infra/tailscale.test.ts",
+      "sha256": "cc07620f56b09a865da7dc532bcbd984c7302130701c97b8ac18dbd728baed4f"
+    },
+    {
+      "path": "src/infra/tailscale.ts",
+      "sha256": "7930c5658ee6d47e9652479f110d892eeb672c8916a04916d275156f52938b16"
+    },
+    {
+      "path": "test/fixtures/tailscale-sudo-fixture.mjs",
+      "sha256": "7e8aad66fc14bb74817432a54b3d24eab33242859b1e40036033b69e3cac4c8b"
+    }
+  ],
+  "changedPaths": [
+    "src/cli/gateway-cli/run-loop-startup.test-support.ts",
+    "src/cli/gateway-cli/run-loop-startup.ts",
+    "src/cli/gateway-cli/run-loop.test.ts",
+    "src/cli/gateway-cli/run-loop.ts",
+    "src/cli/gateway-cli/run.ts",
+    "src/infra/gateway-boot-lifecycle.kernel.ts",
+    "src/infra/gateway-boot-lifecycle.test.ts",
+    "src/infra/tailscale-backend-auth-required-error.ts",
+    "src/infra/tailscale-backend-ready.ts",
+    "src/infra/tailscale.test.ts",
+    "src/infra/tailscale.ts",
+    "test/fixtures/tailscale-sudo-fixture.mjs"
+  ],
+  "baselineOverlayPaths": [
+    "src/cli/gateway-cli/run-loop-startup.test-support.ts",
+    "src/cli/gateway-cli/run-loop.test.ts",
+    "src/infra/gateway-boot-lifecycle.test.ts",
+    "src/infra/tailscale-backend-auth-required-error.ts",
+    "src/infra/tailscale-backend-ready.ts",
+    "src/infra/tailscale.test.ts",
+    "src/infra/tailscale.ts",
+    "test/fixtures/tailscale-sudo-fixture.mjs"
+  ],
+  "baselineUnmodifiedLifecyclePaths": [
+    "src/cli/gateway-cli/run-loop-startup.ts",
+    "src/cli/gateway-cli/run-loop.ts",
+    "src/cli/gateway-cli/run.ts",
+    "src/infra/gateway-boot-lifecycle.kernel.ts"
+  ],
+  "dependencyIdentityPaths": [
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    ".npmrc",
+    "scripts/run-vitest.mjs",
+    "test/vitest/vitest.unit.config.ts",
+    "scripts/check-changed.mjs",
+    "scripts/check-changed.mts"
+  ],
+  "toolchain": {
+    "runner": "ubuntu-24.04",
+    "node": "24.19.0",
+    "packageManager": "pnpm@12.5.1+sha512.e3f305bc784a2bc89f5ad3b6138889470fae8d2af5f36b61216ec91c2c3d64089775f9de38aac331044ea40f245cb0d5666392dfdf65824e1907ef6a2c62de5f",
+    "pnpmVersion": "12.5.1",
+    "installCommand": "corepack pnpm install --frozen-lockfile",
+    "installCount": 1,
+    "actions": {
+      "checkout": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "setupNode": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+      "uploadArtifact": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+    }
+  },
+  "testCases": {
+    "baselineRegression": {
+      "id": "baseline-real-waiter-shutdown-cancellation",
+      "entrypoints": [
+        "src/cli/gateway-cli/run-loop.test.ts"
+      ],
+      "config": "test/vitest/vitest.unit.config.ts",
+      "pattern": "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery",
+      "fullNames": [
+        "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery"
+      ],
+      "expectedSelectedCount": 1,
+      "expectedFailedTestSuites": 1
+    },
+    "candidateSelected": {
+      "id": "candidate-selected-recovery-regressions",
+      "entrypoints": [
+        "src/cli/gateway-cli/run-loop.test.ts",
+        "src/infra/tailscale.test.ts",
+        "src/infra/gateway-boot-lifecycle.test.ts"
+      ],
+      "config": "test/vitest/vitest.unit.config.ts",
+      "pattern": "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery|runGatewayLoop parks supervised Serve startup after clean close and retries once after Running|runGatewayLoop does not park a foreground Gateway for Tailscale authentication requirements|tailscale helpers preserves the sudo status command while parking managed Serve recovery|gateway crash-loop breaker keeps a completed Tailscale authentication prerequisite visible without counting it as a crash",
+      "fullNames": [
+        "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery",
+        "runGatewayLoop parks supervised Serve startup after clean close and retries once after Running",
+        "runGatewayLoop does not park a foreground Gateway for Tailscale authentication requirements",
+        "tailscale helpers preserves the sudo status command while parking managed Serve recovery",
+        "gateway crash-loop breaker keeps a completed Tailscale authentication prerequisite visible without counting it as a crash"
+      ],
+      "expectedSelectedCount": 5
+    },
+    "candidateAffectedSuites": {
+      "id": "candidate-affected-suites",
+      "entrypoints": [
+        "src/cli/gateway-cli/run-loop.test.ts",
+        "src/infra/tailscale.test.ts",
+        "src/infra/gateway-boot-lifecycle.test.ts"
+      ],
+      "config": "test/vitest/vitest.unit.config.ts",
+      "expectedSuites": [
+        "src/cli/gateway-cli/run-loop.test.ts",
+        "src/infra/tailscale.test.ts",
+        "src/infra/gateway-boot-lifecycle.test.ts"
+      ],
+      "minimumTests": 1,
+      "requireAllDiscoveredTestsPass": true,
+      "requireZeroActualSkips": true
+    }
+  },
+  "changedChecks": {
+    "base": "e670b178f9dbdde25a074913d9c97fa9b8b533b6",
+    "commands": [
+      "node scripts/check-changed.mjs --dry-run --base e670b178f9dbdde25a074913d9c97fa9b8b533b6 -- <all 12 exact changedPaths>",
+      "node scripts/check-changed.mjs --base e670b178f9dbdde25a074913d9c97fa9b8b533b6 -- <all 12 exact changedPaths>"
+    ]
+  }
+}

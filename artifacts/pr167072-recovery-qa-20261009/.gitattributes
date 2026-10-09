@@ -1,0 +1,3 @@
+# Unified-diff blank context is a required single space, not a source defect.
+# Product source is checked separately after exact overlay application.
+*.patch text eol=lf -whitespace
