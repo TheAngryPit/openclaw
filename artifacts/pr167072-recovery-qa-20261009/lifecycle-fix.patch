@@ -1,5 +1,5 @@
 diff --git a/src/cli/gateway-cli/run-loop-startup.ts b/src/cli/gateway-cli/run-loop-startup.ts
-index 7a4e6853fa9..b2bf6dfdc49 100644
+index 7a4e6853fa967e87f8eb4e1d73c8660db214a0b9..b2bf6dfdc49229855b1ffc3296e30a62d43680cf 100644
 --- a/src/cli/gateway-cli/run-loop-startup.ts
 +++ b/src/cli/gateway-cli/run-loop-startup.ts
 @@ -1,6 +1,7 @@
@@ -65,7 +65,7 @@ index 7a4e6853fa9..b2bf6dfdc49 100644
          return false;
        } finally {
 diff --git a/src/cli/gateway-cli/run-loop.ts b/src/cli/gateway-cli/run-loop.ts
-index 5c643c1c10b..7dc4a9c8cec 100644
+index 5c643c1c10b0182b70dfae64a74a84b420db9c8f..7dc4a9c8cecd38c5535ec75bc0aa600f3dab830f 100644
 --- a/src/cli/gateway-cli/run-loop.ts
 +++ b/src/cli/gateway-cli/run-loop.ts
 @@ -11,6 +11,8 @@ import { acquireGatewayLock } from "../../infra/gateway-lock.js";
@@ -175,7 +175,7 @@ index 5c643c1c10b..7dc4a9c8cec 100644
          });
        }
 diff --git a/src/cli/gateway-cli/run.ts b/src/cli/gateway-cli/run.ts
-index 1f561587c19..c95b930d835 100644
+index 1f561587c193475e8511fd01d2768f62956e2e27..c95b930d835a3ff0e714652a2d0a678442a5caca 100644
 --- a/src/cli/gateway-cli/run.ts
 +++ b/src/cli/gateway-cli/run.ts
 @@ -60,6 +60,10 @@ import {
@@ -235,7 +235,7 @@ index 1f561587c19..c95b930d835 100644
          const snapshotPreparation = await import("../../config/io.snapshot-preparation.js");
          const startupConfigSnapshotReadForThisStart = startupConfigSnapshotReadForNextStart;
 diff --git a/src/infra/gateway-boot-lifecycle.kernel.ts b/src/infra/gateway-boot-lifecycle.kernel.ts
-index d92bb63cf0d..1cadb5bf883 100644
+index d92bb63cf0d02fd399b5808b04805cc66526186a..1cadb5bf8831eac79936140599e6a1520cf060ba 100644
 --- a/src/infra/gateway-boot-lifecycle.kernel.ts
 +++ b/src/infra/gateway-boot-lifecycle.kernel.ts
 @@ -4,6 +4,7 @@ import type { WorkerOperationHandlers } from "../state/worker-operation-registry

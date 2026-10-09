@@ -1,22 +1,17 @@
 diff --git a/src/cli/gateway-cli/run-loop-startup.test-support.ts b/src/cli/gateway-cli/run-loop-startup.test-support.ts
-index 323dadf5d80..f89dd33a0f3 100644
+index 323dadf5d808fd85f6a93355706eb92ed047d918..25a34e8e2ecd38534d266667a99c758436a431c0 100644
 --- a/src/cli/gateway-cli/run-loop-startup.test-support.ts
 +++ b/src/cli/gateway-cli/run-loop-startup.test-support.ts
-@@ -1,19 +1,472 @@
+@@ -1,19 +1,504 @@
 -import { expect, it, vi } from "vitest";
+-import { withTestTimeout } from "../../../test/helpers/promise.js";
 +import { expect, it, vi, type Mock } from "vitest";
- import { withTestTimeout } from "../../../test/helpers/promise.js";
++import { awaitGateBeforeSettlement, withTestTimeout } from "../../../test/helpers/promise.js";
  import { GATEWAY_STARTUP_MAINTENANCE_REQUIRED_REASON } from "../../infra/startup-maintenance-required.js";
 +import { SUPERVISOR_HINT_ENV_VARS } from "../../infra/supervisor-markers.js";
-+import {
-+  TailscaleBackendAuthenticationRequiredError,
-+  waitForTailscaleBackendRunning,
-+} from "../../infra/tailscale-backend-ready.js";
-+import * as processExec from "../../process/exec.js";
  import { createDeferredCore } from "../../shared/deferred.js";
 -import { setTestEnvValue } from "../../test-utils/env.js";
 +import { captureEnv, deleteTestEnvValue, setTestEnvValue } from "../../test-utils/env.js";
-+import { createGatewayRestartRecovery } from "./run-loop-startup.js";
  import {
    createCloseMock,
    createGatewayServer,
@@ -40,6 +35,7 @@ index 323dadf5d80..f89dd33a0f3 100644
 +  acquireGatewayLock: Mock,
  ): void {
 +  it("joins recovery cleanup failure after shutdown without masking the failure", async () => {
++    const { createGatewayRestartRecovery } = await import("./run-loop-startup.js");
 +    const failureStarted = createDeferredCore();
 +    const finishFailedRecovery = createDeferredCore();
 +    const failedRecovery = createGatewayRestartRecovery(
@@ -54,7 +50,11 @@ index 323dadf5d80..f89dd33a0f3 100644
 +      null,
 +    );
 +    const failedAttempt = failedRecovery.attempt(new Error("startup failed"));
-+    await withTestTimeout(failureStarted.promise, 1_000, "expected recovery handler to start");
++    await awaitGateBeforeSettlement(
++      failureStarted.promise,
++      failedAttempt,
++      "recovery attempt settled before its handler started",
++    );
 +    failedRecovery.abort();
 +    const failedCleanup = failedRecovery.waitForCleanup();
 +    finishFailedRecovery.resolve();
@@ -68,6 +68,9 @@ index 323dadf5d80..f89dd33a0f3 100644
 +    setTestEnvValue("OPENCLAW_SYSTEMD_UNIT", "openclaw-gateway.service");
 +    try {
 +      await withIsolatedSignals(async ({ captureSignal }) => {
++        const { TailscaleBackendAuthenticationRequiredError, waitForTailscaleBackendRunning } =
++          await import("../../infra/tailscale-backend-ready.js");
++        const processExec = await import("../../process/exec.js");
 +        const { runGatewayLoop } = await import("./run-loop.js");
 +        const startupError = new TailscaleBackendAuthenticationRequiredError(
 +          "NeedsLogin",
@@ -110,15 +113,11 @@ index 323dadf5d80..f89dd33a0f3 100644
 +        let shutdownRequested = false;
 +        let recoveryEntered = false;
 +        try {
-+          const outcome = await withTestTimeout(
-+            Promise.race([
-+              recoveryStarted.promise.then(() => "recovery" as const),
-+              loopSettled.then(() => "loop-settled" as const),
-+            ]),
-+            1_000,
-+            "expected supervised startup recovery before the loop settles",
++          await awaitGateBeforeSettlement(
++            recoveryStarted.promise,
++            loop,
++            "Gateway loop settled before supervised startup recovery reached the Tailscale waiter",
 +          );
-+          expect(outcome).toBe("recovery");
 +          recoveryEntered = true;
 +          expect(statusExec).toHaveBeenCalledOnce();
 +          captureSignal("SIGTERM")();
@@ -157,6 +156,8 @@ index 323dadf5d80..f89dd33a0f3 100644
 +    setTestEnvValue("OPENCLAW_SYSTEMD_UNIT", "openclaw-gateway.service");
 +    try {
 +      await withIsolatedSignals(async ({ captureSignal }) => {
++        const { TailscaleBackendAuthenticationRequiredError } =
++          await import("../../infra/tailscale-backend-ready.js");
 +        const { runGatewayLoop } = await import("./run-loop.js");
 +        const startupError = new TailscaleBackendAuthenticationRequiredError(
 +          "NeedsLogin",
@@ -194,14 +195,21 @@ index 323dadf5d80..f89dd33a0f3 100644
 +        });
 +        const loop = runGatewayLoop({ start, runtime, completeBoot, onRestartStartupFailure });
 +        let loopFailure: unknown;
-+        const loopSettled = loop.catch((error: unknown) => {
-+          loopFailure = error;
-+        });
++        let loopFinished = false;
++        const loopSettled = loop.then(
++          () => {
++            loopFinished = true;
++          },
++          (error: unknown) => {
++            loopFinished = true;
++            loopFailure = error;
++          },
++        );
 +        try {
-+          await withTestTimeout(
++          await awaitGateBeforeSettlement(
 +            recoveryStarted.promise,
-+            1_000,
-+            "expected supervised Serve recovery",
++            loop,
++            "Gateway loop settled before supervised Serve recovery started",
 +          );
 +          expect(start).toHaveBeenCalledOnce();
 +          expect(firstClose).toHaveBeenCalledOnce();
@@ -233,10 +241,10 @@ index 323dadf5d80..f89dd33a0f3 100644
 +          );
 +
 +          secondStartup.resolve();
-+          await withTestTimeout(
++          await awaitGateBeforeSettlement(
 +            new Promise<void>((resolve) => setImmediate(resolve)),
-+            1_000,
-+            "expected the successful retry to enter its running loop",
++            loop,
++            "Gateway loop settled before the successful retry entered its running loop",
 +          );
 +          const stop = captureSignal("SIGTERM");
 +          stop();
@@ -250,9 +258,10 @@ index 323dadf5d80..f89dd33a0f3 100644
 +        } finally {
 +          allowRecovery.resolve();
 +          secondStartup.resolve();
-+          if (runtime.exit.mock.calls.length === 0) {
++          if (runtime.exit.mock.calls.length === 0 && !loopFinished) {
 +            captureSignal("SIGTERM")();
 +            await exited;
++            await loopSettled;
 +          }
 +        }
 +      });
@@ -270,6 +279,8 @@ index 323dadf5d80..f89dd33a0f3 100644
 +    setTestEnvValue("OPENCLAW_SYSTEMD_UNIT", "openclaw-gateway.service");
 +    try {
 +      await withIsolatedSignals(async () => {
++        const { TailscaleBackendAuthenticationRequiredError } =
++          await import("../../infra/tailscale-backend-ready.js");
 +        const { GatewayStartupCleanupError } = await import("../../gateway/server-shutdown.js");
 +        const { runGatewayLoop } = await import("./run-loop.js");
 +        const startupError = new TailscaleBackendAuthenticationRequiredError(
@@ -319,6 +330,8 @@ index 323dadf5d80..f89dd33a0f3 100644
 +    setTestEnvValue("OPENCLAW_SYSTEMD_UNIT", "openclaw-gateway.service");
 +    try {
 +      await withIsolatedSignals(async () => {
++        const { TailscaleBackendAuthenticationRequiredError } =
++          await import("../../infra/tailscale-backend-ready.js");
 +        const { runGatewayLoop } = await import("./run-loop.js");
 +        const startupError = new TailscaleBackendAuthenticationRequiredError(
 +          "NeedsLogin",
@@ -345,7 +358,11 @@ index 323dadf5d80..f89dd33a0f3 100644
 +        const loop = runGatewayLoop({ start, runtime, onRestartStartupFailure });
 +        const loopSettled = loop.catch(() => {});
 +
-+        await withTestTimeout(recoveryStarted.promise, 1_000, "expected parked startup recovery");
++        await awaitGateBeforeSettlement(
++          recoveryStarted.promise,
++          loop,
++          "Gateway loop settled before parked startup recovery started",
++        );
 +        expect(acquireGatewayLock).toHaveBeenCalledOnce();
 +        expect(releaseLock).not.toHaveBeenCalled();
 +        await expect(exited).resolves.toBe(1);
@@ -368,6 +385,8 @@ index 323dadf5d80..f89dd33a0f3 100644
 +    setTestEnvValue("OPENCLAW_SYSTEMD_UNIT", "openclaw-gateway.service");
 +    try {
 +      await withIsolatedSignals(async ({ captureSignal }) => {
++        const { TailscaleBackendAuthenticationRequiredError } =
++          await import("../../infra/tailscale-backend-ready.js");
 +        const { runGatewayLoop } = await import("./run-loop.js");
 +        const startupError = new TailscaleBackendAuthenticationRequiredError(
 +          "NeedsMachineAuth",
@@ -399,11 +418,22 @@ index 323dadf5d80..f89dd33a0f3 100644
 +        });
 +        const loop = runGatewayLoop({ start, runtime, onRestartStartupFailure });
 +        let loopFailure: unknown;
-+        const loopSettled = loop.catch((error: unknown) => {
-+          loopFailure = error;
-+        });
++        let loopFinished = false;
++        const loopSettled = loop.then(
++          () => {
++            loopFinished = true;
++          },
++          (error: unknown) => {
++            loopFinished = true;
++            loopFailure = error;
++          },
++        );
 +        try {
-+          await withTestTimeout(recoveryStarted.promise, 1_000, "expected prerequisite wait");
++          await awaitGateBeforeSettlement(
++            recoveryStarted.promise,
++            loop,
++            "Gateway loop settled before the supervised prerequisite wait started",
++          );
 +          expect(firstClose).toHaveBeenCalledExactlyOnceWith({ reason: "gateway startup failed" });
 +          expect(start).toHaveBeenCalledOnce();
 +          const stop = captureSignal("SIGTERM");
@@ -425,9 +455,10 @@ index 323dadf5d80..f89dd33a0f3 100644
 +          expect(onRestartStartupFailure).toHaveBeenCalledOnce();
 +        } finally {
 +          recoveryCleanup.resolve();
-+          if (runtime.exit.mock.calls.length === 0) {
++          if (runtime.exit.mock.calls.length === 0 && !loopFinished) {
 +            captureSignal("SIGTERM")();
 +            await exited;
++            await loopSettled;
 +          }
 +        }
 +      });
@@ -444,6 +475,8 @@ index 323dadf5d80..f89dd33a0f3 100644
 +    setPlatform("linux");
 +    try {
 +      await withIsolatedSignals(async () => {
++        const { TailscaleBackendAuthenticationRequiredError } =
++          await import("../../infra/tailscale-backend-ready.js");
 +        const { runGatewayLoop } = await import("./run-loop.js");
 +        const startupError = new TailscaleBackendAuthenticationRequiredError(
 +          "NeedsLogin",
@@ -478,7 +511,7 @@ index 323dadf5d80..f89dd33a0f3 100644
      { cleanup: "clean", supervised: false, platform: "linux" },
      { cleanup: "failed", supervised: false, platform: "linux" },
 diff --git a/src/cli/gateway-cli/run-loop.test.ts b/src/cli/gateway-cli/run-loop.test.ts
-index f6933bc5f14..1cc393b8610 100644
+index f6933bc5f14b891d1c1bc4c76bcc31fede0145d4..1cc393b861058369162ce93df292c86e065bd90a 100644
 --- a/src/cli/gateway-cli/run-loop.test.ts
 +++ b/src/cli/gateway-cli/run-loop.test.ts
 @@ -327,7 +327,7 @@ describe("runGatewayLoop", () => {
@@ -491,7 +524,7 @@ index f6933bc5f14..1cc393b8610 100644
    registerGracefulGatewayShutdownTests(fixtures);
  
 diff --git a/src/infra/gateway-boot-lifecycle.test.ts b/src/infra/gateway-boot-lifecycle.test.ts
-index 63cc5e2110c..00ca9941702 100644
+index 63cc5e2110cf39110c7ee5cbb2aa71d23387fb46..00ca9941702c2e82b42e2d100a6162bb494c68ac 100644
 --- a/src/infra/gateway-boot-lifecycle.test.ts
 +++ b/src/infra/gateway-boot-lifecycle.test.ts
 @@ -21,6 +21,7 @@ import {
@@ -610,7 +643,7 @@ index 63cc5e2110c..00ca9941702 100644
      const lifecycle = createLifecycleDb();
      const nowMs = 1_000_000;
 diff --git a/src/infra/tailscale.test.ts b/src/infra/tailscale.test.ts
-index d80cf7394dc..6221bbf99d1 100644
+index d80cf7394dc5ca93a85d37b66de90c1a20de3709..6221bbf99d110a7d667cbcff93fa0a3a3fab5846 100644
 --- a/src/infra/tailscale.test.ts
 +++ b/src/infra/tailscale.test.ts
 @@ -1,13 +1,19 @@
@@ -936,12 +969,29 @@ index d80cf7394dc..6221bbf99d1 100644
      "names the operator fix when the sudo fallback cannot run without a TTY",
      async () => {
 diff --git a/test/fixtures/tailscale-sudo-fixture.mjs b/test/fixtures/tailscale-sudo-fixture.mjs
-index 3e26ee5c5e0..2d810b40272 100755
+index 3e26ee5c5e040a6aa6ecead2fb3898dc8977b994..2d810b4027251995f22d818c01b68c7e50bf8443 100755
 --- a/test/fixtures/tailscale-sudo-fixture.mjs
 +++ b/test/fixtures/tailscale-sudo-fixture.mjs
-@@ -1,9 +1,34 @@
- #!/usr/bin/env node
+@@ -1,18 +1,43 @@
+-#!/usr/bin/env node
 -if (process.argv.includes("status")) {
+-  process.stdout.write("{}");
+-  process.exit(0);
+-}
+-if (process.argv[2] === "-n") {
+-  const mode = process.env.OPENCLAW_TEST_TAILSCALE_SUDO_FIXTURE_MODE;
+-  if (mode === "password") {
+-    process.stderr.write("sudo: a password is required\n");
+-  } else if (mode === "route-error") {
+-    process.stderr.write("Funnel is not enabled on your tailnet.\n");
+-  } else {
+-    process.stderr.write("listener already exists for port 443\n");
+-  }
+-} else {
+-  process.stderr.write("Access denied: serve config denied\nUse 'sudo tailscale serve'.\n");
+-}
+-process.exit(1);
++#!/usr/bin/env node
 +import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 +
 +const args = process.argv.slice(2);
@@ -968,11 +1018,19 @@ index 3e26ee5c5e0..2d810b40272 100755
 +    }
 +    process.exit(1);
 +  }
-   process.stdout.write("{}");
-   process.exit(0);
- }
--if (process.argv[2] === "-n") {
++  process.stdout.write("{}");
++  process.exit(0);
++}
 +if (sudo) {
-   const mode = process.env.OPENCLAW_TEST_TAILSCALE_SUDO_FIXTURE_MODE;
-   if (mode === "password") {
-     process.stderr.write("sudo: a password is required\n");
++  const mode = process.env.OPENCLAW_TEST_TAILSCALE_SUDO_FIXTURE_MODE;
++  if (mode === "password") {
++    process.stderr.write("sudo: a password is required\n");
++  } else if (mode === "route-error") {
++    process.stderr.write("Funnel is not enabled on your tailnet.\n");
++  } else {
++    process.stderr.write("listener already exists for port 443\n");
++  }
++} else {
++  process.stderr.write("Access denied: serve config denied\nUse 'sudo tailscale serve'.\n");
++}
++process.exit(1);

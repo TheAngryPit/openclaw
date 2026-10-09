@@ -50,6 +50,43 @@ function expectedVitestOwnerConfig(entrypoint) {
   return null;
 }
 
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function verifyMatcherIdentities(group, label) {
+  if (
+    !Array.isArray(group.fullNames) ||
+    !Array.isArray(group.matcherIdentities) ||
+    group.fullNames.length === 0 ||
+    group.matcherIdentities.length !== group.fullNames.length
+  ) {
+    fail(label + " does not map each reporter identity to one Vitest matcher identity");
+  }
+  const reporterNames = group.matcherIdentities.map((identity) => identity.reporterFullName);
+  const vitestNames = group.matcherIdentities.map((identity) => identity.vitestFullName);
+  if (
+    group.matcherIdentities.some(
+      (identity) =>
+        typeof identity.reporterFullName !== "string" ||
+        typeof identity.vitestFullName !== "string" ||
+        identity.vitestFullName.trim() !== identity.vitestFullName ||
+        !identity.vitestFullName.includes(" > ") ||
+        identity.vitestFullName.replaceAll(" > ", " ") !== identity.reporterFullName,
+    ) ||
+    new Set(reporterNames).size !== reporterNames.length ||
+    new Set(vitestNames).size !== vitestNames.length ||
+    JSON.stringify(reporterNames) !== JSON.stringify(group.fullNames)
+  ) {
+    fail(label + " matcher identities do not normalize one-to-one to reporter names");
+  }
+  const expectedPattern = `^(?:${vitestNames.map(escapeRegex).join("|")})$`;
+  if (group.pattern !== expectedPattern) {
+    fail(label + " Vitest v5 pattern is not the anchored escaped matcher identity set");
+  }
+  return group.matcherIdentities;
+}
+
 function verifyWrapperRoutes(group, label, { requireFullNames = false } = {}) {
   if (!Array.isArray(group.wrappers) || group.wrappers.length === 0) {
     fail(label + " has no explicit owning-config wrappers");
@@ -169,6 +206,11 @@ try {
   const affected = manifest.testCases.candidateAffectedSuites;
   const selectedRoutes = verifyWrapperRoutes(selected, "candidateSelected", { requireFullNames: true });
   const affectedRoutes = verifyWrapperRoutes(affected, "candidateAffectedSuites");
+  const baselineMatcherIdentities = verifyMatcherIdentities(baseline, "baselineRegression");
+  const selectedMatcherIdentities = verifyMatcherIdentities(selected, "candidateSelected");
+  const wrapperMatcherIdentities = selected.wrappers.flatMap((wrapper) =>
+    verifyMatcherIdentities(wrapper, "candidateSelected wrapper " + wrapper.id),
+  );
   const selectedNames = [...selectedRoutes.fullNames].sort();
   const selectedEntrypoints = [...selectedRoutes.entrypoints].sort();
   const affectedEntrypoints = [...affectedRoutes.entrypoints].sort();
@@ -179,11 +221,14 @@ try {
     baseline.expectedSelectedCount !== 1 ||
     baseline.expectedFailedTestSuites !== 1 ||
     baseline.config !== expectedVitestOwnerConfig(baseline.entrypoints[0]) ||
-    baseline.pattern !== baseline.fullNames[0] ||
     selected.fullNames.length === 0 ||
     selected.expectedSelectedCount !== selected.fullNames.length ||
     new Set(selected.fullNames).size !== selected.fullNames.length ||
     JSON.stringify(selectedNames) !== JSON.stringify([...selected.fullNames].sort()) ||
+    baselineMatcherIdentities.length !== baseline.expectedSelectedCount ||
+    selectedMatcherIdentities.length !== selected.expectedSelectedCount ||
+    JSON.stringify([...wrapperMatcherIdentities.map((identity) => identity.reporterFullName)].sort()) !==
+      JSON.stringify([...selected.fullNames].sort()) ||
     !selected.fullNames.includes(baseline.fullNames[0]) ||
     JSON.stringify(selectedEntrypoints) !== JSON.stringify([...selected.entrypoints].sort()) ||
     JSON.stringify([...selected.entrypoints].sort()) !== JSON.stringify([...affected.entrypoints].sort()) ||
@@ -208,6 +253,14 @@ try {
       baselineRegression: manifest.testCases.baselineRegression.fullNames,
       candidateSelected: manifest.testCases.candidateSelected.fullNames,
       affectedSuiteEntrypoints: manifest.testCases.candidateAffectedSuites.expectedSuites,
+    },
+    vitestMatchers: {
+      baselineRegression: baseline.matcherIdentities,
+      candidateSelected: selected.matcherIdentities,
+      candidateSelectedWrappers: selected.wrappers.map(({ id, matcherIdentities }) => ({
+        id,
+        matcherIdentities,
+      })),
     },
     vitestRouting: {
       baselineRegression: {

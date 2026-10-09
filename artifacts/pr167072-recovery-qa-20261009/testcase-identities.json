@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "status": "READY_FOR_ROOT_REVIEW",
   "sourceRevisionState": {
-    "patchesAndFileHashes": "FINAL_FORMATTED_SOURCE_REBOUND_FOR_ROOT_REVIEW",
+    "patchesAndFileHashes": "FINAL_FROZEN_SOURCE_REBOUND_PENDING_ROOT_REVIEW",
     "sourceBaseCommit": "e670b178f9dbdde25a074913d9c97fa9b8b533b6",
     "sourceTree": "task-owned-uncommitted-diff-in-recovery-worktree",
-    "reason": "Root independently applied all three rebound overlays to an isolated Git index at e670 and matched all 12 blobs to the normalized final source and manifest hashes. Canonical owner configs, parser smoke, strict case and cleanup boundaries were reviewed. Candidate remains an exact overlay, not a source commit.",
+    "reason": "The tracked sudo fixture is now represented as a modification from its exact e670 blob; all three overlays, all old/new patch blob identities, and twelve LF-normalized source/test hashes are verified. Independent Root review is pending; candidate remains an exact overlay, not a source commit.",
     "rebindAfterSourceAudit": false,
     "rootReviewStillRequired": false,
     "dispatchable": true
@@ -16,7 +16,7 @@
     "notUnchangedMain": true,
     "lifecycleFixAppliedToBaseline": false,
     "baselineMustFailOnlyAt": "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery",
-    "baselineFailureMustContain": "expected 'loop-settled' to be 'recovery'",
+    "baselineFailureMustContain": "TailscaleBackendAuthenticationRequiredError: Tailscale backend requires the operator to sign in to the local node (NeedsLogin)",
     "candidateRequirement": "The same named waiter regression and four independent owner-boundary regressions pass as five exact selected cases; then every test in all three affected Vitest entrypoint suites passes with positive counts and zero actual skips."
   },
   "baseline": {
@@ -34,17 +34,17 @@
     {
       "id": "classification-prerequisite",
       "path": "artifacts/pr167072-recovery-qa-20261009/classification-prerequisite.patch",
-      "sha256": "cad60ac47793d2dae50a2ed799c68222324c4e3cc4ce58b4e9e1baeb22d75457",
+      "sha256": "0a151ca6acc4c03de4451b58f2194568d2d74d789aac3fe2488315e078f3e040",
       "paths": [
-        "src/infra/tailscale-backend-auth-required-error.ts",
         "src/infra/tailscale-backend-ready.ts",
-        "src/infra/tailscale.ts"
+        "src/infra/tailscale.ts",
+        "src/infra/tailscale-backend-auth-required-error.ts"
       ]
     },
     {
       "id": "lifecycle-fix",
       "path": "artifacts/pr167072-recovery-qa-20261009/lifecycle-fix.patch",
-      "sha256": "68e139cbfa73f3b92e1755c8dda473808a79d6fea23febda31126aa0494febcd",
+      "sha256": "7f961760792f95067e0fcab920e41953f0e92a5556ef18043d7b796ea0b6c28b",
       "paths": [
         "src/cli/gateway-cli/run-loop-startup.ts",
         "src/cli/gateway-cli/run-loop.ts",
@@ -55,7 +55,7 @@
     {
       "id": "candidate-tests-overlay",
       "path": "artifacts/pr167072-recovery-qa-20261009/candidate-tests-overlay.patch",
-      "sha256": "d57e9d4061b140b541e933f917fa9799305f64f298b85ffaebf8995bfd2e926b",
+      "sha256": "3f40f40f66776164ad9b5866ac22ba1f3fc1f37299ccbd2912763fb0fe6e7db0",
       "paths": [
         "src/cli/gateway-cli/run-loop-startup.test-support.ts",
         "src/cli/gateway-cli/run-loop.test.ts",
@@ -68,7 +68,7 @@
   "candidateFileSha256": [
     {
       "path": "src/cli/gateway-cli/run-loop-startup.test-support.ts",
-      "sha256": "b03eef383b7195299c12d3bca31064d4c2d853a39a5e70b68eee9132b1730757"
+      "sha256": "26aef127ab5bc32969b76ed90895d7d6864df35874cb509965aa3737f261fae8"
     },
     {
       "path": "src/cli/gateway-cli/run-loop-startup.ts",
@@ -180,9 +180,15 @@
         "src/cli/gateway-cli/run-loop.test.ts"
       ],
       "config": "test/vitest/vitest.cli.config.ts",
-      "pattern": "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery",
+      "pattern": "^(?:runGatewayLoop > joins the real Tailscale prerequisite waiter when shutdown cancels recovery)$",
       "fullNames": [
         "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery"
+      ],
+      "matcherIdentities": [
+        {
+          "reporterFullName": "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery",
+          "vitestFullName": "runGatewayLoop > joins the real Tailscale prerequisite waiter when shutdown cancels recovery"
+        }
       ],
       "expectedSelectedCount": 1,
       "expectedFailedTestSuites": 1
@@ -194,13 +200,35 @@
         "src/infra/tailscale.test.ts",
         "src/infra/gateway-boot-lifecycle.test.ts"
       ],
-      "pattern": "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery|runGatewayLoop parks supervised Serve startup after clean close and retries once after Running|runGatewayLoop does not park a foreground Gateway for Tailscale authentication requirements|tailscale helpers preserves the sudo status command while parking managed Serve recovery|gateway crash-loop breaker keeps a completed Tailscale authentication prerequisite visible without counting it as a crash",
+      "pattern": "^(?:runGatewayLoop > joins the real Tailscale prerequisite waiter when shutdown cancels recovery|runGatewayLoop > parks supervised Serve startup after clean close and retries once after Running|runGatewayLoop > does not park a foreground Gateway for Tailscale authentication requirements|tailscale helpers > preserves the sudo status command while parking managed Serve recovery|gateway crash-loop breaker > keeps a completed Tailscale authentication prerequisite visible without counting it as a crash)$",
       "fullNames": [
         "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery",
         "runGatewayLoop parks supervised Serve startup after clean close and retries once after Running",
         "runGatewayLoop does not park a foreground Gateway for Tailscale authentication requirements",
         "tailscale helpers preserves the sudo status command while parking managed Serve recovery",
         "gateway crash-loop breaker keeps a completed Tailscale authentication prerequisite visible without counting it as a crash"
+      ],
+      "matcherIdentities": [
+        {
+          "reporterFullName": "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery",
+          "vitestFullName": "runGatewayLoop > joins the real Tailscale prerequisite waiter when shutdown cancels recovery"
+        },
+        {
+          "reporterFullName": "runGatewayLoop parks supervised Serve startup after clean close and retries once after Running",
+          "vitestFullName": "runGatewayLoop > parks supervised Serve startup after clean close and retries once after Running"
+        },
+        {
+          "reporterFullName": "runGatewayLoop does not park a foreground Gateway for Tailscale authentication requirements",
+          "vitestFullName": "runGatewayLoop > does not park a foreground Gateway for Tailscale authentication requirements"
+        },
+        {
+          "reporterFullName": "tailscale helpers preserves the sudo status command while parking managed Serve recovery",
+          "vitestFullName": "tailscale helpers > preserves the sudo status command while parking managed Serve recovery"
+        },
+        {
+          "reporterFullName": "gateway crash-loop breaker keeps a completed Tailscale authentication prerequisite visible without counting it as a crash",
+          "vitestFullName": "gateway crash-loop breaker > keeps a completed Tailscale authentication prerequisite visible without counting it as a crash"
+        }
       ],
       "expectedSelectedCount": 5,
       "wrappers": [
@@ -210,11 +238,25 @@
           "entrypoints": [
             "src/cli/gateway-cli/run-loop.test.ts"
           ],
-          "pattern": "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery|runGatewayLoop parks supervised Serve startup after clean close and retries once after Running|runGatewayLoop does not park a foreground Gateway for Tailscale authentication requirements",
+          "pattern": "^(?:runGatewayLoop > joins the real Tailscale prerequisite waiter when shutdown cancels recovery|runGatewayLoop > parks supervised Serve startup after clean close and retries once after Running|runGatewayLoop > does not park a foreground Gateway for Tailscale authentication requirements)$",
           "fullNames": [
             "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery",
             "runGatewayLoop parks supervised Serve startup after clean close and retries once after Running",
             "runGatewayLoop does not park a foreground Gateway for Tailscale authentication requirements"
+          ],
+          "matcherIdentities": [
+            {
+              "reporterFullName": "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery",
+              "vitestFullName": "runGatewayLoop > joins the real Tailscale prerequisite waiter when shutdown cancels recovery"
+            },
+            {
+              "reporterFullName": "runGatewayLoop parks supervised Serve startup after clean close and retries once after Running",
+              "vitestFullName": "runGatewayLoop > parks supervised Serve startup after clean close and retries once after Running"
+            },
+            {
+              "reporterFullName": "runGatewayLoop does not park a foreground Gateway for Tailscale authentication requirements",
+              "vitestFullName": "runGatewayLoop > does not park a foreground Gateway for Tailscale authentication requirements"
+            }
           ]
         },
         {
@@ -224,10 +266,20 @@
             "src/infra/tailscale.test.ts",
             "src/infra/gateway-boot-lifecycle.test.ts"
           ],
-          "pattern": "tailscale helpers preserves the sudo status command while parking managed Serve recovery|gateway crash-loop breaker keeps a completed Tailscale authentication prerequisite visible without counting it as a crash",
+          "pattern": "^(?:tailscale helpers > preserves the sudo status command while parking managed Serve recovery|gateway crash-loop breaker > keeps a completed Tailscale authentication prerequisite visible without counting it as a crash)$",
           "fullNames": [
             "tailscale helpers preserves the sudo status command while parking managed Serve recovery",
             "gateway crash-loop breaker keeps a completed Tailscale authentication prerequisite visible without counting it as a crash"
+          ],
+          "matcherIdentities": [
+            {
+              "reporterFullName": "tailscale helpers preserves the sudo status command while parking managed Serve recovery",
+              "vitestFullName": "tailscale helpers > preserves the sudo status command while parking managed Serve recovery"
+            },
+            {
+              "reporterFullName": "gateway crash-loop breaker keeps a completed Tailscale authentication prerequisite visible without counting it as a crash",
+              "vitestFullName": "gateway crash-loop breaker > keeps a completed Tailscale authentication prerequisite visible without counting it as a crash"
+            }
           ]
         }
       ]
