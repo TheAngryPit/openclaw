@@ -40,6 +40,43 @@ function workspaceFile(relativePath) {
   return path;
 }
 
+function expectedVitestOwnerConfig(entrypoint) {
+  if (entrypoint.startsWith("src/cli/")) {
+    return "test/vitest/vitest.cli.config.ts";
+  }
+  if (entrypoint.startsWith("src/infra/")) {
+    return "test/vitest/vitest.infra.config.ts";
+  }
+  return null;
+}
+
+function verifyWrapperRoutes(group, label, { requireFullNames = false } = {}) {
+  if (!Array.isArray(group.wrappers) || group.wrappers.length === 0) {
+    fail(label + " has no explicit owning-config wrappers");
+  }
+  const wrapperIds = group.wrappers.map((wrapper) => wrapper.id);
+  const entrypoints = group.wrappers.flatMap((wrapper) => wrapper.entrypoints ?? []);
+  if (
+    wrapperIds.some((id) => typeof id !== "string" || id.length === 0) ||
+    new Set(wrapperIds).size !== wrapperIds.length ||
+    new Set(entrypoints).size !== entrypoints.length ||
+    group.wrappers.some(
+      (wrapper) =>
+        !Array.isArray(wrapper.entrypoints) ||
+        wrapper.entrypoints.length === 0 ||
+        wrapper.entrypoints.some((entrypoint) => expectedVitestOwnerConfig(entrypoint) !== wrapper.config),
+    )
+  ) {
+    fail(label + " has duplicate entrypoints or a non-owning Vitest config");
+  }
+  return {
+    entrypoints: [...entrypoints].sort(),
+    fullNames: requireFullNames
+      ? group.wrappers.flatMap((wrapper) => wrapper.fullNames ?? [])
+      : [],
+  };
+}
+
 try {
   if (manifest.status !== "READY_FOR_ROOT_REVIEW" || JSON.stringify(manifest).includes("<UNBOUND:")) {
     fail("manifest is unbound or has not reached Root review");
@@ -127,23 +164,33 @@ try {
   ) {
     fail("patch split, intermediate baseline overlay, or lifecycle boundary differs from the manifest");
   }
+  const baseline = manifest.testCases.baselineRegression;
+  const selected = manifest.testCases.candidateSelected;
+  const affected = manifest.testCases.candidateAffectedSuites;
+  const selectedRoutes = verifyWrapperRoutes(selected, "candidateSelected", { requireFullNames: true });
+  const affectedRoutes = verifyWrapperRoutes(affected, "candidateAffectedSuites");
+  const selectedNames = [...selectedRoutes.fullNames].sort();
+  const selectedEntrypoints = [...selectedRoutes.entrypoints].sort();
+  const affectedEntrypoints = [...affectedRoutes.entrypoints].sort();
   if (
-    manifest.testCases.baselineRegression.fullNames.length !== 1 ||
-    manifest.testCases.baselineRegression.expectedSelectedCount !== 1 ||
-    manifest.testCases.baselineRegression.expectedFailedTestSuites !== 1 ||
-    manifest.testCases.candidateSelected.fullNames.length === 0 ||
-    manifest.testCases.candidateSelected.expectedSelectedCount !==
-      manifest.testCases.candidateSelected.fullNames.length ||
-    new Set(manifest.testCases.candidateSelected.fullNames).size !==
-      manifest.testCases.candidateSelected.fullNames.length ||
-    !manifest.testCases.candidateSelected.fullNames.includes(
-      manifest.testCases.baselineRegression.fullNames[0],
-    ) ||
-    JSON.stringify([...manifest.testCases.candidateSelected.entrypoints].sort()) !==
-      JSON.stringify([...manifest.testCases.candidateAffectedSuites.entrypoints].sort()) ||
-    manifest.testCases.candidateAffectedSuites.minimumTests < 1
+    !Array.isArray(baseline.entrypoints) ||
+    baseline.entrypoints.length !== 1 ||
+    baseline.fullNames.length !== 1 ||
+    baseline.expectedSelectedCount !== 1 ||
+    baseline.expectedFailedTestSuites !== 1 ||
+    baseline.config !== expectedVitestOwnerConfig(baseline.entrypoints[0]) ||
+    baseline.pattern !== baseline.fullNames[0] ||
+    selected.fullNames.length === 0 ||
+    selected.expectedSelectedCount !== selected.fullNames.length ||
+    new Set(selected.fullNames).size !== selected.fullNames.length ||
+    JSON.stringify(selectedNames) !== JSON.stringify([...selected.fullNames].sort()) ||
+    !selected.fullNames.includes(baseline.fullNames[0]) ||
+    JSON.stringify(selectedEntrypoints) !== JSON.stringify([...selected.entrypoints].sort()) ||
+    JSON.stringify([...selected.entrypoints].sort()) !== JSON.stringify([...affected.entrypoints].sort()) ||
+    JSON.stringify(affectedEntrypoints) !== JSON.stringify([...affected.expectedSuites].sort()) ||
+    affected.minimumTests < 1
   ) {
-    fail("named regression identities and selected counts are inconsistent");
+    fail("named regression identities, owner routes, and selected counts are inconsistent");
   }
 
   const receipt = {
@@ -161,6 +208,23 @@ try {
       baselineRegression: manifest.testCases.baselineRegression.fullNames,
       candidateSelected: manifest.testCases.candidateSelected.fullNames,
       affectedSuiteEntrypoints: manifest.testCases.candidateAffectedSuites.expectedSuites,
+    },
+    vitestRouting: {
+      baselineRegression: {
+        config: baseline.config,
+        entrypoints: baseline.entrypoints,
+      },
+      candidateSelected: selected.wrappers.map(({ id, config, entrypoints, fullNames }) => ({
+        id,
+        config,
+        entrypoints,
+        fullNames,
+      })),
+      candidateAffectedSuites: affected.wrappers.map(({ id, config, entrypoints }) => ({
+        id,
+        config,
+        entrypoints,
+      })),
     },
     verifiedAt: new Date().toISOString(),
   };

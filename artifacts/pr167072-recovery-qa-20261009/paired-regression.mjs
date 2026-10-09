@@ -276,7 +276,9 @@ function processEnvironment(cachePath = "") {
   }
   env.CI = "1";
   env.GITHUB_ACTIONS = "true";
-  env.GITHUB_WORKSPACE = workspace;
+  // Product CI runs from the repository root; this workflow keeps its product
+  // checkout under qa-product, so child tools must see that nested root.
+  env.GITHUB_WORKSPACE = repoRoot;
   env.GITHUB_TOKEN = "";
   env.GH_TOKEN = "";
   env.OPENCLAW_VITEST_MAX_WORKERS = "2";
@@ -470,7 +472,19 @@ function reportAssertions(report, wrapper) {
   const expectedSuites = wrapper.entrypoints.map((path) => resolve(repoRoot, path)).sort();
   const actualSuites = report.testResults.map((suite) => resolve(repoRoot, suite.name)).sort();
   if (JSON.stringify(expectedSuites) !== JSON.stringify(actualSuites)) {
-    fail(wrapper.id + " reported a different Vitest suite set than the pinned entrypoints");
+    fail(
+      wrapper.id +
+        " reported a different Vitest suite set than the pinned entrypoints; expected=" +
+        JSON.stringify(wrapper.entrypoints) +
+        "; observed=" +
+        JSON.stringify(
+          report.testResults.map((suite) => relative(repoRoot, resolve(repoRoot, suite.name)).split(sep).join("/")),
+        ) +
+        "; numTotalTestSuites=" +
+        String(report.numTotalTestSuites) +
+        "; numTotalTests=" +
+        String(report.numTotalTests),
+    );
   }
   const assertions = [];
   for (const suite of report.testResults) {
@@ -496,6 +510,10 @@ function loadWrapperReport(processResult, resultPath, wrapper) {
   }
   const bytes = readFileSync(resultPath);
   const report = JSON.parse(bytes.toString("utf8"));
+  return parseWrapperReport(report, bytes, wrapper);
+}
+
+function parseWrapperReport(report, bytes, wrapper) {
   const assertions = reportAssertions(report, wrapper);
   const knownStatuses = new Set(["passed", "failed", "skipped", "pending", "todo"]);
   if (assertions.some((assertion) => !knownStatuses.has(assertion.status))) {
@@ -524,6 +542,9 @@ function loadWrapperReport(processResult, resultPath, wrapper) {
   return {
     report,
     reportSha256: sha256(bytes),
+    suiteEntrypoints: report.testResults
+      .map((suite) => relative(repoRoot, resolve(repoRoot, suite.name)).split(sep).join("/"))
+      .sort(),
     assertions,
     selected,
     excludedByPattern,
@@ -539,6 +560,70 @@ function loadWrapperReport(processResult, resultPath, wrapper) {
   };
 }
 
+function selfTestReportParser() {
+  const wrapper = {
+    id: "synthetic-infra-owner",
+    entrypoints: ["src/infra/synthetic.test.ts"],
+    fullNames: ["synthetic reporter parses a passing assertion"],
+  };
+  const report = {
+    numTotalTestSuites: 1,
+    numTotalTests: 1,
+    numPassedTests: 1,
+    numFailedTests: 0,
+    numFailedTestSuites: 0,
+    numPendingTests: 0,
+    numTodoTests: 0,
+    numSkippedTests: 0,
+    testResults: [
+      {
+        name: resolve(repoRoot, wrapper.entrypoints[0]),
+        assertionResults: [
+          {
+            ancestorTitles: [],
+            title: wrapper.fullNames[0],
+            status: "passed",
+          },
+        ],
+      },
+    ],
+  };
+  const bytes = Buffer.from(JSON.stringify(report));
+  const parsed = parseWrapperReport(JSON.parse(bytes.toString("utf8")), bytes, wrapper);
+  if (
+    JSON.stringify(parsed.suiteEntrypoints) !== JSON.stringify(wrapper.entrypoints) ||
+    parsed.selected.length !== 1 ||
+    parsed.selected[0].fullName !== wrapper.fullNames[0] ||
+    parsed.selected[0].status !== "passed"
+  ) {
+    fail("synthetic structured-report parser smoke did not preserve the exact suite and assertion identity");
+  }
+  let zeroSuiteDiagnostic = null;
+  try {
+    reportAssertions(
+      { numTotalTestSuites: 0, numTotalTests: 0, testResults: [] },
+      wrapper,
+    );
+  } catch (error) {
+    zeroSuiteDiagnostic = error instanceof Error ? error.message : String(error);
+  }
+  if (
+    !zeroSuiteDiagnostic?.includes("numTotalTestSuites=0") ||
+    !zeroSuiteDiagnostic.includes("numTotalTests=0")
+  ) {
+    fail("synthetic zero-suite diagnostic smoke did not expose structured counts");
+  }
+  console.log(
+    JSON.stringify({
+      status: "SYNTHETIC_REPORT_PARSER_SMOKE_PASS",
+      suiteEntrypoints: parsed.suiteEntrypoints,
+      selected: parsed.selected.map(({ fullName, status }) => ({ fullName, status })),
+      zeroSuiteDiagnostic,
+      productCodeExecuted: false,
+    }),
+  );
+}
+
 async function runVitest(cell, wrapper) {
   const resultPath = resolve(outputDir, cell + "-" + wrapper.id + ".vitest.json");
   const args = [
@@ -546,8 +631,6 @@ async function runVitest(cell, wrapper) {
     "run",
     "--config",
     wrapper.config,
-    "--configLoader",
-    "runner",
     "--reporter=json",
     "--outputFile",
     resultPath,
@@ -578,6 +661,7 @@ async function runVitest(cell, wrapper) {
     observed: observed
       ? {
           reportSha256: observed.reportSha256,
+          suiteEntrypoints: observed.suiteEntrypoints,
           rawCounts: observed.rawCounts,
           selected: observed.selected.map((item) => ({
             fullName: item.fullName,
@@ -588,6 +672,60 @@ async function runVitest(cell, wrapper) {
         }
       : null,
     error,
+  };
+}
+
+async function runVitestGroup(cell, group) {
+  if (!Array.isArray(group.wrappers) || group.wrappers.length === 0) {
+    fail(group.id + " has no pinned Vitest owner wrappers");
+  }
+  const runs = [];
+  for (const wrapper of group.wrappers) {
+    runs.push(await runVitest(cell, wrapper));
+  }
+  const observedRuns = runs.filter((run) => run.observed !== null);
+  const suiteEntrypoints = observedRuns
+    .flatMap((run) => run.observed.suiteEntrypoints)
+    .sort();
+  const expectedSuites = [...group.entrypoints].sort();
+  const suiteSetMatches =
+    JSON.stringify(suiteEntrypoints) === JSON.stringify(expectedSuites) &&
+    new Set(suiteEntrypoints).size === suiteEntrypoints.length;
+  const countFields = ["total", "passed", "failed", "failedSuites", "pending", "todo", "skipped"];
+  const rawCounts = Object.fromEntries(
+    countFields.map((field) => {
+      const values = observedRuns.map((run) => run.observed.rawCounts[field]);
+      return [
+        field,
+        observedRuns.length === runs.length && values.every(Number.isInteger)
+          ? values.reduce((total, value) => total + value, 0)
+          : null,
+      ];
+    }),
+  );
+  const selected = observedRuns
+    .flatMap((run) => run.observed.selected)
+    .sort((left, right) => left.fullName.localeCompare(right.fullName));
+  const excludedByPattern = observedRuns
+    .flatMap((run) => run.observed.excludedByPattern)
+    .sort();
+  const runErrors = runs.filter((run) => run.error).map((run) => run.id + ": " + run.error);
+  const error =
+    runErrors.length > 0
+      ? runErrors.join("; ")
+      : suiteSetMatches
+        ? null
+        : group.id + " wrapper suite union differs from the exact pinned group entrypoints";
+  return {
+    id: group.id,
+    runs,
+    error,
+    observed: {
+      suiteEntrypoints,
+      rawCounts,
+      selected,
+      excludedByPattern,
+    },
   };
 }
 
@@ -640,11 +778,16 @@ function qualifySelectedCandidate(observed) {
   const expected = [...manifest.testCases.candidateSelected.fullNames].sort();
   const actual = result.selected.map((item) => item.fullName).sort();
   const ok =
+    Array.isArray(observed.runs) &&
+    observed.runs.length === manifest.testCases.candidateSelected.wrappers.length &&
+    observed.runs.every((run) => !run.error && processHealthy(run.process, 0)) &&
+    JSON.stringify(result.suiteEntrypoints) ===
+      JSON.stringify([...manifest.testCases.candidateSelected.entrypoints].sort()) &&
     JSON.stringify(actual) === JSON.stringify(expected) &&
     result.selected.length === manifest.testCases.candidateSelected.expectedSelectedCount &&
     result.selected.every((item) => item.status === "passed") &&
     result.rawCounts.failedSuites === 0 &&
-    processHealthy(observed.process, 0);
+    result.selected.filter((item) => ["skipped", "pending", "todo"].includes(item.status)).length === 0;
   return {
     valid: ok,
     classification: ok ? "ALL_NAMED_CANDIDATE_REGRESSIONS_PASS" : "CANDIDATE_SELECTED_CASES_NOT_QUALIFIED",
@@ -674,9 +817,12 @@ function qualifyFullSuites(observed, wrapper) {
     result.rawCounts.failedSuites === 0 &&
     actualSkipped === 0;
   const ok =
+    Array.isArray(observed.runs) &&
+    observed.runs.length === wrapper.wrappers.length &&
+    observed.runs.every((run) => !run.error && processHealthy(run.process, 0)) &&
+    JSON.stringify(result.suiteEntrypoints) === JSON.stringify([...wrapper.expectedSuites].sort()) &&
     expectedCountMatches &&
     statuses.every((status) => status === "passed") &&
-    processHealthy(observed.process, 0) &&
     result.excludedByPattern.length === 0;
   return {
     valid: ok,
@@ -878,7 +1024,7 @@ async function runLane() {
     evidence.cells.candidateSourceAndTestHashesBeforeTests = verifyCandidateFileHashes();
     verifyDependenciesUnchanged(dependenciesBefore);
 
-    evidence.cells.candidateSelectedRegressions = await runVitest(
+    evidence.cells.candidateSelectedRegressions = await runVitestGroup(
       "candidate",
       manifest.testCases.candidateSelected,
     );
@@ -887,7 +1033,7 @@ async function runLane() {
     );
     evidence.cells.candidateSourceAndTestHashesAfterSelected = verifyCandidateFileHashes();
 
-    evidence.cells.candidateAffectedSuites = await runVitest(
+    evidence.cells.candidateAffectedSuites = await runVitestGroup(
       "candidate",
       manifest.testCases.candidateAffectedSuites,
     );
@@ -1006,6 +1152,8 @@ if (mode === "run") {
   await runLane();
 } else if (mode === "cleanup") {
   await cleanupOnly();
+} else if (mode === "self-test-report") {
+  selfTestReportParser();
 } else {
-  fail("usage: paired-regression.mjs [run|cleanup]");
+  fail("usage: paired-regression.mjs [run|cleanup|self-test-report]");
 }

@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "status": "READY_FOR_ROOT_REVIEW",
   "sourceRevisionState": {
-    "patchesAndFileHashes": "AUDITED_FROZEN_SOURCE_REBOUND_FOR_ROOT_REVIEW",
+    "patchesAndFileHashes": "FINAL_FORMATTED_SOURCE_REBOUND_FOR_ROOT_REVIEW",
     "sourceBaseCommit": "e670b178f9dbdde25a074913d9c97fa9b8b533b6",
     "sourceTree": "task-owned-uncommitted-diff-in-recovery-worktree",
-    "reason": "Read-only rebound after the test-audit repair batch and Root final source review, including actual waiter composition, external processExec spy cleanup restoration, actual persisted breaker writers, and the sudo fixture. Candidate remains an exact overlay, not a source commit.",
+    "reason": "Root independently applied all three rebound overlays to an isolated Git index at e670 and matched all 12 blobs to the normalized final source and manifest hashes. Canonical owner configs, parser smoke, strict case and cleanup boundaries were reviewed. Candidate remains an exact overlay, not a source commit.",
     "rebindAfterSourceAudit": false,
     "rootReviewStillRequired": false,
     "dispatchable": true
@@ -34,7 +34,7 @@
     {
       "id": "classification-prerequisite",
       "path": "artifacts/pr167072-recovery-qa-20261009/classification-prerequisite.patch",
-      "sha256": "b53a26e9d2dc47858474e49713e1a950e5e71577644680558f7a42d3c43319f7",
+      "sha256": "cad60ac47793d2dae50a2ed799c68222324c4e3cc4ce58b4e9e1baeb22d75457",
       "paths": [
         "src/infra/tailscale-backend-auth-required-error.ts",
         "src/infra/tailscale-backend-ready.ts",
@@ -44,7 +44,7 @@
     {
       "id": "lifecycle-fix",
       "path": "artifacts/pr167072-recovery-qa-20261009/lifecycle-fix.patch",
-      "sha256": "85d8c31e2041f3b8da293a5df512ba0ba9edff01eeffbfb5f3a1f216faa0b1e8",
+      "sha256": "68e139cbfa73f3b92e1755c8dda473808a79d6fea23febda31126aa0494febcd",
       "paths": [
         "src/cli/gateway-cli/run-loop-startup.ts",
         "src/cli/gateway-cli/run-loop.ts",
@@ -55,7 +55,7 @@
     {
       "id": "candidate-tests-overlay",
       "path": "artifacts/pr167072-recovery-qa-20261009/candidate-tests-overlay.patch",
-      "sha256": "23fbb1aacbe48560994183501552de69e02d37d080b7cc32333bb46a71ba5db6",
+      "sha256": "d57e9d4061b140b541e933f917fa9799305f64f298b85ffaebf8995bfd2e926b",
       "paths": [
         "src/cli/gateway-cli/run-loop-startup.test-support.ts",
         "src/cli/gateway-cli/run-loop.test.ts",
@@ -68,11 +68,11 @@
   "candidateFileSha256": [
     {
       "path": "src/cli/gateway-cli/run-loop-startup.test-support.ts",
-      "sha256": "7dbbf72bfb0a30bdb601c671eedeb44d331e6485eeae99460988513d657f3f1b"
+      "sha256": "b03eef383b7195299c12d3bca31064d4c2d853a39a5e70b68eee9132b1730757"
     },
     {
       "path": "src/cli/gateway-cli/run-loop-startup.ts",
-      "sha256": "1c24aaed3c6a1d224d80fad21b24cfe24a1ee820937a2ca25e0d8979291b86d1"
+      "sha256": "010d392c31d8ac69caa6065f160fab3f068675497979c56d37d0f41cb48069d0"
     },
     {
       "path": "src/cli/gateway-cli/run-loop.test.ts",
@@ -100,7 +100,7 @@
     },
     {
       "path": "src/infra/tailscale-backend-ready.ts",
-      "sha256": "9cfd3ccad2f163d4ad8004384889af67dbebabfc29ab79768893ede53a89aa97"
+      "sha256": "d4c1e31257f71e8f2195fd0a25398b630d42fbc41f97564b8155063ba9ec53ee"
     },
     {
       "path": "src/infra/tailscale.test.ts",
@@ -151,9 +151,14 @@
     "pnpm-workspace.yaml",
     ".npmrc",
     "scripts/run-vitest.mjs",
-    "test/vitest/vitest.unit.config.ts",
+    "scripts/run-vitest.mts",
+    "test/vitest/vitest.cli.config.ts",
+    "test/vitest/vitest.cli-paths.mjs",
+    "test/vitest/vitest.infra.config.ts",
+    "test/vitest/vitest.scoped-config.ts",
     "scripts/check-changed.mjs",
-    "scripts/check-changed.mts"
+    "scripts/check-changed.mts",
+    ".github/actions/setup-ripgrep/action.yml"
   ],
   "toolchain": {
     "runner": "ubuntu-24.04",
@@ -174,7 +179,7 @@
       "entrypoints": [
         "src/cli/gateway-cli/run-loop.test.ts"
       ],
-      "config": "test/vitest/vitest.unit.config.ts",
+      "config": "test/vitest/vitest.cli.config.ts",
       "pattern": "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery",
       "fullNames": [
         "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery"
@@ -189,7 +194,6 @@
         "src/infra/tailscale.test.ts",
         "src/infra/gateway-boot-lifecycle.test.ts"
       ],
-      "config": "test/vitest/vitest.unit.config.ts",
       "pattern": "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery|runGatewayLoop parks supervised Serve startup after clean close and retries once after Running|runGatewayLoop does not park a foreground Gateway for Tailscale authentication requirements|tailscale helpers preserves the sudo status command while parking managed Serve recovery|gateway crash-loop breaker keeps a completed Tailscale authentication prerequisite visible without counting it as a crash",
       "fullNames": [
         "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery",
@@ -198,7 +202,35 @@
         "tailscale helpers preserves the sudo status command while parking managed Serve recovery",
         "gateway crash-loop breaker keeps a completed Tailscale authentication prerequisite visible without counting it as a crash"
       ],
-      "expectedSelectedCount": 5
+      "expectedSelectedCount": 5,
+      "wrappers": [
+        {
+          "id": "candidate-selected-cli",
+          "config": "test/vitest/vitest.cli.config.ts",
+          "entrypoints": [
+            "src/cli/gateway-cli/run-loop.test.ts"
+          ],
+          "pattern": "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery|runGatewayLoop parks supervised Serve startup after clean close and retries once after Running|runGatewayLoop does not park a foreground Gateway for Tailscale authentication requirements",
+          "fullNames": [
+            "runGatewayLoop joins the real Tailscale prerequisite waiter when shutdown cancels recovery",
+            "runGatewayLoop parks supervised Serve startup after clean close and retries once after Running",
+            "runGatewayLoop does not park a foreground Gateway for Tailscale authentication requirements"
+          ]
+        },
+        {
+          "id": "candidate-selected-infra",
+          "config": "test/vitest/vitest.infra.config.ts",
+          "entrypoints": [
+            "src/infra/tailscale.test.ts",
+            "src/infra/gateway-boot-lifecycle.test.ts"
+          ],
+          "pattern": "tailscale helpers preserves the sudo status command while parking managed Serve recovery|gateway crash-loop breaker keeps a completed Tailscale authentication prerequisite visible without counting it as a crash",
+          "fullNames": [
+            "tailscale helpers preserves the sudo status command while parking managed Serve recovery",
+            "gateway crash-loop breaker keeps a completed Tailscale authentication prerequisite visible without counting it as a crash"
+          ]
+        }
+      ]
     },
     "candidateAffectedSuites": {
       "id": "candidate-affected-suites",
@@ -207,7 +239,6 @@
         "src/infra/tailscale.test.ts",
         "src/infra/gateway-boot-lifecycle.test.ts"
       ],
-      "config": "test/vitest/vitest.unit.config.ts",
       "expectedSuites": [
         "src/cli/gateway-cli/run-loop.test.ts",
         "src/infra/tailscale.test.ts",
@@ -215,7 +246,24 @@
       ],
       "minimumTests": 1,
       "requireAllDiscoveredTestsPass": true,
-      "requireZeroActualSkips": true
+      "requireZeroActualSkips": true,
+      "wrappers": [
+        {
+          "id": "candidate-affected-cli",
+          "config": "test/vitest/vitest.cli.config.ts",
+          "entrypoints": [
+            "src/cli/gateway-cli/run-loop.test.ts"
+          ]
+        },
+        {
+          "id": "candidate-affected-infra",
+          "config": "test/vitest/vitest.infra.config.ts",
+          "entrypoints": [
+            "src/infra/tailscale.test.ts",
+            "src/infra/gateway-boot-lifecycle.test.ts"
+          ]
+        }
+      ]
     }
   },
   "changedChecks": {

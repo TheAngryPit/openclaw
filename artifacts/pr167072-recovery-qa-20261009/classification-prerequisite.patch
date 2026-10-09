@@ -1,13 +1,13 @@
 diff --git a/src/infra/tailscale-backend-ready.ts b/src/infra/tailscale-backend-ready.ts
-index 22d27f7c3da..61d078fd8fd 100644
+index 22d27f7c3da..4bcfbebae2f 100644
 --- a/src/infra/tailscale-backend-ready.ts
 +++ b/src/infra/tailscale-backend-ready.ts
 @@ -1,11 +1,57 @@
  import { setTimeout as sleep } from "node:timers/promises";
  import { asNullableObjectRecord as readRecord } from "@openclaw/normalization-core/record-coerce";
+ import { runExec } from "../process/exec.js";
 +import { isAbortError } from "./abort-signal.js";
 +import { TAILSCALE_BACKEND_AUTH_REQUIRED_REASON } from "./tailscale-backend-auth-required-error.js";
- import { runExec } from "../process/exec.js";
  
  const TAILSCALE_BACKEND_READY_WAIT_MS = 90_000;
  const TAILSCALE_BACKEND_READY_POLL_MS = 2_000;
@@ -60,7 +60,7 @@ index 22d27f7c3da..61d078fd8fd 100644
  
  export function parsePossiblyNoisyJsonObject(stdout: string): Record<string, unknown> {
    const trimmed = stdout.trim();
-@@ -16,6 +62,58 @@ export function parsePossiblyNoisyJsonObject(stdout: string): Record<string, unk
+@@ -16,6 +62,60 @@ export function parsePossiblyNoisyJsonObject(stdout: string): Record<string, unk
    return JSON.parse(json) as Record<string, unknown>;
  }
  
@@ -89,7 +89,9 @@ index 22d27f7c3da..61d078fd8fd 100644
 +  }
 +}
 +
-+function parseRejectedAuthenticationState(error: unknown): TailscaleOperatorActionBackendState | undefined {
++function parseRejectedAuthenticationState(
++  error: unknown,
++): TailscaleOperatorActionBackendState | undefined {
 +  const record = readRecord(error);
 +  if (
 +    isAbortError(error) ||
@@ -119,7 +121,7 @@ index 22d27f7c3da..61d078fd8fd 100644
  export function isTransientTailscaleStatusError(error: unknown): boolean {
    const record = readRecord(error);
    const detail = [
-@@ -46,6 +144,7 @@ export function isTransientTailscaleStatusError(error: unknown): boolean {
+@@ -46,6 +146,7 @@ export function isTransientTailscaleStatusError(error: unknown): boolean {
  export async function waitForTailscaleBackendReady(params: {
    bin: string;
    prefix?: string[];
@@ -127,7 +129,7 @@ index 22d27f7c3da..61d078fd8fd 100644
    info: (message: string) => void;
    exec?: typeof runExec;
    deadlineMs?: number;
-@@ -60,20 +159,23 @@ export async function waitForTailscaleBackendReady(params: {
+@@ -60,20 +161,22 @@ export async function waitForTailscaleBackendReady(params: {
      params.signal?.throwIfAborted();
      let pending: string;
      try {
@@ -141,11 +143,10 @@ index 22d27f7c3da..61d078fd8fd 100644
 -      const state = typeof parsed.BackendState === "string" ? parsed.BackendState : undefined;
 +      const state = await readTailscaleBackendState(exec, params.bin, params.prefix, params.signal);
 +      if (isTailscaleOperatorActionBackendState(state)) {
-+        throw new TailscaleBackendAuthenticationRequiredError(
-+          state,
-+          params.managedMode,
-+          { bin: params.bin, prefix: [...(params.prefix ?? [])] },
-+        );
++        throw new TailscaleBackendAuthenticationRequiredError(state, params.managedMode, {
++          bin: params.bin,
++          prefix: [...(params.prefix ?? [])],
++        });
 +      }
        if (state === undefined || !TAILSCALE_BOOTING_BACKEND_STATES.has(state)) {
          return;
@@ -159,7 +160,7 @@ index 22d27f7c3da..61d078fd8fd 100644
        if (!isTransientTailscaleStatusError(error)) {
          return;
        }
-@@ -91,3 +193,54 @@ export async function waitForTailscaleBackendReady(params: {
+@@ -91,3 +194,58 @@ export async function waitForTailscaleBackendReady(params: {
      );
    }
  }
@@ -194,7 +195,9 @@ index 22d27f7c3da..61d078fd8fd 100644
 +      return true;
 +    }
 +    if (state === "Stopped") {
-+      params.info("Tailscale is stopped; automatic Gateway startup recovery is not enabled for this state");
++      params.info(
++        "Tailscale is stopped; automatic Gateway startup recovery is not enabled for this state",
++      );
 +      return false;
 +    }
 +    if (
@@ -203,7 +206,9 @@ index 22d27f7c3da..61d078fd8fd 100644
 +      !TAILSCALE_BOOTING_BACKEND_STATES.has(state) &&
 +      !isTailscaleOperatorActionBackendState(state)
 +    ) {
-+      throw new Error(`Tailscale backend is not eligible for automatic startup recovery (${state})`);
++      throw new Error(
++        `Tailscale backend is not eligible for automatic startup recovery (${state})`,
++      );
 +    }
 +    const observed = state ?? "status unavailable";
 +    if (announced !== observed) {

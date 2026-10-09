@@ -1,15 +1,15 @@
 diff --git a/src/cli/gateway-cli/run-loop-startup.ts b/src/cli/gateway-cli/run-loop-startup.ts
-index 7a4e6853fa9..f3c39593270 100644
+index 7a4e6853fa9..b2bf6dfdc49 100644
 --- a/src/cli/gateway-cli/run-loop-startup.ts
 +++ b/src/cli/gateway-cli/run-loop-startup.ts
-@@ -2,6 +2,7 @@ import { clearRuntimeConfigSnapshot } from "../../config/runtime-snapshot.js";
+@@ -1,6 +1,7 @@
+ import { clearRuntimeConfigSnapshot } from "../../config/runtime-snapshot.js";
  import { markGatewayRestartTrace } from "../../gateway/restart-trace.js";
  import type { GatewayServerOptions, GatewayStartupOperation } from "../../gateway/server-public.js";
- import { formatErrorMessage } from "../../infra/errors.js";
 +import { isAbortError } from "../../infra/abort-signal.js";
+ import { formatErrorMessage } from "../../infra/errors.js";
  import { acquireGatewayLock } from "../../infra/gateway-lock.js";
  import type { GatewayOwnerSupervisor } from "../../infra/gateway-owner-lease.types.js";
- import type { GatewayRestartEmitter } from "../../infra/restart.js";
 @@ -76,7 +77,7 @@ export function createGatewayRestartRecovery(
        const stack = error instanceof Error && error.stack ? `\n${error.stack}` : "";
        logger.error(

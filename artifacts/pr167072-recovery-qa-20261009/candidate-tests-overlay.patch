@@ -1,8 +1,8 @@
 diff --git a/src/cli/gateway-cli/run-loop-startup.test-support.ts b/src/cli/gateway-cli/run-loop-startup.test-support.ts
-index 323dadf5d80..d2556f2d637 100644
+index 323dadf5d80..f89dd33a0f3 100644
 --- a/src/cli/gateway-cli/run-loop-startup.test-support.ts
 +++ b/src/cli/gateway-cli/run-loop-startup.test-support.ts
-@@ -1,19 +1,452 @@
+@@ -1,19 +1,472 @@
 -import { expect, it, vi } from "vitest";
 +import { expect, it, vi, type Mock } from "vitest";
  import { withTestTimeout } from "../../../test/helpers/promise.js";
@@ -69,16 +69,20 @@ index 323dadf5d80..d2556f2d637 100644
 +    try {
 +      await withIsolatedSignals(async ({ captureSignal }) => {
 +        const { runGatewayLoop } = await import("./run-loop.js");
-+        const startupError = new TailscaleBackendAuthenticationRequiredError("NeedsLogin", "serve", {
-+          bin: "sudo",
-+          prefix: ["-n", "tailscale"],
-+        });
++        const startupError = new TailscaleBackendAuthenticationRequiredError(
++          "NeedsLogin",
++          "serve",
++          {
++            bin: "sudo",
++            prefix: ["-n", "tailscale"],
++          },
++        );
 +        const close = createCloseMock();
 +        const releaseLock = vi.fn(async () => {});
 +        acquireGatewayLock.mockResolvedValueOnce({ release: releaseLock });
-+        const start = vi.fn<Parameters<typeof runGatewayLoop>[0]["start"]>().mockResolvedValueOnce(
-+          createGatewayServer(close, Promise.reject(startupError)),
-+        );
++        const start = vi
++          .fn<Parameters<typeof runGatewayLoop>[0]["start"]>()
++          .mockResolvedValueOnce(createGatewayServer(close, Promise.reject(startupError)));
 +        const { runtime, exited } = createRuntimeWithExitSignal();
 +        const recoveryStarted = createDeferredCore();
 +        const statusExec = vi.spyOn(processExec, "runExec").mockImplementation(async () => {
@@ -154,10 +158,14 @@ index 323dadf5d80..d2556f2d637 100644
 +    try {
 +      await withIsolatedSignals(async ({ captureSignal }) => {
 +        const { runGatewayLoop } = await import("./run-loop.js");
-+        const startupError = new TailscaleBackendAuthenticationRequiredError("NeedsLogin", "serve", {
-+          bin: "tailscale",
-+          prefix: [],
-+        });
++        const startupError = new TailscaleBackendAuthenticationRequiredError(
++          "NeedsLogin",
++          "serve",
++          {
++            bin: "tailscale",
++            prefix: [],
++          },
++        );
 +        const firstClose = createCloseMock();
 +        const secondClose = createCloseMock();
 +        const recoveryStarted = createDeferredCore();
@@ -264,19 +272,23 @@ index 323dadf5d80..d2556f2d637 100644
 +      await withIsolatedSignals(async () => {
 +        const { GatewayStartupCleanupError } = await import("../../gateway/server-shutdown.js");
 +        const { runGatewayLoop } = await import("./run-loop.js");
-+        const startupError = new TailscaleBackendAuthenticationRequiredError("NeedsLogin", "serve", {
-+          bin: "tailscale",
-+          prefix: [],
-+        });
++        const startupError = new TailscaleBackendAuthenticationRequiredError(
++          "NeedsLogin",
++          "serve",
++          {
++            bin: "tailscale",
++            prefix: [],
++          },
++        );
 +        const close = vi.fn(async () => {
 +          throw new Error("Tailscale route cleanup failed");
 +        });
 +        const { runtime } = createRuntimeWithExitSignal();
 +        const completeBoot = vi.fn();
 +        const onRestartStartupFailure = vi.fn();
-+        const start = vi.fn<Parameters<typeof runGatewayLoop>[0]["start"]>().mockResolvedValueOnce(
-+          createGatewayServer(close, Promise.reject(startupError)),
-+        );
++        const start = vi
++          .fn<Parameters<typeof runGatewayLoop>[0]["start"]>()
++          .mockResolvedValueOnce(createGatewayServer(close, Promise.reject(startupError)));
 +
 +        await expect(
 +          runGatewayLoop({ start, runtime, completeBoot, onRestartStartupFailure }),
@@ -308,10 +320,14 @@ index 323dadf5d80..d2556f2d637 100644
 +    try {
 +      await withIsolatedSignals(async () => {
 +        const { runGatewayLoop } = await import("./run-loop.js");
-+        const startupError = new TailscaleBackendAuthenticationRequiredError("NeedsLogin", "serve", {
-+          bin: "tailscale",
-+          prefix: [],
-+        });
++        const startupError = new TailscaleBackendAuthenticationRequiredError(
++          "NeedsLogin",
++          "serve",
++          {
++            bin: "tailscale",
++            prefix: [],
++          },
++        );
 +        const firstClose = createCloseMock();
 +        const releaseLock = vi.fn(async () => {});
 +        acquireGatewayLock
@@ -429,19 +445,23 @@ index 323dadf5d80..d2556f2d637 100644
 +    try {
 +      await withIsolatedSignals(async () => {
 +        const { runGatewayLoop } = await import("./run-loop.js");
-+        const startupError = new TailscaleBackendAuthenticationRequiredError("NeedsLogin", "serve", {
-+          bin: "tailscale",
-+          prefix: [],
-+        });
++        const startupError = new TailscaleBackendAuthenticationRequiredError(
++          "NeedsLogin",
++          "serve",
++          {
++            bin: "tailscale",
++            prefix: [],
++          },
++        );
 +        const close = createCloseMock();
 +        const { runtime } = createRuntimeWithExitSignal();
 +        const onRestartStartupFailure = vi.fn();
-+        const start = vi.fn<Parameters<typeof runGatewayLoop>[0]["start"]>().mockResolvedValueOnce(
-+          createGatewayServer(close, Promise.reject(startupError)),
++        const start = vi
++          .fn<Parameters<typeof runGatewayLoop>[0]["start"]>()
++          .mockResolvedValueOnce(createGatewayServer(close, Promise.reject(startupError)));
++        await expect(runGatewayLoop({ start, runtime, onRestartStartupFailure })).rejects.toBe(
++          startupError,
 +        );
-+        await expect(
-+          runGatewayLoop({ start, runtime, onRestartStartupFailure }),
-+        ).rejects.toBe(startupError);
 +        expect(close).toHaveBeenCalledExactlyOnceWith({ reason: "gateway startup failed" });
 +        expect(onRestartStartupFailure).not.toHaveBeenCalled();
 +        expect(runtime.exit).not.toHaveBeenCalled();

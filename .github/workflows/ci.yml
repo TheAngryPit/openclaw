@@ -90,6 +90,8 @@ jobs:
           git -C "$QA_PRODUCT_DIR" fetch --no-tags --depth=1 "https://github.com/$QA_BASELINE_REPOSITORY.git" "$QA_BASELINE_SHA"
           git -C "$QA_PRODUCT_DIR" checkout --detach FETCH_HEAD
           test "$(git -C "$QA_PRODUCT_DIR" rev-parse HEAD)" = "$QA_BASELINE_SHA"
+      - name: Ensure canonical changed-check ripgrep dependency
+        uses: ./qa-product/.github/actions/setup-ripgrep
       - name: Install one common frozen dependency lock
         working-directory: qa-product
         shell: bash
