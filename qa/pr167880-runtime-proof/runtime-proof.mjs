@@ -107,7 +107,7 @@ function run(command, args, options = {}) {
         return;
       }
       if (!acceptedExitCodes.includes(code)) {
-        reject(new ProofFailure("command-failed"));
+        reject(new ProofFailure(options.failureCategory ?? "command-failed"));
         return;
       }
       resolve({ code, signal, stdout, stderr });
@@ -578,6 +578,7 @@ async function serveConfig(name) {
       timeoutMs: 10_000,
       acceptedExitCodes: [0],
       maxOutputBytes: 1_000_000,
+      failureCategory: "serve-status-command-failed",
     },
   );
   const parsed = parseJson(result.stdout, "serve-status-invalid");
@@ -859,6 +860,8 @@ async function candidateConfigCheck(context, role, names) {
     {
       timeoutMs: 15_000,
       maxOutputBytes: 64 * 1024,
+      acceptedExitCodes: [0, 3],
+      failureCategory: "config-check-command-failed",
     },
   );
   const parsed = parseJson(result.stdout, "config-check-invalid");
@@ -882,6 +885,8 @@ async function candidateProcessCheck(names) {
   const result = await docker(["exec", names.gateway, "node", "-e", script], {
     timeoutMs: 10_000,
     maxOutputBytes: 64 * 1024,
+    acceptedExitCodes: [0, 4],
+    failureCategory: "process-check-command-failed",
   });
   return result.stdout.trim() === "true";
 }
