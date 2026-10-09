@@ -435,7 +435,11 @@ async function imageAndHostPreflight(context) {
     /^ID=ubuntu$/m.test(osRelease) && /^VERSION_ID="24\.04"$/m.test(osRelease),
     "runner-not-ubuntu-24-04",
   );
-  assert(realpathSync("/proc/1/exe").endsWith("/systemd"), "systemd-not-pid1");
+  const init = await run("ps", ["-p", "1", "-o", "comm="], {
+    timeoutMs: 10_000,
+    maxOutputBytes: 64 * 1024,
+  });
+  assert(init.stdout.trim() === "systemd", "systemd-not-pid1");
   await run("docker", ["info", "--format={{.ServerVersion}}"], {
     timeoutMs: 20_000,
     maxOutputBytes: 64 * 1024,
@@ -1962,7 +1966,11 @@ function phaseFailure(phase, error) {
   const allowedPhase = ["parking", "recovery", "cancel", "cleanup", "summarize"].includes(phase)
     ? phase
     : "startup";
-  const candidate = error instanceof ProofFailure ? error.category : `${allowedPhase}-failed`;
+  const systemCode = ["EACCES", "EPERM", "ENOENT", "EEXIST", "ENOTDIR"].includes(error?.code)
+    ? `-${error.code.toLowerCase()}`
+    : "";
+  const candidate =
+    error instanceof ProofFailure ? error.category : `${allowedPhase}-failed${systemCode}`;
   const category = /^[a-z0-9-]{1,64}$/.test(candidate) ? candidate : `${allowedPhase}-failed`;
   process.stdout.write(
     `${JSON.stringify({ schemaVersion: 1, phase: allowedPhase, status: "failed", category })}\n`,
