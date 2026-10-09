@@ -1,6 +1,7 @@
 import { clearRuntimeConfigSnapshot } from "../../config/runtime-snapshot.js";
 import { markGatewayRestartTrace } from "../../gateway/restart-trace.js";
 import type { GatewayServerOptions, GatewayStartupOperation } from "../../gateway/server-public.js";
+import { isAbortError } from "../../infra/abort-signal.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { acquireGatewayLock } from "../../infra/gateway-lock.js";
 import type { GatewayOwnerSupervisor } from "../../infra/gateway-owner-lease.types.js";
@@ -76,7 +77,7 @@ export function createGatewayRestartRecovery(
       const stack = error instanceof Error && error.stack ? `\n${error.stack}` : "";
       logger.error(
         `gateway startup failed: ${formatErrorMessage(error)}. ` +
-          `${onFailure && !retryFailed ? "Attempting automatic triage before recovery." : "Automatic recovery is unavailable."}${stack}`,
+          `${onFailure && !retryFailed ? "Attempting automatic startup recovery." : "Automatic recovery is unavailable."}${stack}`,
       );
     },
     reportManualRecovery() {
@@ -103,9 +104,17 @@ export function createGatewayRestartRecovery(
         return false;
       }
       const controller = new AbortController();
+      const settled = Promise.resolve()
+        .then(() => onFailure(error, controller.signal))
+        .catch((recoveryError: unknown) => {
+          if (controller.signal.aborted && isAbortError(recoveryError)) {
+            return undefined;
+          }
+          throw recoveryError;
+        });
       work = {
         controller,
-        settled: Promise.resolve().then(() => onFailure(error, controller.signal)),
+        settled,
       };
       try {
         const completion = await work.settled;
@@ -116,19 +125,16 @@ export function createGatewayRestartRecovery(
           throw error;
         }
         if (completion !== "completed") {
-          logger.info("Automatic triage did not complete a repair; awaiting manual recovery.");
+          logger.info("Automatic startup recovery did not complete; awaiting manual recovery.");
           return false;
         }
-        // Completion proves triage cleanup, not Gateway health. Startup owns that proof.
-        logger.info("Automatic triage completed; retrying Gateway startup once.");
+        // Recovery completion only admits one retry; startup owns the health proof.
+        logger.info("Automatic startup recovery completed; retrying Gateway startup once.");
         return true;
-      } catch (triageError) {
-        if (controller.signal.aborted) {
-          return false;
-        }
-        logger.error(`Automatic triage failed: ${formatErrorMessage(triageError)}`);
+      } catch (recoveryError) {
+        logger.error(`Automatic startup recovery failed: ${formatErrorMessage(recoveryError)}`);
         if (supervisor) {
-          throw triageError;
+          throw recoveryError;
         }
         return false;
       } finally {

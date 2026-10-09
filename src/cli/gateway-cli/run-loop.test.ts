@@ -327,7 +327,7 @@ describe("runGatewayLoop", () => {
     });
   });
 
-  registerGatewayStartupFailureTests(gatewayLog);
+  registerGatewayStartupFailureTests(gatewayLog, acquireGatewayLock);
 
   registerGracefulGatewayShutdownTests(fixtures);
 

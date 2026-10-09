@@ -1,19 +1,504 @@
-import { expect, it, vi } from "vitest";
-import { withTestTimeout } from "../../../test/helpers/promise.js";
+import { expect, it, vi, type Mock } from "vitest";
+import { awaitGateBeforeSettlement, withTestTimeout } from "../../../test/helpers/promise.js";
 import { GATEWAY_STARTUP_MAINTENANCE_REQUIRED_REASON } from "../../infra/startup-maintenance-required.js";
+import { SUPERVISOR_HINT_ENV_VARS } from "../../infra/supervisor-markers.js";
 import { createDeferredCore } from "../../shared/deferred.js";
-import { setTestEnvValue } from "../../test-utils/env.js";
+import { captureEnv, deleteTestEnvValue, setTestEnvValue } from "../../test-utils/env.js";
 import {
   createCloseMock,
   createGatewayServer,
   createRuntimeWithExitSignal,
+  originalPlatformDescriptor,
   setPlatform,
+  waitForLoopCondition,
   withIsolatedSignals,
 } from "./run-loop.test-support.js";
 
+function isolateSupervisorEnv() {
+  const env = captureEnv([...SUPERVISOR_HINT_ENV_VARS]);
+  for (const key of SUPERVISOR_HINT_ENV_VARS) {
+    deleteTestEnvValue(key);
+  }
+  return env;
+}
+
 export function registerGatewayStartupFailureTests(
   gatewayLog: ReturnType<typeof import("./run-loop.test-support.js").createGatewayLogger>,
+  acquireGatewayLock: Mock,
 ): void {
+  it("joins recovery cleanup failure after shutdown without masking the failure", async () => {
+    const { createGatewayRestartRecovery } = await import("./run-loop-startup.js");
+    const failureStarted = createDeferredCore();
+    const finishFailedRecovery = createDeferredCore();
+    const failedRecovery = createGatewayRestartRecovery(
+      {
+        onRestartStartupFailure: async () => {
+          failureStarted.resolve();
+          await finishFailedRecovery.promise;
+          throw new Error("recovery cleanup failed");
+        },
+      },
+      gatewayLog,
+      null,
+    );
+    const failedAttempt = failedRecovery.attempt(new Error("startup failed"));
+    await awaitGateBeforeSettlement(
+      failureStarted.promise,
+      failedAttempt,
+      "recovery attempt settled before its handler started",
+    );
+    failedRecovery.abort();
+    const failedCleanup = failedRecovery.waitForCleanup();
+    finishFailedRecovery.resolve();
+    await expect(failedAttempt).resolves.toBe(false);
+    await expect(failedCleanup).rejects.toThrow("recovery cleanup failed");
+  });
+
+  it("joins the real Tailscale prerequisite waiter when shutdown cancels recovery", async () => {
+    const env = isolateSupervisorEnv();
+    setPlatform("linux");
+    setTestEnvValue("OPENCLAW_SYSTEMD_UNIT", "openclaw-gateway.service");
+    try {
+      await withIsolatedSignals(async ({ captureSignal }) => {
+        const { TailscaleBackendAuthenticationRequiredError, waitForTailscaleBackendRunning } =
+          await import("../../infra/tailscale-backend-ready.js");
+        const processExec = await import("../../process/exec.js");
+        const { runGatewayLoop } = await import("./run-loop.js");
+        const startupError = new TailscaleBackendAuthenticationRequiredError(
+          "NeedsLogin",
+          "serve",
+          {
+            bin: "sudo",
+            prefix: ["-n", "tailscale"],
+          },
+        );
+        const close = createCloseMock();
+        const releaseLock = vi.fn(async () => {});
+        acquireGatewayLock.mockResolvedValueOnce({ release: releaseLock });
+        const start = vi
+          .fn<Parameters<typeof runGatewayLoop>[0]["start"]>()
+          .mockImplementationOnce(async () =>
+            createGatewayServer(close, Promise.reject(startupError)),
+          );
+        const { runtime, exited } = createRuntimeWithExitSignal();
+        const recoveryStarted = createDeferredCore();
+        const statusExec = vi.spyOn(processExec, "runExec").mockImplementation(async () => {
+          recoveryStarted.resolve();
+          return { stdout: JSON.stringify({ BackendState: "NeedsLogin" }), stderr: "" };
+        });
+        const recoverySettled = createDeferredCore();
+        const onRestartStartupFailure = vi.fn(async (error: unknown, signal: AbortSignal) => {
+          expect(error).toBe(startupError);
+          try {
+            await waitForTailscaleBackendRunning({
+              bin: startupError.statusCommand.bin,
+              prefix: [...startupError.statusCommand.prefix],
+              info: vi.fn(),
+              signal,
+            });
+            return "completed" as const;
+          } finally {
+            recoverySettled.resolve();
+          }
+        });
+        const loop = runGatewayLoop({ start, runtime, onRestartStartupFailure });
+        let shutdownRequested = false;
+        let recoveryEntered = false;
+        try {
+          await awaitGateBeforeSettlement(
+            recoveryStarted.promise,
+            loop,
+            "Gateway loop settled before supervised startup recovery reached the Tailscale waiter",
+          );
+          recoveryEntered = true;
+          expect(statusExec).toHaveBeenCalledOnce();
+          captureSignal("SIGTERM")();
+          shutdownRequested = true;
+          await awaitGateBeforeSettlement(
+            recoverySettled.promise,
+            exited,
+            "Gateway exited before joining the cancelled Tailscale prerequisite waiter",
+          );
+          await expect(exited).resolves.toBe(0);
+          expect(statusExec).toHaveBeenCalledOnce();
+          expect(onRestartStartupFailure).toHaveBeenCalledOnce();
+          expect(start).toHaveBeenCalledOnce();
+          expect(close).toHaveBeenCalledOnce();
+          expect(releaseLock).toHaveBeenCalledOnce();
+        } finally {
+          try {
+            if (recoveryEntered && !shutdownRequested) {
+              captureSignal("SIGTERM")();
+              await exited;
+            }
+          } finally {
+            statusExec.mockRestore();
+          }
+        }
+      });
+    } finally {
+      env.restore();
+      if (originalPlatformDescriptor) {
+        Object.defineProperty(process, "platform", originalPlatformDescriptor);
+      }
+    }
+  });
+
+  it("parks supervised Serve startup after clean close and retries once after Running", async () => {
+    const env = isolateSupervisorEnv();
+    setPlatform("linux");
+    setTestEnvValue("OPENCLAW_SYSTEMD_UNIT", "openclaw-gateway.service");
+    try {
+      await withIsolatedSignals(async ({ captureSignal }) => {
+        const { TailscaleBackendAuthenticationRequiredError } =
+          await import("../../infra/tailscale-backend-ready.js");
+        const { runGatewayLoop } = await import("./run-loop.js");
+        const startupError = new TailscaleBackendAuthenticationRequiredError(
+          "NeedsLogin",
+          "serve",
+          {
+            bin: "tailscale",
+            prefix: [],
+          },
+        );
+        const firstClose = createCloseMock();
+        const secondClose = createCloseMock();
+        const recoveryStarted = createDeferredCore();
+        const allowRecovery = createDeferredCore();
+        const secondStartup = createDeferredCore();
+        const releaseLock = vi.fn(async () => {});
+        const releaseRestartLock = vi.fn(async () => {});
+        acquireGatewayLock
+          .mockResolvedValueOnce({ release: releaseLock })
+          .mockResolvedValueOnce({ release: releaseRestartLock });
+        const start = vi
+          .fn<Parameters<typeof runGatewayLoop>[0]["start"]>()
+          .mockImplementationOnce(async () =>
+            createGatewayServer(firstClose, Promise.reject(startupError)),
+          )
+          .mockImplementationOnce(async () =>
+            createGatewayServer(secondClose, secondStartup.promise),
+          );
+        const { runtime, exited } = createRuntimeWithExitSignal();
+        const completeBoot = vi.fn();
+        const onRestartStartupFailure = vi.fn(async (error: unknown, signal: AbortSignal) => {
+          expect(error).toBe(startupError);
+          expect(signal.aborted).toBe(false);
+          expect(firstClose).toHaveBeenCalledExactlyOnceWith({ reason: "gateway startup failed" });
+          recoveryStarted.resolve();
+          await allowRecovery.promise;
+          return "completed" as const;
+        });
+        const loop = runGatewayLoop({ start, runtime, completeBoot, onRestartStartupFailure });
+        let loopFinished = false;
+        void loop.then(
+          () => {
+            loopFinished = true;
+          },
+          () => {
+            loopFinished = true;
+          },
+        );
+        try {
+          await awaitGateBeforeSettlement(
+            recoveryStarted.promise,
+            loop,
+            "Gateway loop settled before supervised Serve recovery started",
+          );
+          expect(start).toHaveBeenCalledOnce();
+          expect(firstClose).toHaveBeenCalledOnce();
+          expect(acquireGatewayLock).toHaveBeenCalledOnce();
+          expect(releaseLock).not.toHaveBeenCalled();
+          expect(completeBoot).toHaveBeenCalledOnce();
+          expect(completeBoot).toHaveBeenCalledWith(
+            expect.objectContaining({
+              outcome: "startup_failed",
+              startupReason: "gateway.tailscale_authentication_required",
+              reason: expect.stringContaining("NeedsLogin"),
+            }),
+          );
+          expect(runtime.exit).not.toHaveBeenCalled();
+
+          allowRecovery.resolve();
+          await waitForLoopCondition(
+            () => start.mock.calls.length === 2,
+            "expected exactly one retry after the backend recovery handler completed",
+          );
+          expect(start).toHaveBeenCalledTimes(2);
+          expect(firstClose).toHaveBeenCalledOnce();
+          expect(releaseLock).toHaveBeenCalledOnce();
+          expect(acquireGatewayLock).toHaveBeenCalledTimes(2);
+          expect(releaseRestartLock).not.toHaveBeenCalled();
+          expect(secondClose).not.toHaveBeenCalled();
+          expect(gatewayLog.error).not.toHaveBeenCalledWith(
+            expect.stringContaining("openclaw doctor --fix"),
+          );
+
+          secondStartup.resolve();
+          await awaitGateBeforeSettlement(
+            new Promise<void>((resolve) => setImmediate(resolve)),
+            loop,
+            "Gateway loop settled before the successful retry entered its running loop",
+          );
+          const stop = captureSignal("SIGTERM");
+          stop();
+          await expect(exited).resolves.toBe(0);
+          expect(releaseLock).toHaveBeenCalledOnce();
+          expect(releaseRestartLock).toHaveBeenCalledOnce();
+          expect(start).toHaveBeenCalledTimes(2);
+          expect(onRestartStartupFailure).toHaveBeenCalledOnce();
+        } finally {
+          allowRecovery.resolve();
+          secondStartup.resolve();
+          if (runtime.exit.mock.calls.length === 0 && !loopFinished) {
+            captureSignal("SIGTERM")();
+            await exited;
+          }
+        }
+      });
+    } finally {
+      env.restore();
+      if (originalPlatformDescriptor) {
+        Object.defineProperty(process, "platform", originalPlatformDescriptor);
+      }
+    }
+  });
+
+  it("keeps cleanup failures as startup failures instead of parking them", async () => {
+    const env = isolateSupervisorEnv();
+    setPlatform("linux");
+    setTestEnvValue("OPENCLAW_SYSTEMD_UNIT", "openclaw-gateway.service");
+    try {
+      await withIsolatedSignals(async () => {
+        const { TailscaleBackendAuthenticationRequiredError } =
+          await import("../../infra/tailscale-backend-ready.js");
+        const { GatewayStartupCleanupError } = await import("../../gateway/server-shutdown.js");
+        const { runGatewayLoop } = await import("./run-loop.js");
+        const startupError = new TailscaleBackendAuthenticationRequiredError(
+          "NeedsLogin",
+          "serve",
+          {
+            bin: "tailscale",
+            prefix: [],
+          },
+        );
+        const close = vi.fn(async () => {
+          throw new Error("Tailscale route cleanup failed");
+        });
+        const { runtime } = createRuntimeWithExitSignal();
+        const completeBoot = vi.fn();
+        const onRestartStartupFailure = vi.fn();
+        const start = vi
+          .fn<Parameters<typeof runGatewayLoop>[0]["start"]>()
+          .mockImplementationOnce(async () =>
+            createGatewayServer(close, Promise.reject(startupError)),
+          );
+
+        await expect(
+          runGatewayLoop({ start, runtime, completeBoot, onRestartStartupFailure }),
+        ).rejects.toBeInstanceOf(GatewayStartupCleanupError);
+        expect(close).toHaveBeenCalledOnce();
+        expect(onRestartStartupFailure).not.toHaveBeenCalled();
+        expect(completeBoot).toHaveBeenCalledWith(
+          expect.objectContaining({ outcome: "startup_failed" }),
+        );
+        expect(completeBoot).toHaveBeenCalledWith(
+          expect.objectContaining({ outcome: "startup_failed", reason: startupError.message }),
+        );
+        expect(completeBoot).not.toHaveBeenCalledWith(
+          expect.objectContaining({ startupReason: "gateway.tailscale_authentication_required" }),
+        );
+      });
+    } finally {
+      env.restore();
+      if (originalPlatformDescriptor) {
+        Object.defineProperty(process, "platform", originalPlatformDescriptor);
+      }
+    }
+  });
+
+  it("releases parked custody before a contended normal restart reacquire", async () => {
+    const env = isolateSupervisorEnv();
+    setPlatform("linux");
+    setTestEnvValue("OPENCLAW_SYSTEMD_UNIT", "openclaw-gateway.service");
+    try {
+      await withIsolatedSignals(async () => {
+        const { TailscaleBackendAuthenticationRequiredError } =
+          await import("../../infra/tailscale-backend-ready.js");
+        const { runGatewayLoop } = await import("./run-loop.js");
+        const startupError = new TailscaleBackendAuthenticationRequiredError(
+          "NeedsLogin",
+          "serve",
+          {
+            bin: "tailscale",
+            prefix: [],
+          },
+        );
+        const firstClose = createCloseMock();
+        const releaseLock = vi.fn(async () => {});
+        acquireGatewayLock
+          .mockResolvedValueOnce({ release: releaseLock })
+          .mockRejectedValueOnce(new Error("lock already owned"));
+        const start = vi
+          .fn<Parameters<typeof runGatewayLoop>[0]["start"]>()
+          .mockImplementationOnce(async () =>
+            createGatewayServer(firstClose, Promise.reject(startupError)),
+          );
+        const { runtime, exited } = createRuntimeWithExitSignal();
+        const recoveryStarted = createDeferredCore();
+        const onRestartStartupFailure = vi.fn(async () => {
+          recoveryStarted.resolve();
+          return "completed" as const;
+        });
+        const loop = runGatewayLoop({ start, runtime, onRestartStartupFailure });
+
+        await awaitGateBeforeSettlement(
+          recoveryStarted.promise,
+          loop,
+          "Gateway loop settled before parked startup recovery started",
+        );
+        expect(acquireGatewayLock).toHaveBeenCalledOnce();
+        expect(releaseLock).not.toHaveBeenCalled();
+        await expect(exited).resolves.toBe(1);
+        expect(start).toHaveBeenCalledOnce();
+        expect(acquireGatewayLock).toHaveBeenCalledTimes(2);
+        expect(releaseLock).toHaveBeenCalledOnce();
+      });
+    } finally {
+      env.restore();
+      if (originalPlatformDescriptor) {
+        Object.defineProperty(process, "platform", originalPlatformDescriptor);
+      }
+    }
+  });
+
+  it("cancels and joins a supervised first-start prerequisite wait before stopping", async () => {
+    const env = isolateSupervisorEnv();
+    setPlatform("linux");
+    setTestEnvValue("OPENCLAW_SYSTEMD_UNIT", "openclaw-gateway.service");
+    try {
+      await withIsolatedSignals(async ({ captureSignal }) => {
+        const { TailscaleBackendAuthenticationRequiredError } =
+          await import("../../infra/tailscale-backend-ready.js");
+        const { runGatewayLoop } = await import("./run-loop.js");
+        const startupError = new TailscaleBackendAuthenticationRequiredError(
+          "NeedsMachineAuth",
+          "serve",
+          { bin: "tailscale", prefix: [] },
+        );
+        const firstClose = createCloseMock();
+        const recoveryStarted = createDeferredCore();
+        const recoveryCleanup = createDeferredCore();
+        const releaseLock = vi.fn(async () => {});
+        acquireGatewayLock.mockResolvedValueOnce({ release: releaseLock });
+        const start = vi
+          .fn<Parameters<typeof runGatewayLoop>[0]["start"]>()
+          .mockImplementationOnce(async () =>
+            createGatewayServer(firstClose, Promise.reject(startupError)),
+          );
+        const { runtime, exited } = createRuntimeWithExitSignal();
+        let recoverySignal: AbortSignal | undefined;
+        const onRestartStartupFailure = vi.fn(async (_error: unknown, signal: AbortSignal) => {
+          recoverySignal = signal;
+          recoveryStarted.resolve();
+          await new Promise<void>((resolve) => {
+            if (signal.aborted) {
+              resolve();
+            } else {
+              signal.addEventListener("abort", () => resolve(), { once: true });
+            }
+          });
+          await recoveryCleanup.promise;
+          throw new DOMException("Tailscale wait cancelled", "AbortError");
+        });
+        const loop = runGatewayLoop({ start, runtime, onRestartStartupFailure });
+        let loopFinished = false;
+        void loop.then(
+          () => {
+            loopFinished = true;
+          },
+          () => {
+            loopFinished = true;
+          },
+        );
+        try {
+          await awaitGateBeforeSettlement(
+            recoveryStarted.promise,
+            loop,
+            "Gateway loop settled before the supervised prerequisite wait started",
+          );
+          expect(firstClose).toHaveBeenCalledExactlyOnceWith({ reason: "gateway startup failed" });
+          expect(start).toHaveBeenCalledOnce();
+          const stop = captureSignal("SIGTERM");
+          stop();
+          await waitForLoopCondition(
+            () => recoverySignal?.aborted === true,
+            "expected stop cancellation to be delivered",
+          );
+          expect(recoverySignal?.aborted).toBe(true);
+          expect(runtime.exit).not.toHaveBeenCalled();
+          expect(releaseLock).not.toHaveBeenCalled();
+
+          recoveryCleanup.resolve();
+          await expect(exited).resolves.toBe(0);
+          expect(releaseLock).toHaveBeenCalledOnce();
+          expect(start).toHaveBeenCalledOnce();
+          expect(onRestartStartupFailure).toHaveBeenCalledOnce();
+        } finally {
+          recoveryCleanup.resolve();
+          if (runtime.exit.mock.calls.length === 0 && !loopFinished) {
+            captureSignal("SIGTERM")();
+            await exited;
+          }
+        }
+      });
+    } finally {
+      env.restore();
+      if (originalPlatformDescriptor) {
+        Object.defineProperty(process, "platform", originalPlatformDescriptor);
+      }
+    }
+  });
+
+  it("does not park a foreground Gateway for Tailscale authentication requirements", async () => {
+    const env = isolateSupervisorEnv();
+    setPlatform("linux");
+    try {
+      await withIsolatedSignals(async () => {
+        const { TailscaleBackendAuthenticationRequiredError } =
+          await import("../../infra/tailscale-backend-ready.js");
+        const { runGatewayLoop } = await import("./run-loop.js");
+        const startupError = new TailscaleBackendAuthenticationRequiredError(
+          "NeedsLogin",
+          "serve",
+          {
+            bin: "tailscale",
+            prefix: [],
+          },
+        );
+        const close = createCloseMock();
+        const { runtime } = createRuntimeWithExitSignal();
+        const onRestartStartupFailure = vi.fn();
+        const start = vi
+          .fn<Parameters<typeof runGatewayLoop>[0]["start"]>()
+          .mockImplementationOnce(async () =>
+            createGatewayServer(close, Promise.reject(startupError)),
+          );
+        await expect(runGatewayLoop({ start, runtime, onRestartStartupFailure })).rejects.toBe(
+          startupError,
+        );
+        expect(close).toHaveBeenCalledExactlyOnceWith({ reason: "gateway startup failed" });
+        expect(onRestartStartupFailure).not.toHaveBeenCalled();
+        expect(runtime.exit).not.toHaveBeenCalled();
+      });
+    } finally {
+      env.restore();
+      if (originalPlatformDescriptor) {
+        Object.defineProperty(process, "platform", originalPlatformDescriptor);
+      }
+    }
+  });
+
   it.each([
     { cleanup: "clean", supervised: false, platform: "linux" },
     { cleanup: "failed", supervised: false, platform: "linux" },

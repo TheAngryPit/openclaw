@@ -60,6 +60,10 @@ import {
   formatGatewayPidList,
 } from "../../infra/gateway-processes.js";
 import type { RespawnSupervisor } from "../../infra/supervisor-markers.js";
+import {
+  isTailscaleBackendAuthenticationRequiredError,
+  isTailscaleServeAuthenticationRequiredError,
+} from "../../infra/tailscale-backend-ready.js";
 import { isTailscaleRouteOwnershipConflictError } from "../../infra/tailscale-route-ownership-error.js";
 import { parseTcpPort } from "../../infra/tcp-port.js";
 import { setConsoleSubsystemFilter, setConsoleTimestampPrefix } from "../../logging/console.js";
@@ -865,6 +869,7 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
   let triageAttempted = false;
   const triageStartupFailure = async (error: unknown, signal?: AbortSignal) => {
     if (
+      isTailscaleBackendAuthenticationRequiredError(error) ||
       triageAttempted ||
       !bootRecorded ||
       signal?.aborted ||
@@ -890,6 +895,27 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
     }
     triageAttempted = true;
     return await triageGatewayStartupFailure(defaultRuntime, error, signal);
+  };
+  const recoverStartupFailure = async (
+    error: unknown,
+    signal: AbortSignal,
+  ): Promise<"completed" | "failed" | void> => {
+    if (isTailscaleServeAuthenticationRequiredError(error)) {
+      if (effectiveTailscaleMode !== "serve" || !supervisor || signal.aborted) {
+        return;
+      }
+      gatewayLog.warn(
+        "Tailscale Serve needs operator sign-in or device approval; Gateway startup is parked until the local backend recovers",
+      );
+      const { waitForManagedTailscaleBackendRunning } = await import("../../infra/tailscale.js");
+      const running = await waitForManagedTailscaleBackendRunning({
+        statusCommand: error.statusCommand,
+        signal,
+        info: (message) => gatewayLog.info(message),
+      });
+      return running ? "completed" : undefined;
+    }
+    return await triageStartupFailure(error, signal);
   };
   const beginBoot = async (startedAtMs: number) => {
     // run-loop calls beginBoot before every startGatewayServer invocation, so
@@ -947,7 +973,7 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
       healthHost,
       beginBoot,
       completeBoot,
-      onRestartStartupFailure: triageStartupFailure,
+      onRestartStartupFailure: recoverStartupFailure,
       start: async ({ requestHotReloadRecovery, ...startupOptions } = {}) => {
         const snapshotPreparation = await import("../../config/io.snapshot-preparation.js");
         const startupConfigSnapshotReadForThisStart = startupConfigSnapshotReadForNextStart;
