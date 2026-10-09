@@ -393,7 +393,7 @@ async function inspectImage(image) {
 }
 
 async function inspectContainer(name, { optional = false } = {}) {
-  const result = await run("docker", ["inspect", name], {
+  const result = await run("docker", ["container", "inspect", name], {
     timeoutMs: 20_000,
     acceptedExitCodes: optional ? [0, 1] : [0],
     maxOutputBytes: 1_000_000,
