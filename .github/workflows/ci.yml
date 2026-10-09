@@ -28,6 +28,13 @@ on:
           - codex-catalog-conflict-candidate
           - codex-catalog-mlx-diagnostic
           - tailscale-recovery
+          - tailscale-runtime
+      live_proof_mode:
+        description: Real unauthenticated parking proof, or authorized test-tailnet recovery
+        required: false
+        default: parking
+        type: choice
+        options: [parking, full]
       operator_variant:
         description: Explicit provenance label for matched comparisons
         required: true
@@ -41,6 +48,150 @@ permissions:
   contents: read
 
 jobs:
+  pr167880-runtime-proof:
+    name: Installed Gateway and real Tailscale runtime proof
+    if: ${{ github.repository == 'TheAngryPit/openclaw' && github.event_name == 'workflow_dispatch' && inputs.proof_kind == 'tailscale-runtime' && inputs.candidate_sha == '59d29a7c1683dbb33f25e35c5196475e3a8b7b8d' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    concurrency:
+      group: pr167880-isolated-runtime
+      cancel-in-progress: false
+    env:
+      QA_PRODUCT_SHA: 59d29a7c1683dbb33f25e35c5196475e3a8b7b8d
+      QA_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      QA_ROOT: ${{ runner.temp }}/pr167880-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+      QA_PREFIX: pr167880-${{ github.run_id }}-${{ github.run_attempt }}
+      QA_PROOF_MODE: ${{ inputs.live_proof_mode }}
+      QA_TAILSCALE_VERSION: 1.104.1
+      QA_TAILSCALE_SHA256: 108d1d96ecf410d305571e173516f27038f870919a9b89c914a167c6d33a4528
+    steps:
+      - name: Verify disposable standard hosted runner and exact request
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$GITHUB_REPOSITORY" = TheAngryPit/openclaw
+          test "$(ps -p 1 -o comm= | xargs)" = systemd
+          test "${{ inputs.candidate_sha }}" = "$QA_PRODUCT_SHA"
+          case "$QA_PROOF_MODE" in parking|full) ;; *) exit 2 ;; esac
+          docker version --format '{{.Server.Version}}'
+      - name: Admit full proof only with explicitly provided test inputs
+        if: ${{ inputs.live_proof_mode == 'full' }}
+        shell: bash
+        env:
+          TS_QA_AUTHKEY: ${{ secrets.TS_QA_AUTHKEY }}
+          TS_QA_EXPECTED_DNS_SUFFIX: ${{ vars.TS_QA_EXPECTED_DNS_SUFFIX }}
+          TS_QA_TAG: ${{ vars.TS_QA_TAG }}
+        run: |
+          set -euo pipefail
+          test -n "$TS_QA_AUTHKEY"
+          test -n "$TS_QA_EXPECTED_DNS_SUFFIX"
+          test -n "$TS_QA_TAG"
+          echo 'Explicit test-tailnet inputs present; values are not printed.'
+      - name: Checkout immutable QA tooling without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          path: tooling
+      - name: Checkout immutable public candidate without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: TheAngryPit/openclaw
+          ref: 59d29a7c1683dbb33f25e35c5196475e3a8b7b8d
+          persist-credentials: false
+          path: product
+      - name: Verify source pins and obtain checksum-pinned real Tailscale
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C tooling rev-parse HEAD)" = "$QA_WORKFLOW_SHA"
+          test "$(git -C product rev-parse HEAD)" = "$QA_PRODUCT_SHA"
+          mkdir -p "$QA_ROOT/public" "$QA_ROOT/private/tailscale"
+          archive="$QA_ROOT/private/tailscale.tgz"
+          curl --fail --silent --show-error --location \
+            "https://pkgs.tailscale.com/stable/tailscale_${QA_TAILSCALE_VERSION}_amd64.tgz" -o "$archive"
+          printf '%s  %s\n' "$QA_TAILSCALE_SHA256" "$archive" | sha256sum --check
+          tar -xzf "$archive" --strip-components=1 -C "$QA_ROOT/private/tailscale"
+          test -x "$QA_ROOT/private/tailscale/tailscale"
+          test -x "$QA_ROOT/private/tailscale/tailscaled"
+      - name: Build installable candidate and isolated runtime images without test credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          dockerfile="$GITHUB_WORKSPACE/tooling/qa/pr167880-runtime-proof/Dockerfile"
+          common=(--file "$dockerfile" --build-context "product=$GITHUB_WORKSPACE/product" \
+            --build-context "tailscale=$QA_ROOT/private/tailscale" --build-arg "PRODUCT_SHA=$QA_PRODUCT_SHA")
+          docker buildx build "${common[@]}" --target gateway-runtime --load \
+            --tag "$QA_PREFIX-gateway" tooling/qa/pr167880-runtime-proof
+          docker buildx build "${common[@]}" --target tailscale-runtime --load \
+            --tag "$QA_PREFIX-tailscale" tooling/qa/pr167880-runtime-proof
+          gateway_image="$(docker image inspect "$QA_PREFIX-gateway" --format '{{.Id}}')"
+          tailscale_image="$(docker image inspect "$QA_PREFIX-tailscale" --format '{{.Id}}')"
+          printf 'QA_GATEWAY_IMAGE=%s\nQA_TAILSCALE_IMAGE=%s\n' "$gateway_image" "$tailscale_image" >> "$GITHUB_ENV"
+      - name: Observe real NeedsLogin and listener-free supervised parking
+        shell: bash
+        run: node tooling/qa/pr167880-runtime-proof/runtime-proof.mjs parking
+      - name: Authenticate only the disposable Tailscale sidecar
+        if: ${{ inputs.live_proof_mode == 'full' }}
+        shell: bash
+        env:
+          TS_QA_AUTHKEY: ${{ secrets.TS_QA_AUTHKEY }}
+          TS_QA_TAG: ${{ vars.TS_QA_TAG }}
+        run: |
+          set -euo pipefail
+          auth_dir="$QA_ROOT/private/auth"
+          test -d "$auth_dir"
+          python3 -I -S - <<'PY'
+          import os, pathlib
+          root = pathlib.Path(os.environ['QA_ROOT']) / 'private' / 'auth'
+          target = root / 'key'
+          descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(descriptor, 'w') as stream:
+              stream.write(os.environ['TS_QA_AUTHKEY'])
+          PY
+          trap 'sudo rm -f -- "$auth_dir/key"' EXIT
+          sudo chown 1000:1000 "$auth_dir/key"
+          chmod 0711 "$auth_dir"
+          docker exec --user 1000:1000 "$QA_PREFIX-tailscale" /usr/local/bin/tailscale up \
+            --auth-key=file:/run/qa-auth/key --advertise-tags="$TS_QA_TAG" \
+            --operator=node --hostname="$QA_PREFIX" --accept-dns=false --accept-routes=false \
+            --ssh=false --timeout=90s > "$QA_ROOT/private/authentication.log" 2>&1
+      - name: Verify real restoration, owned Serve claim and Gateway readiness
+        if: ${{ inputs.live_proof_mode == 'full' }}
+        shell: bash
+        env:
+          TS_QA_EXPECTED_DNS_SUFFIX: ${{ vars.TS_QA_EXPECTED_DNS_SUFFIX }}
+          TS_QA_TAG: ${{ vars.TS_QA_TAG }}
+        run: node tooling/qa/pr167880-runtime-proof/runtime-proof.mjs recovery
+      - name: Verify joined graceful cancellation of a fresh real prerequisite wait
+        shell: bash
+        run: node tooling/qa/pr167880-runtime-proof/runtime-proof.mjs cancel
+      - name: Cleanup only task-owned units, containers and test node
+        if: always()
+        shell: bash
+        run: |
+          if [ -f tooling/qa/pr167880-runtime-proof/runtime-proof.mjs ]; then
+            node tooling/qa/pr167880-runtime-proof/runtime-proof.mjs cleanup
+          fi
+      - name: Produce fail-closed allowlisted operational receipts
+        if: always()
+        shell: bash
+        run: |
+          if [ -f tooling/qa/pr167880-runtime-proof/runtime-proof.mjs ]; then
+            node tooling/qa/pr167880-runtime-proof/runtime-proof.mjs summarize
+          fi
+      - name: Upload only inspected receipt fields, never raw diagnostics or daemon state
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr167880-runtime-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr167880-runtime-${{ github.run_id }}-${{ github.run_attempt }}/public/
+          if-no-files-found: warn
+          retention-days: 7
   pr167072-paired-recovery-qa:
     name: Tailscale prerequisite recovery paired proof
     if: ${{ github.repository == 'TheAngryPit/openclaw' && github.event_name == 'workflow_dispatch' && inputs.proof_kind == 'tailscale-recovery' && inputs.candidate_sha == 'e670b178f9dbdde25a074913d9c97fa9b8b533b6' }}
