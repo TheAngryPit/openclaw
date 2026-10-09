@@ -61,7 +61,6 @@ jobs:
     env:
       QA_PRODUCT_SHA: 59d29a7c1683dbb33f25e35c5196475e3a8b7b8d
       QA_WORKFLOW_SHA: ${{ github.workflow_sha }}
-      QA_ROOT: ${{ runner.temp }}/pr167880-runtime-${{ github.run_id }}-${{ github.run_attempt }}
       QA_PREFIX: pr167880-${{ github.run_id }}-${{ github.run_attempt }}
       QA_PROOF_MODE: ${{ inputs.live_proof_mode }}
       QA_TAILSCALE_VERSION: 1.104.1
@@ -77,6 +76,7 @@ jobs:
           test "$(ps -p 1 -o comm= | xargs)" = systemd
           test "${{ inputs.candidate_sha }}" = "$QA_PRODUCT_SHA"
           case "$QA_PROOF_MODE" in parking|full) ;; *) exit 2 ;; esac
+          printf 'QA_ROOT=%s/pr167880-runtime-%s-%s\n' "$RUNNER_TEMP" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
           docker version --format '{{.Server.Version}}'
       - name: Admit full proof only with explicitly provided test inputs
         if: ${{ inputs.live_proof_mode == 'full' }}
