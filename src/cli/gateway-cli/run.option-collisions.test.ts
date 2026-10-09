@@ -60,7 +60,10 @@ type GatewayLoopParams = {
   start: GatewayLoopStart;
   beginBoot?: (startedAtMs: number) => Promise<void> | void;
   completeBoot?: (completion: unknown) => void;
-  onRestartStartupFailure?: (error: unknown, signal: AbortSignal) => Promise<void>;
+  onRestartStartupFailure?: (
+    error: unknown,
+    signal: AbortSignal,
+  ) => Promise<"completed" | "failed" | void>;
   ownsProcessLifecycle?: boolean;
   runtime?: unknown;
 };
@@ -1404,6 +1407,62 @@ describe("gateway run option collisions", () => {
         );
       }
       expect(runtimeErrors.join("\n")).toContain(failure.message);
+    },
+  );
+
+  it.each([
+    {
+      label: "an external supervisor",
+      env: { OPENCLAW_SUPERVISOR_MODE: "external" },
+      recovers: true,
+    },
+    {
+      label: "the Linux Gateway service marker",
+      env: { OPENCLAW_SERVICE_MARKER: "openclaw", OPENCLAW_SERVICE_KIND: "gateway" },
+      recovers: true,
+    },
+    { label: "a foreground process", env: {}, recovers: false },
+  ])(
+    "starts Tailscale Serve prerequisite recovery only under supervision: $label",
+    async ({ env, recovers }) => {
+      const tailscaleBackend = await import("../../infra/tailscale-backend-ready.js");
+      const waitForBackend = vi
+        .spyOn(tailscaleBackend, "waitForTailscaleBackendRunning")
+        .mockResolvedValue(true);
+      const { TailscaleBackendAuthenticationRequiredError } = tailscaleBackend;
+      const failure = new TailscaleBackendAuthenticationRequiredError("NeedsLogin", "serve", {
+        bin: "tailscale",
+        prefix: [],
+      });
+      let recoverStartupFailure: GatewayLoopParams["onRestartStartupFailure"];
+      runGatewayLoop.mockImplementationOnce(async (params: GatewayLoopParams) => {
+        recoverStartupFailure = params.onRestartStartupFailure;
+      });
+
+      try {
+        await withMockedPlatform("linux", () =>
+          withEnvAsync({ ...withoutSupervisorEnv, ...env }, async () => {
+            await runGatewayCli(["gateway", "run", "--allow-unconfigured", "--tailscale", "serve"]);
+            expect(recoverStartupFailure).toBeTypeOf("function");
+            const signal = new AbortController().signal;
+            const outcome = await recoverStartupFailure?.(failure, signal);
+            expect(outcome).toBe(recovers ? "completed" : undefined);
+            if (recovers) {
+              expect(waitForBackend).toHaveBeenCalledOnce();
+              expect(waitForBackend).toHaveBeenCalledWith({
+                bin: "tailscale",
+                prefix: [],
+                signal,
+                info: expect.any(Function),
+              });
+            } else {
+              expect(waitForBackend).not.toHaveBeenCalled();
+            }
+          }),
+        );
+      } finally {
+        waitForBackend.mockRestore();
+      }
     },
   );
 

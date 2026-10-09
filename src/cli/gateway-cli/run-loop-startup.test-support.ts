@@ -236,7 +236,9 @@ export function registerGatewayStartupFailureTests(
 
           secondStartup.resolve();
           await awaitGateBeforeSettlement(
-            new Promise<void>((resolve) => setImmediate(resolve)),
+            new Promise<void>((resolve) => {
+              setImmediate(resolve);
+            }),
             loop,
             "Gateway loop settled before the successful retry entered its running loop",
           );

@@ -26,8 +26,6 @@ import {
   isTransientTailscaleStatusError,
   parsePossiblyNoisyJsonObject,
   waitForTailscaleBackendReady,
-  waitForTailscaleBackendRunning,
-  type TailscaleStatusCommand,
 } from "./tailscale-backend-ready.js";
 import {
   TAILSCALE_ROUTE_OWNER_ARG,
@@ -159,20 +157,6 @@ export type TailscaleRouteClaim = {
   isActive: () => boolean;
   stop: () => Promise<void>;
 };
-
-/** Reuse the selected local Tailscale binary while waiting for operator-owned recovery. */
-export async function waitForManagedTailscaleBackendRunning(params: {
-  statusCommand: TailscaleStatusCommand;
-  signal: AbortSignal;
-  info: (message: string) => void;
-}): Promise<boolean> {
-  return await waitForTailscaleBackendRunning({
-    bin: params.statusCommand.bin,
-    prefix: [...params.statusCommand.prefix],
-    signal: params.signal,
-    info: params.info,
-  });
-}
 
 // Foreground startups replace the daemon's shared Serve config using an ETag.
 // Serialize our starts and owned stops, not the lifetime of each claim.

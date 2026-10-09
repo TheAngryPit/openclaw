@@ -232,7 +232,6 @@ export async function waitForTailscaleBackendRunning(params: {
     }
     if (
       state !== "daemon not reachable" &&
-      state !== undefined &&
       !TAILSCALE_BOOTING_BACKEND_STATES.has(state) &&
       !isTailscaleOperatorActionBackendState(state)
     ) {
@@ -240,10 +239,9 @@ export async function waitForTailscaleBackendRunning(params: {
         `Tailscale backend is not eligible for automatic startup recovery (${state})`,
       );
     }
-    const observed = state ?? "status unavailable";
-    if (announced !== observed) {
-      params.info(`waiting for Tailscale operator action or backend recovery (${observed})`);
-      announced = observed;
+    if (announced !== state) {
+      params.info(`waiting for Tailscale operator action or backend recovery (${state})`);
+      announced = state;
     }
     await sleep(pollMs, undefined, { signal: params.signal });
     pollMs = Math.min(pollMs * 2, maxPollMs);

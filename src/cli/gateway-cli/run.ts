@@ -63,6 +63,7 @@ import type { RespawnSupervisor } from "../../infra/supervisor-markers.js";
 import {
   isTailscaleBackendAuthenticationRequiredError,
   isTailscaleServeAuthenticationRequiredError,
+  waitForTailscaleBackendRunning,
 } from "../../infra/tailscale-backend-ready.js";
 import { isTailscaleRouteOwnershipConflictError } from "../../infra/tailscale-route-ownership-error.js";
 import { parseTcpPort } from "../../infra/tcp-port.js";
@@ -901,15 +902,15 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
     signal: AbortSignal,
   ): Promise<"completed" | "failed" | void> => {
     if (isTailscaleServeAuthenticationRequiredError(error)) {
-      if (effectiveTailscaleMode !== "serve" || !supervisor || signal.aborted) {
+      if (effectiveTailscaleMode !== "serve" || !startupRecoverySupervisor || signal.aborted) {
         return;
       }
       gatewayLog.warn(
         "Tailscale Serve needs operator sign-in or device approval; Gateway startup is parked until the local backend recovers",
       );
-      const { waitForManagedTailscaleBackendRunning } = await import("../../infra/tailscale.js");
-      const running = await waitForManagedTailscaleBackendRunning({
-        statusCommand: error.statusCommand,
+      const running = await waitForTailscaleBackendRunning({
+        bin: error.statusCommand.bin,
+        prefix: [...error.statusCommand.prefix],
         signal,
         info: (message) => gatewayLog.info(message),
       });
@@ -996,8 +997,14 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
       },
     });
 
-  const { detectRespawnSupervisor } = await import("../../infra/supervisor-markers.js");
+  const { detectRespawnSupervisor, detectGatewayRespawnSupervisorIdentity } =
+    await import("../../infra/supervisor-markers.js");
   const supervisor = detectRespawnSupervisor(process.env);
+  const startupRecoverySupervisor = detectGatewayRespawnSupervisorIdentity(
+    process.env,
+    process.platform,
+    { includeLinuxOpenClawGatewayServiceMarker: true },
+  );
   try {
     await runGatewayLoopWithSupervisedLockRecovery({
       startLoop,

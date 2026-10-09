@@ -22,7 +22,6 @@ const {
   readTailscaleWhoisIdentity,
   claimTailscaleRoute,
   hasTailscaleFunnelRouteForPort,
-  waitForManagedTailscaleBackendRunning,
 } = tailscale;
 const tailscaleBin = "tailscale";
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
@@ -458,9 +457,10 @@ describe("tailscale helpers", () => {
         info,
         signal: controller.signal,
       });
+      const rejected = expect(waiting).rejects.toBe(abort);
       try {
         await vi.advanceTimersByTimeAsync(1_000);
-        await expect(waiting).rejects.toBe(abort);
+        await rejected;
         expect(info).toHaveBeenCalledWith(
           "waiting for Tailscale operator action or backend recovery (daemon not reachable)",
         );
@@ -498,8 +498,9 @@ describe("tailscale helpers", () => {
       }
 
       const controller = new AbortController();
-      const waiting = waitForManagedTailscaleBackendRunning({
-        statusCommand: error.statusCommand,
+      const waiting = waitForTailscaleBackendRunning({
+        bin: error.statusCommand.bin,
+        prefix: [...error.statusCommand.prefix],
         signal: controller.signal,
         info: vi.fn(),
       });
