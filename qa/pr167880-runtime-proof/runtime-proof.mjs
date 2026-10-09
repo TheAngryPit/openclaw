@@ -1540,7 +1540,9 @@ async function maybeLogoutSidecar(state, role) {
   const backend = await tailscaleStatus(names.sidecar).catch(() => null);
   let logoutAttempted = false;
   let logoutSucceeded = null;
-  if (backendState(backend) === "Running") {
+  // Full-mode authentication may register a node before it becomes Running.
+  // Retain its state unless logout succeeds, including approval/failure paths.
+  if (state.proofMode === "full" && role === "parking") {
     logoutAttempted = true;
     logoutSucceeded = await docker(["exec", names.sidecar, "/usr/local/bin/tailscale", "logout"], {
       timeoutMs: TAILSCALE_STOP_TIMEOUT_MS,
@@ -1553,6 +1555,8 @@ async function maybeLogoutSidecar(state, role) {
     if (!logoutSucceeded) {
       return { sidecarStopped: false, sidecarRemoved: false, logoutAttempted, logoutSucceeded };
     }
+  } else if (backendState(backend) !== "NeedsLogin") {
+    return { sidecarStopped: false, sidecarRemoved: false, logoutAttempted, logoutSucceeded };
   }
   await docker(["stop", "--time=-1", names.sidecar], {
     timeoutMs: TAILSCALE_STOP_TIMEOUT_MS,
