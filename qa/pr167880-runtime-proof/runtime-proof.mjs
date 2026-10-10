@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import {
   chmodSync,
@@ -13,7 +12,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 const EXPECTED_PRODUCT_SHA = "59d29a7c1683dbb33f25e35c5196475e3a8b7b8d";
 const NODE_UID = 1000;
@@ -27,7 +25,6 @@ const STATUS_POLL_MS = 1_000;
 const MAX_COMMAND_OUTPUT_BYTES = 16 * 1024 * 1024;
 const PARKED_SIGNAL =
   "Tailscale Serve needs operator sign-in or device approval; Gateway startup is parked until the local backend recovers";
-const SCRIPT_PATH = fileURLToPath(import.meta.url);
 
 class ProofFailure extends Error {
   constructor(category) {
@@ -681,7 +678,7 @@ function configForRuntime(prefix, role) {
   return { workspace };
 }
 
-function gatewayContainerArgs(context, role, names, invocationId) {
+function gatewayContainerArgs(context, role, names) {
   const sentinel = configForRuntime(context.prefix, role).workspace;
   const seedScript = [
     "const fs = require('node:fs');",
@@ -800,7 +797,7 @@ async function makeSystemdUnit(context, role, names) {
   ensureDirectory(unitDir);
   const unitSource = path.join(unitDir, names.unit);
   assert(!assertRegularOrAbsent(unitSource), "unit-source-collision");
-  const command = ["/usr/bin/docker", ...gatewayContainerArgs(context, role, names, "")];
+  const command = ["/usr/bin/docker", ...gatewayContainerArgs(context, role, names)];
   const escape = (value) =>
     `"${String(value)
       .replaceAll("\\", "\\\\")
@@ -970,7 +967,7 @@ async function containerShape(context, role, names, invocationId) {
   const sidecarLabels = sidecar.Config?.Labels ?? {};
   const labels = config.Labels ?? {};
   const actualRole = role === "recovery" ? "parking" : role;
-  const launchArgs = gatewayDockerArgs(context, actualRole, names);
+  const launchArgs = gatewayContainerArgs(context, actualRole, names);
   const expectedCommand = launchArgs.slice(launchArgs.indexOf(context.gatewayImage) + 1);
   const safe =
     JSON.stringify(config.Entrypoint) === JSON.stringify(["/bin/sh"]) &&
@@ -1689,8 +1686,8 @@ async function cleanup() {
         };
       }
       let sidecarCleanup = {
-        sidecarStopped: true,
-        sidecarRemoved: true,
+        sidecarStopped: !sidecar,
+        sidecarRemoved: !sidecar,
         logoutAttempted: false,
         logoutSucceeded: null,
       };
@@ -1756,6 +1753,9 @@ async function cleanup() {
     ? "passed"
     : "failed";
   updateStage(state, "cleanup", cleanupStage);
+  if (cleanupStage.status === "failed") {
+    process.exitCode = 1;
+  }
 }
 
 function publicProjection(state) {
@@ -1869,6 +1869,31 @@ function publicProjection(state) {
   };
   const cleanupStage = state.stages?.cleanup;
   const cleanupRoles = cleanupStage?.roles ?? {};
+  const cleanupChecks = (role) => {
+    const source = cleanupRoles[role] ?? {};
+    const output = {};
+    for (const key of [
+      "unitStopped",
+      "gatewayContainerStopped",
+      "gracefulExit",
+      "statusKnown",
+      "restartCountZero",
+      "restartPolicyNo",
+      "mainPidGone",
+      "exitCodeZero",
+      "notOomKilled",
+      "invocationIdStable",
+      "sidecarStopped",
+      "sidecarRemoved",
+      "unitFileRemoved",
+      "privateDiagnosticsRetained",
+    ]) {
+      if (typeof source[key] === "boolean") {
+        output[key] = source[key];
+      }
+    }
+    return output;
+  };
   const allCoreStages = ["parking", "cancel"].every(
     (name) => state.stages?.[name]?.status === "passed",
   );
@@ -1921,6 +1946,8 @@ function publicProjection(state) {
           : "not_run",
         parkingComplete: cleanupRoles.parking?.complete === true,
         cancelComplete: cleanupRoles.cancel?.complete === true,
+        parkingChecks: cleanupChecks("parking"),
+        cancelChecks: cleanupChecks("cancel"),
         parkingPrivateDiagnosticsRetained:
           cleanupRoles.parking?.privateDiagnosticsRetained === true,
         cancelPrivateDiagnosticsRetained: cleanupRoles.cancel?.privateDiagnosticsRetained === true,
