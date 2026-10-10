@@ -418,7 +418,7 @@ async function systemdProperties(unit) {
       "systemctl",
       "show",
       "--no-pager",
-      "--property=ActiveState,SubState,Restart,NRestarts,InvocationID,MainPID,ExecMainStatus,Result",
+      "--property=ActiveState,SubState,Restart,NRestarts,InvocationID,MainPID,ExecMainCode,ExecMainStatus,Result",
       unit,
     ],
     { timeoutMs: 15_000, maxOutputBytes: 128 * 1024 },
@@ -578,7 +578,15 @@ async function serveConfig(name) {
       failureCategory: "serve-status-command-failed",
     },
   );
-  const parsed = parseJson(result.stdout, "serve-status-invalid");
+  let parsed;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch {
+    fail("serve-status-invalid");
+  }
+  if (parsed === null) {
+    return {};
+  }
   assert(isRecord(parsed), "serve-status-invalid");
   return parsed;
 }
@@ -595,7 +603,8 @@ function countServeRoutes(config) {
     ? Object.values(config.AllowFunnel).filter(Boolean).length
     : 0;
   const foreground = countNonEmptyServeStructure(config.Foreground);
-  return tcp + web + funnel + foreground;
+  const services = countNonEmptyServeStructure(config.Services);
+  return tcp + web + funnel + foreground + services;
 }
 
 function countNonEmptyServeStructure(value) {
@@ -1346,6 +1355,39 @@ async function recovery() {
   }
 }
 
+function shutdownExitChecks(properties, container) {
+  return {
+    systemdExitStatus: Number(properties.ExecMainStatus),
+    systemdExitKind: Number(properties.ExecMainCode),
+    gatewayExitStatus: Number(container?.State?.ExitCode),
+    unitFailureObserved: properties.ActiveState === "failed",
+  };
+}
+
+function shutdownLogChecks(text) {
+  const step = [
+    "restart failure recovery",
+    "active work drain",
+    "startup operations",
+    "restart signal settlement",
+    "gateway server close",
+  ].find((value) => text.includes(`shutdown step failed (${value})`));
+  return {
+    shutdownSignalObserved: text.includes("received SIGTERM; shutting down"),
+    shutdownDeadlineObserved: text.includes("shutdown deadline reached;"),
+    handledPrerequisiteRethrownAtShutdown: text
+      .split(/\r?\n/)
+      .some(
+        (line) =>
+          line.includes("shutdown step failed (startup operations)") &&
+          line.includes(
+            "Tailscale backend requires the operator to sign in to the local node (NeedsLogin)",
+          ),
+      ),
+    ...(step ? { shutdownFailureStep: step.replaceAll(" ", "-") } : {}),
+  };
+}
+
 async function stopUnitAndVerify(state, role) {
   const names = state.names[role];
   const container = await inspectContainer(names.gateway, { optional: true });
@@ -1420,6 +1462,7 @@ async function stopUnitAndVerify(state, role) {
     exitCodeZero: Number(properties.ExecMainStatus) === 0 && after?.State?.ExitCode === 0,
     notOomKilled: after?.State?.OOMKilled === false,
     invocationIdStable: invocationMatchesBeforeStop,
+    ...shutdownExitChecks(properties, after),
     container: after,
   };
 }
@@ -1683,6 +1726,7 @@ async function cleanup() {
           exitCodeZero: Number(properties.ExecMainStatus) === 0 && gateway.State?.ExitCode === 0,
           notOomKilled: gateway.State?.OOMKilled === false,
           invocationIdStable: properties.InvocationID === state.invocationIds?.[role],
+          ...shutdownExitChecks(properties, gateway),
         };
       }
       let sidecarCleanup = {
@@ -1728,11 +1772,18 @@ async function cleanup() {
         }
       }
       const unitRemoved = diagnostics.unitJournal && (await removeUnitFileIfStopped(state, role));
+      let shutdownLogs = {};
+      if (gateway && gatewayShutdown.gatewayContainerStopped) {
+        const snapshot = await captureDockerLogs(context, role, names.gateway, "gateway.log");
+        diagnostics.gatewayLog = snapshot.ok;
+        shutdownLogs = shutdownLogChecks(snapshot.text);
+      }
       const privateDiagnosticsRetained =
         diagnostics.gatewayLog && diagnostics.sidecarLog && diagnostics.unitJournal;
       cleanupStage.roles[role] = {
         ...gatewayShutdown,
         ...sidecarCleanup,
+        ...shutdownLogs,
         unitFileRemoved: unitRemoved,
         privateDiagnosticsRetained,
         complete:
@@ -1887,10 +1938,31 @@ function publicProjection(state) {
       "sidecarRemoved",
       "unitFileRemoved",
       "privateDiagnosticsRetained",
+      "unitFailureObserved",
+      "shutdownSignalObserved",
+      "shutdownDeadlineObserved",
+      "handledPrerequisiteRethrownAtShutdown",
     ]) {
       if (typeof source[key] === "boolean") {
         output[key] = source[key];
       }
+    }
+    for (const key of ["systemdExitStatus", "gatewayExitStatus", "systemdExitKind"]) {
+      const value = source[key];
+      if (Number.isInteger(value) && value >= 0 && value <= (key === "systemdExitKind" ? 3 : 255)) {
+        output[key] = value;
+      }
+    }
+    if (
+      [
+        "restart-failure-recovery",
+        "active-work-drain",
+        "startup-operations",
+        "restart-signal-settlement",
+        "gateway-server-close",
+      ].includes(source.shutdownFailureStep)
+    ) {
+      output.shutdownFailureStep = source.shutdownFailureStep;
     }
     return output;
   };
