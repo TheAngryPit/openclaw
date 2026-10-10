@@ -130,7 +130,7 @@ export function registerGatewayStartupFailureTests(
             if (!startupOperation) {
               throw new Error("expected the run loop to provide tracked startup ownership");
             }
-            const startupSettled = startupOperation(async (signal) => {
+            return await startupOperation(async (signal) => {
               try {
                 await waitForTailscaleBackendReady({
                   ...statusCommand,
@@ -142,8 +142,8 @@ export function registerGatewayStartupFailureTests(
                 startupError = error;
                 throw error;
               }
+              return createGatewayServer(close);
             });
-            return createGatewayServer(close, startupSettled ?? Promise.resolve());
           });
         const { runtime, exited } = createRuntimeWithExitSignal();
         const recoveryWaitStarted = createDeferredCore();
@@ -223,7 +223,7 @@ export function registerGatewayStartupFailureTests(
             ["sudo", ["-n", "tailscale", "status", "--json"]],
           ]);
           expect(onRestartStartupFailure).toHaveBeenCalledOnce();
-          expect(close).toHaveBeenCalledExactlyOnceWith({ reason: "gateway startup failed" });
+          expect(close).not.toHaveBeenCalled();
           captureSignal("SIGTERM")();
           shutdownRequested = true;
           await awaitGateBeforeSettlement(
@@ -249,7 +249,7 @@ export function registerGatewayStartupFailureTests(
           expect(statusExec).toHaveBeenCalledTimes(2);
           expect(onRestartStartupFailure).toHaveBeenCalledOnce();
           expect(start).toHaveBeenCalledOnce();
-          expect(close).toHaveBeenCalledOnce();
+          expect(close).not.toHaveBeenCalled();
           expect(releaseLock).toHaveBeenCalledOnce();
         } finally {
           try {
