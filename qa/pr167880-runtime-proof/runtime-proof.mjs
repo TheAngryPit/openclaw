@@ -1729,6 +1729,12 @@ async function cleanup() {
           ...shutdownExitChecks(properties, gateway),
         };
       }
+      let shutdownLogs = {};
+      if (gateway && gatewayShutdown.gatewayContainerStopped) {
+        const snapshot = await captureDockerLogs(context, role, names.gateway, "gateway.log");
+        diagnostics.gatewayLog = snapshot.ok;
+        shutdownLogs = shutdownLogChecks(snapshot.text);
+      }
       let sidecarCleanup = {
         sidecarStopped: !sidecar,
         sidecarRemoved: !sidecar,
@@ -1737,11 +1743,6 @@ async function cleanup() {
       };
       if (gatewayShutdown.gatewayContainerStopped && gatewayShutdown.unitStopped) {
         const afterStop = await inspectContainer(names.gateway, { optional: true });
-        if (afterStop) {
-          diagnostics.gatewayLog = (
-            await captureDockerLogs(context, role, names.gateway, "gateway.log")
-          ).ok;
-        }
         diagnostics.unitJournal = await captureUnitJournal(context, role, names.unit);
         const afterSidecar = await inspectContainer(names.sidecar, { optional: true });
         if (afterSidecar) {
@@ -1772,12 +1773,6 @@ async function cleanup() {
         }
       }
       const unitRemoved = diagnostics.unitJournal && (await removeUnitFileIfStopped(state, role));
-      let shutdownLogs = {};
-      if (gateway && gatewayShutdown.gatewayContainerStopped) {
-        const snapshot = await captureDockerLogs(context, role, names.gateway, "gateway.log");
-        diagnostics.gatewayLog = snapshot.ok;
-        shutdownLogs = shutdownLogChecks(snapshot.text);
-      }
       const privateDiagnosticsRetained =
         diagnostics.gatewayLog && diagnostics.sidecarLog && diagnostics.unitJournal;
       cleanupStage.roles[role] = {
