@@ -1,0 +1,348 @@
+diff --git a/src/cli/gateway-cli/run-loop-startup.test-support.ts b/src/cli/gateway-cli/run-loop-startup.test-support.ts
+index f3aea8e1b99..56d1bdd1612 100644
+--- a/src/cli/gateway-cli/run-loop-startup.test-support.ts
++++ b/src/cli/gateway-cli/run-loop-startup.test-support.ts
+@@ -26,6 +26,58 @@ export function registerGatewayStartupFailureTests(
+   gatewayLog: ReturnType<typeof import("./run-loop.test-support.js").createGatewayLogger>,
+   acquireGatewayLock: Mock,
+ ): void {
++  const createStartupOperations = async () => {
++    const { createGatewayStartupOperations } = await import("./run-loop-startup.js");
++    return createGatewayStartupOperations();
++  };
++  const rejectTrackedStartup = async (
++    operations: Awaited<ReturnType<typeof createStartupOperations>>,
++    error: unknown,
++  ) => {
++    await expect(
++      operations.run(async () => {
++        throw error;
++      }),
++    ).rejects.toBe(error);
++  };
++
++  it("drains after acknowledging the exact tracked startup failure", async () => {
++    const operations = await createStartupOperations();
++    const failure = new Error("handled startup failure");
++    await rejectTrackedStartup(operations, failure);
++    operations.close();
++    operations.acknowledgeHandledFailure(failure);
++    await expect(operations.drain()).resolves.toBeUndefined();
++  });
++
++  it("keeps a tracked startup failure when acknowledgement has a different identity", async () => {
++    const operations = await createStartupOperations();
++    const failure = new Error("startup failure");
++    await rejectTrackedStartup(operations, failure);
++    operations.close();
++    operations.acknowledgeHandledFailure(new Error("different failure"));
++    await expect(operations.drain()).rejects.toBe(failure);
++  });
++
++  it("preserves a second tracked startup failure after acknowledging the first", async () => {
++    const operations = await createStartupOperations();
++    const handledFailure = new Error("handled prerequisite failure");
++    const unrelatedFailure = new Error("unrelated startup failure");
++    await rejectTrackedStartup(operations, handledFailure);
++    await rejectTrackedStartup(operations, unrelatedFailure);
++    operations.close();
++    operations.acknowledgeHandledFailure(handledFailure);
++    await expect(operations.drain()).rejects.toBe(unrelatedFailure);
++  });
++
++  it("keeps an unacknowledged tracked startup failure fatal at drain", async () => {
++    const operations = await createStartupOperations();
++    const failure = new Error("unacknowledged startup failure");
++    await rejectTrackedStartup(operations, failure);
++    operations.close();
++    await expect(operations.drain()).rejects.toBe(failure);
++  });
++
+   it("joins recovery cleanup failure after shutdown without masking the failure", async () => {
+     const { createGatewayRestartRecovery } = await import("./run-loop-startup.js");
+     const failureStarted = createDeferredCore();
+@@ -54,45 +106,90 @@ export function registerGatewayStartupFailureTests(
+     await expect(failedCleanup).rejects.toThrow("recovery cleanup failed");
+   });
+ 
+-  it("joins the real Tailscale prerequisite waiter when shutdown cancels recovery", async () => {
++  const runTrackedStartupStop = async () => {
+     const env = isolateSupervisorEnv();
+     setPlatform("linux");
+     setTestEnvValue("OPENCLAW_SYSTEMD_UNIT", "openclaw-gateway.service");
+     try {
+       await withIsolatedSignals(async ({ captureSignal }) => {
+-        const { TailscaleBackendAuthenticationRequiredError, waitForTailscaleBackendRunning } =
+-          await import("../../infra/tailscale-backend-ready.js");
++        const {
++          TailscaleBackendAuthenticationRequiredError,
++          waitForTailscaleBackendReady,
++          waitForTailscaleBackendRunning,
++        } = await import("../../infra/tailscale-backend-ready.js");
+         const processExec = await import("../../process/exec.js");
+         const { runGatewayLoop } = await import("./run-loop.js");
+-        const startupError = new TailscaleBackendAuthenticationRequiredError(
+-          "NeedsLogin",
+-          "serve",
+-          {
+-            bin: "sudo",
+-            prefix: ["-n", "tailscale"],
+-          },
+-        );
+         const close = createCloseMock();
+         const releaseLock = vi.fn(async () => {});
+         acquireGatewayLock.mockResolvedValueOnce({ release: releaseLock });
++        const statusCommand = { bin: "sudo", prefix: ["-n", "tailscale"] };
+         const start = vi
+           .fn<Parameters<typeof runGatewayLoop>[0]["start"]>()
+-          .mockImplementationOnce(async () =>
+-            createGatewayServer(close, Promise.reject(startupError)),
+-          );
++          .mockImplementationOnce(async (options) => {
++            const startupOperation = options?.startupOperation;
++            if (!startupOperation) {
++              throw new Error("expected the run loop to provide tracked startup ownership");
++            }
++            const startupSettled = startupOperation(async (signal) => {
++              try {
++                await waitForTailscaleBackendReady({
++                  ...statusCommand,
++                  managedMode: "serve",
++                  info: vi.fn(),
++                  signal,
++                });
++              } catch (error) {
++                startupError = error;
++                throw error;
++              }
++            });
++            return createGatewayServer(close, startupSettled ?? Promise.resolve());
++          });
+         const { runtime, exited } = createRuntimeWithExitSignal();
+-        const recoveryStarted = createDeferredCore();
+-        const statusExec = vi.spyOn(processExec, "runExec").mockImplementation(async () => {
+-          recoveryStarted.resolve();
+-          return { stdout: JSON.stringify({ BackendState: "NeedsLogin" }), stderr: "" };
+-        });
++        const recoveryWaitStarted = createDeferredCore();
++        const recoveryAbortObserved = createDeferredCore();
++        const recoveryWaitCleanup = createDeferredCore();
+         const recoverySettled = createDeferredCore();
++        let startupError: unknown;
++        let statusCalls = 0;
++        const statusExec = vi
++          .spyOn(processExec, "runExec")
++          .mockImplementation(async (_command, _args, options) => {
++            statusCalls += 1;
++            if (statusCalls === 1) {
++              return {
++                stdout: JSON.stringify({ BackendState: "NeedsLogin" }),
++                stderr: "",
++              };
++            }
++            if (statusCalls !== 2) {
++              throw new Error("unexpected extra Tailscale status call");
++            }
++            recoveryWaitStarted.resolve();
++            const signal = typeof options === "object" ? options.signal : undefined;
++            if (!signal) {
++              throw new Error("expected the tracked recovery waiter to receive cancellation");
++            }
++            return await new Promise<{ stdout: string; stderr: string }>((_resolve, reject) => {
++              const rejectAfterCleanup = () => {
++                recoveryAbortObserved.resolve();
++                void recoveryWaitCleanup.promise.then(() => {
++                  reject(new DOMException("Tailscale wait cancelled", "AbortError"));
++                });
++              };
++              if (signal.aborted) {
++                rejectAfterCleanup();
++              } else {
++                signal.addEventListener("abort", rejectAfterCleanup, { once: true });
++              }
++            });
++          });
+         const onRestartStartupFailure = vi.fn(async (error: unknown, signal: AbortSignal) => {
+           expect(error).toBe(startupError);
++          expect(error).toBeInstanceOf(TailscaleBackendAuthenticationRequiredError);
+           try {
+             await waitForTailscaleBackendRunning({
+-              bin: startupError.statusCommand.bin,
+-              prefix: [...startupError.statusCommand.prefix],
++              ...statusCommand,
+               info: vi.fn(),
+               signal,
+             });
+@@ -102,34 +199,61 @@ export function registerGatewayStartupFailureTests(
+           }
+         });
+         const loop = runGatewayLoop({ start, runtime, onRestartStartupFailure });
++        let loopSettled = false;
++        void loop.then(
++          () => {
++            loopSettled = true;
++          },
++          () => {
++            loopSettled = true;
++          },
++        );
+         let shutdownRequested = false;
+         let recoveryEntered = false;
+         try {
+           await awaitGateBeforeSettlement(
+-            recoveryStarted.promise,
++            recoveryWaitStarted.promise,
+             loop,
+-            "Gateway loop settled before supervised startup recovery reached the Tailscale waiter",
++            "Gateway loop settled before the tracked startup failure entered prerequisite recovery",
+           );
+           recoveryEntered = true;
+-          expect(statusExec).toHaveBeenCalledOnce();
++          expect(statusExec).toHaveBeenCalledTimes(2);
++          expect(statusExec.mock.calls.map(([command, args]) => [command, args])).toEqual([
++            ["sudo", ["-n", "tailscale", "status", "--json"]],
++            ["sudo", ["-n", "tailscale", "status", "--json"]],
++          ]);
++          expect(onRestartStartupFailure).toHaveBeenCalledOnce();
++          expect(close).toHaveBeenCalledExactlyOnceWith({ reason: "gateway startup failed" });
+           captureSignal("SIGTERM")();
+           shutdownRequested = true;
++          await awaitGateBeforeSettlement(
++            recoveryAbortObserved.promise,
++            exited,
++            "Gateway exited before cancelling the real Tailscale prerequisite waiter",
++          );
++          expect(runtime.exit).not.toHaveBeenCalled();
++          expect(releaseLock).not.toHaveBeenCalled();
++          recoveryWaitCleanup.resolve();
+           await awaitGateBeforeSettlement(
+             recoverySettled.promise,
+             exited,
+-            "Gateway exited before joining the cancelled Tailscale prerequisite waiter",
++            "Gateway exited before joining the cancelled tracked prerequisite waiter",
+           );
+           await expect(exited).resolves.toBe(0);
+-          expect(statusExec).toHaveBeenCalledOnce();
++          expect(statusExec).toHaveBeenCalledTimes(2);
+           expect(onRestartStartupFailure).toHaveBeenCalledOnce();
+           expect(start).toHaveBeenCalledOnce();
+           expect(close).toHaveBeenCalledOnce();
+           expect(releaseLock).toHaveBeenCalledOnce();
+         } finally {
+           try {
++            recoveryWaitCleanup.resolve();
+             if (recoveryEntered && !shutdownRequested) {
+               captureSignal("SIGTERM")();
+               await exited;
++            } else if (!loopSettled && runtime.exit.mock.calls.length === 0) {
++              captureSignal("SIGTERM")();
++              await exited;
+             }
+           } finally {
+             statusExec.mockRestore();
+@@ -142,6 +266,10 @@ export function registerGatewayStartupFailureTests(
+         Object.defineProperty(process, "platform", originalPlatformDescriptor);
+       }
+     }
++  };
++
++  it("joins the real Tailscale prerequisite waiter when shutdown cancels recovery", async () => {
++    await runTrackedStartupStop();
+   });
+ 
+   it("parks supervised Serve startup after clean close and retries once after Running", async () => {
+@@ -374,94 +502,6 @@ export function registerGatewayStartupFailureTests(
+     }
+   });
+ 
+-  it("cancels and joins a supervised first-start prerequisite wait before stopping", async () => {
+-    const env = isolateSupervisorEnv();
+-    setPlatform("linux");
+-    setTestEnvValue("OPENCLAW_SYSTEMD_UNIT", "openclaw-gateway.service");
+-    try {
+-      await withIsolatedSignals(async ({ captureSignal }) => {
+-        const { TailscaleBackendAuthenticationRequiredError } =
+-          await import("../../infra/tailscale-backend-ready.js");
+-        const { runGatewayLoop } = await import("./run-loop.js");
+-        const startupError = new TailscaleBackendAuthenticationRequiredError(
+-          "NeedsMachineAuth",
+-          "serve",
+-          { bin: "tailscale", prefix: [] },
+-        );
+-        const firstClose = createCloseMock();
+-        const recoveryStarted = createDeferredCore();
+-        const recoveryCleanup = createDeferredCore();
+-        const releaseLock = vi.fn(async () => {});
+-        acquireGatewayLock.mockResolvedValueOnce({ release: releaseLock });
+-        const start = vi
+-          .fn<Parameters<typeof runGatewayLoop>[0]["start"]>()
+-          .mockImplementationOnce(async () =>
+-            createGatewayServer(firstClose, Promise.reject(startupError)),
+-          );
+-        const { runtime, exited } = createRuntimeWithExitSignal();
+-        let recoverySignal: AbortSignal | undefined;
+-        const onRestartStartupFailure = vi.fn(async (_error: unknown, signal: AbortSignal) => {
+-          recoverySignal = signal;
+-          recoveryStarted.resolve();
+-          await new Promise<void>((resolve) => {
+-            if (signal.aborted) {
+-              resolve();
+-            } else {
+-              signal.addEventListener("abort", () => resolve(), { once: true });
+-            }
+-          });
+-          await recoveryCleanup.promise;
+-          throw new DOMException("Tailscale wait cancelled", "AbortError");
+-        });
+-        const loop = runGatewayLoop({ start, runtime, onRestartStartupFailure });
+-        let loopFinished = false;
+-        void loop.then(
+-          () => {
+-            loopFinished = true;
+-          },
+-          () => {
+-            loopFinished = true;
+-          },
+-        );
+-        try {
+-          await awaitGateBeforeSettlement(
+-            recoveryStarted.promise,
+-            loop,
+-            "Gateway loop settled before the supervised prerequisite wait started",
+-          );
+-          expect(firstClose).toHaveBeenCalledExactlyOnceWith({ reason: "gateway startup failed" });
+-          expect(start).toHaveBeenCalledOnce();
+-          const stop = captureSignal("SIGTERM");
+-          stop();
+-          await waitForLoopCondition(
+-            () => recoverySignal?.aborted === true,
+-            "expected stop cancellation to be delivered",
+-          );
+-          expect(recoverySignal?.aborted).toBe(true);
+-          expect(runtime.exit).not.toHaveBeenCalled();
+-          expect(releaseLock).not.toHaveBeenCalled();
+-
+-          recoveryCleanup.resolve();
+-          await expect(exited).resolves.toBe(0);
+-          expect(releaseLock).toHaveBeenCalledOnce();
+-          expect(start).toHaveBeenCalledOnce();
+-          expect(onRestartStartupFailure).toHaveBeenCalledOnce();
+-        } finally {
+-          recoveryCleanup.resolve();
+-          if (runtime.exit.mock.calls.length === 0 && !loopFinished) {
+-            captureSignal("SIGTERM")();
+-            await exited;
+-          }
+-        }
+-      });
+-    } finally {
+-      env.restore();
+-      if (originalPlatformDescriptor) {
+-        Object.defineProperty(process, "platform", originalPlatformDescriptor);
+-      }
+-    }
+-  });
+-
+   it("does not park a foreground Gateway for Tailscale authentication requirements", async () => {
+     const env = isolateSupervisorEnv();
+     setPlatform("linux");

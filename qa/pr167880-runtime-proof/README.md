@@ -18,6 +18,12 @@ The installed-process check verifies supervisor custody: the exact container lau
 
 Full mode requires the dedicated test-tailnet secret `TS_QA_AUTHKEY` plus `TS_QA_EXPECTED_DNS_SUFFIX` and `TS_QA_TAG` variables. The workflow rejects missing values before building images. The key is mounted only into the sidecar's private auth directory for the separate operator step; it is not passed to this controller or the Gateway container. Parking mode needs none of those values.
 
+## Tracked-startup regression
+
+The separate `tailscale-tracked-regression` lane uses the same pinned builder and frozen baseline `59d29a7c1683dbb33f25e35c5196475e3a8b7b8d`. It verifies the three baseline source files by hash, applies the test-only overlay and requires the real prerequisite-waiter cancellation test to fail specifically with exit 1 instead of 0. It then applies the source-only repair overlay and requires that test plus six error-identity, cleanup and foreground controls to pass. Both variants use the same installed dependencies and separate module caches.
+
+This lane exports only a closed pass/count/duration receipt. Test output stays inside the disposable builder. The candidate is baseline plus the inspected repair overlay, not a published source revision or installed-runtime cancellation proof.
+
 ## Proof limits
 
 Upgrade survival is explicitly `NOT_RUN`: this fixture does not install a published predecessor or prove settings preservation across update. It also does not prove HTTPS reachability from another tailnet peer. A successful full-mode receipt is therefore partial operational evidence for this one isolated node, not upgrade acceptance, cross-peer HTTPS acceptance, or production-tailnet proof. If upgrade or cross-peer proof is required, it needs its own approved fixture and assertions rather than inference from this result.

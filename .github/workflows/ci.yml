@@ -29,6 +29,7 @@ on:
           - codex-catalog-mlx-diagnostic
           - tailscale-recovery
           - tailscale-runtime
+          - tailscale-tracked-regression
       live_proof_mode:
         description: Real unauthenticated parking proof, or authorized test-tailnet recovery
         required: false
@@ -48,6 +49,50 @@ permissions:
   contents: read
 
 jobs:
+  pr167880-tracked-regression:
+    name: Tracked startup failure baseline and candidate regression
+    if: ${{ github.repository == 'TheAngryPit/openclaw' && github.event_name == 'workflow_dispatch' && inputs.proof_kind == 'tailscale-tracked-regression' && inputs.candidate_sha == '59d29a7c1683dbb33f25e35c5196475e3a8b7b8d' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    concurrency:
+      group: pr167880-isolated-runtime
+      cancel-in-progress: false
+    steps:
+      - name: Checkout frozen QA without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          path: tooling
+      - name: Checkout exact public baseline without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: TheAngryPit/openclaw
+          ref: 59d29a7c1683dbb33f25e35c5196475e3a8b7b8d
+          persist-credentials: false
+          path: product
+      - name: Verify runner and source then prove baseline red and candidate green
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          test "$(git -C tooling rev-parse HEAD)" = "${{ github.workflow_sha }}"
+          test "$(git -C product rev-parse HEAD)" = 59d29a7c1683dbb33f25e35c5196475e3a8b7b8d
+          docker buildx build --file tooling/qa/pr167880-runtime-proof/Dockerfile \
+            --build-context "product=$GITHUB_WORKSPACE/product" \
+            --build-arg PRODUCT_SHA=59d29a7c1683dbb33f25e35c5196475e3a8b7b8d \
+            --target tracked-startup-receipt --output "type=local,dest=$RUNNER_TEMP/pr167880-tracked-regression" \
+            tooling/qa/pr167880-runtime-proof
+      - name: Upload only the closed regression receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr167880-tracked-regression-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr167880-tracked-regression/
+          if-no-files-found: error
+          retention-days: 7
   pr167880-runtime-proof:
     name: Installed Gateway and real Tailscale runtime proof
     if: ${{ github.repository == 'TheAngryPit/openclaw' && github.event_name == 'workflow_dispatch' && inputs.proof_kind == 'tailscale-runtime' && inputs.candidate_sha == '59d29a7c1683dbb33f25e35c5196475e3a8b7b8d' }}

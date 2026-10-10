@@ -17,6 +17,15 @@ RUN corepack enable && \
 FROM scratch AS package-export
 COPY --from=package-build /out/ /
 
+FROM package-build AS tracked-startup-proof
+ARG PRODUCT_SHA
+ENV PRODUCT_SHA=${PRODUCT_SHA}
+COPY tracked-startup-tests.patch tracked-startup-repair.patch tracked-startup-proof.mjs /qa/
+RUN node /qa/tracked-startup-proof.mjs
+
+FROM scratch AS tracked-startup-receipt
+COPY --from=tracked-startup-proof /qa/public/ /
+
 FROM ${NODE_IMAGE} AS gateway-runtime
 COPY --from=package-build /out/candidate.tgz /qa/candidate.tgz
 COPY --from=tailscale /tailscale /usr/local/bin/tailscale
