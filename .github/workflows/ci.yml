@@ -95,7 +95,7 @@ jobs:
           retention-days: 7
   pr167880-runtime-proof:
     name: Installed Gateway and real Tailscale runtime proof
-    if: ${{ github.repository == 'TheAngryPit/openclaw' && github.event_name == 'workflow_dispatch' && inputs.proof_kind == 'tailscale-runtime' && inputs.candidate_sha == '59d29a7c1683dbb33f25e35c5196475e3a8b7b8d' }}
+    if: ${{ github.repository == 'TheAngryPit/openclaw' && github.event_name == 'workflow_dispatch' && inputs.proof_kind == 'tailscale-runtime' && inputs.candidate_sha == 'babc598a971f9e05175bc185de8c2004f942a23a' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     permissions:
@@ -104,7 +104,7 @@ jobs:
       group: pr167880-isolated-runtime
       cancel-in-progress: false
     env:
-      QA_PRODUCT_SHA: 59d29a7c1683dbb33f25e35c5196475e3a8b7b8d
+      QA_PRODUCT_SHA: babc598a971f9e05175bc185de8c2004f942a23a
       QA_WORKFLOW_SHA: ${{ github.workflow_sha }}
       QA_PREFIX: pr167880-${{ github.run_id }}-${{ github.run_attempt }}
       QA_PROOF_MODE: ${{ inputs.live_proof_mode }}
@@ -146,7 +146,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: TheAngryPit/openclaw
-          ref: 59d29a7c1683dbb33f25e35c5196475e3a8b7b8d
+          ref: babc598a971f9e05175bc185de8c2004f942a23a
           persist-credentials: false
           path: product
       - name: Verify source pins and obtain checksum-pinned real Tailscale

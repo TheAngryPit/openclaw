@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 
-const EXPECTED_PRODUCT_SHA = "59d29a7c1683dbb33f25e35c5196475e3a8b7b8d";
+const EXPECTED_PRODUCT_SHA = "babc598a971f9e05175bc185de8c2004f942a23a";
 const NODE_UID = 1000;
 const GATEWAY_PORT = 18789;
 const PARKING_OBSERVE_MS = 10_000;
