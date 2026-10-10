@@ -22,6 +22,9 @@ const receipt = {
   baselineFailed: false,
   baselineExitOneInsteadOfZero: false,
   baselineFailureKind: "not-run",
+  baselineFailureType: "unknown",
+  baselineFailureFile: null,
+  baselineFailureLine: null,
   candidatePassed: false,
   candidateTestsPassed: 0,
   baselineDurationMs: 0,
@@ -106,6 +109,36 @@ try {
   receipt.baselineDurationMs = baseline.durationMs;
   receipt.baselineFailed = baseline.status === 1 && baseline.cases[0].status === "failed";
   const messages = baseline.cases[0].failureMessages.map(stripVTControlCharacters);
+  const knownTypes = [
+    "AssertionError",
+    "TailscaleBackendAuthenticationRequiredError",
+    "TypeError",
+    "ReferenceError",
+    "SyntaxError",
+    "Error",
+  ];
+  receipt.baselineFailureType =
+    knownTypes.find((type) => messages.some((message) => message.startsWith(type + ":"))) ??
+    "unknown";
+  for (const file of [
+    "run-loop-startup.test-support",
+    "run-loop.test-support",
+    "run-loop.test",
+    "promise",
+    "run-loop-startup",
+    "run-loop",
+    "tailscale-backend-ready",
+  ]) {
+    const pattern = new RegExp(file.replaceAll(".", "\\.") + "\\.(?:ts|js):(\\d+):");
+    const failureFrame = messages.join("\n").match(pattern);
+    if (!failureFrame) continue;
+    const line = Number(failureFrame[1]);
+    if (Number.isSafeInteger(line) && line > 0 && line < 10000) {
+      receipt.baselineFailureFile = file;
+      receipt.baselineFailureLine = line;
+      break;
+    }
+  }
   receipt.baselineExitOneInsteadOfZero = messages.some((message) =>
     /^AssertionError: tracked startup shutdown returned one instead of zero[:\n]/.test(message),
   );
