@@ -239,7 +239,13 @@ export function registerGatewayStartupFailureTests(
             exited,
             "Gateway exited before joining the cancelled tracked prerequisite waiter",
           );
-          await expect(exited).resolves.toBe(0);
+          const stopExitCode = await exited;
+          expect(
+            stopExitCode,
+            stopExitCode === 1
+              ? "tracked startup shutdown returned one instead of zero"
+              : "tracked startup shutdown exit code",
+          ).toBe(0);
           expect(statusExec).toHaveBeenCalledTimes(2);
           expect(onRestartStartupFailure).toHaveBeenCalledOnce();
           expect(start).toHaveBeenCalledOnce();
