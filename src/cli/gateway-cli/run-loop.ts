@@ -1298,6 +1298,9 @@ export async function runGatewayLoop(params: {
         }
         writeStabilityBundle("gateway.restart_startup_failed", err);
         restartRecovery.reportStartupFailure(err, isStartupRecoveryRetry);
+        if (canWaitForTailscaleServe) {
+          iterationStartupOperations.acknowledgeHandledFailure(err);
+        }
         if (!shuttingDown && !isStartupRecoveryRetry) {
           retryAfterStartupRecovery = (await restartRecovery.attempt(err)) && !shuttingDown;
         }

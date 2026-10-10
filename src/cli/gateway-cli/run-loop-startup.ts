@@ -149,11 +149,12 @@ export function createGatewayStartupOperations(): {
   close(): void;
   cancelledWith(error: unknown): boolean;
   failedWith(error: unknown): boolean;
+  acknowledgeHandledFailure(error: unknown): void;
   stopCompletion?: Promise<void>;
   drain(): Promise<void>;
 } {
   const scope = new AsyncWorkScope();
-  let failure: { error: unknown } | undefined;
+  const failures = new Set<unknown>();
   // A process-group stop can kill a child before its separate admission owner is cancelled.
   const cancelledWith = (error: unknown) =>
     scope.signal.aborted &&
@@ -169,7 +170,7 @@ export function createGatewayStartupOperations(): {
         return await operation(scope.signal);
       } catch (error) {
         if (!cancelledWith(error)) {
-          failure ??= { error };
+          failures.add(error);
         }
         throw error;
       }
@@ -179,13 +180,16 @@ export function createGatewayStartupOperations(): {
     run,
     close: () => scope.beginClose(),
     cancelledWith,
-    failedWith: (error: unknown) => failure !== undefined && failure.error === error,
+    failedWith: (error: unknown) => failures.has(error),
+    acknowledgeHandledFailure: (error: unknown) => {
+      failures.delete(error);
+    },
     async drain() {
       await scope.drain();
       // AsyncWorkScope joins descendants with allSettled; failed cleanup must
       // still make the accepted stop fail rather than certify a clean exit.
-      if (failure) {
-        throw failure.error;
+      if (failures.size > 0) {
+        throw failures.values().next().value;
       }
     },
   };
