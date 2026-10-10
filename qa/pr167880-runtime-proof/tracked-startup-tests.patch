@@ -1,5 +1,5 @@
 diff --git a/src/cli/gateway-cli/run-loop-startup.test-support.ts b/src/cli/gateway-cli/run-loop-startup.test-support.ts
-index f3aea8e1b99..56d1bdd1612 100644
+index f3aea8e1b99..01ed20e7f62 100644
 --- a/src/cli/gateway-cli/run-loop-startup.test-support.ts
 +++ b/src/cli/gateway-cli/run-loop-startup.test-support.ts
 @@ -26,6 +26,58 @@ export function registerGatewayStartupFailureTests(
@@ -173,7 +173,7 @@ index f3aea8e1b99..56d1bdd1612 100644
                info: vi.fn(),
                signal,
              });
-@@ -102,34 +199,61 @@ export function registerGatewayStartupFailureTests(
+@@ -102,34 +199,67 @@ export function registerGatewayStartupFailureTests(
            }
          });
          const loop = runGatewayLoop({ start, runtime, onRestartStartupFailure });
@@ -221,8 +221,15 @@ index f3aea8e1b99..56d1bdd1612 100644
 -            "Gateway exited before joining the cancelled Tailscale prerequisite waiter",
 +            "Gateway exited before joining the cancelled tracked prerequisite waiter",
            );
-           await expect(exited).resolves.toBe(0);
+-          await expect(exited).resolves.toBe(0);
 -          expect(statusExec).toHaveBeenCalledOnce();
++          const stopExitCode = await exited;
++          expect(
++            stopExitCode,
++            stopExitCode === 1
++              ? "tracked startup shutdown returned one instead of zero"
++              : "tracked startup shutdown exit code",
++          ).toBe(0);
 +          expect(statusExec).toHaveBeenCalledTimes(2);
            expect(onRestartStartupFailure).toHaveBeenCalledOnce();
            expect(start).toHaveBeenCalledOnce();
@@ -240,7 +247,7 @@ index f3aea8e1b99..56d1bdd1612 100644
              }
            } finally {
              statusExec.mockRestore();
-@@ -142,6 +266,10 @@ export function registerGatewayStartupFailureTests(
+@@ -142,6 +272,10 @@ export function registerGatewayStartupFailureTests(
          Object.defineProperty(process, "platform", originalPlatformDescriptor);
        }
      }
@@ -251,7 +258,7 @@ index f3aea8e1b99..56d1bdd1612 100644
    });
  
    it("parks supervised Serve startup after clean close and retries once after Running", async () => {
-@@ -374,94 +502,6 @@ export function registerGatewayStartupFailureTests(
+@@ -374,94 +508,6 @@ export function registerGatewayStartupFailureTests(
      }
    });
  

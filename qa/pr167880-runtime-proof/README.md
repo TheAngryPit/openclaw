@@ -20,7 +20,7 @@ Full mode requires the dedicated test-tailnet secret `TS_QA_AUTHKEY` plus `TS_QA
 
 ## Tracked-startup regression
 
-The separate `tailscale-tracked-regression` lane uses the same pinned builder and frozen baseline `59d29a7c1683dbb33f25e35c5196475e3a8b7b8d`. It verifies the three baseline source files by hash, applies the test-only overlay and requires the real prerequisite-waiter cancellation test to fail specifically with exit 1 instead of 0. It then applies the source-only repair overlay and requires that test plus six error-identity, cleanup and foreground controls to pass. Both variants use the same installed dependencies and separate module caches.
+The separate `tailscale-tracked-regression` lane uses the pinned dependency builder and frozen baseline `59d29a7c1683dbb33f25e35c5196475e3a8b7b8d`, without packaging an app for a unit test. It verifies the three baseline source files by hash, applies the test-only overlay and requires the real prerequisite-waiter cancellation test to fail specifically with exit 1 instead of 0. It then applies the source-only repair overlay and requires that test plus six error-identity, cleanup and foreground controls to pass. Both variants use the same installed dependencies and separate module caches. The workflow rejects incomplete proof and uploads the closed phase/failure-category receipt even on failure.
 
 This lane exports only a closed pass/count/duration receipt. Test output stays inside the disposable builder. The candidate is baseline plus the inspected repair overlay, not a published source revision or installed-runtime cancellation proof.
 
