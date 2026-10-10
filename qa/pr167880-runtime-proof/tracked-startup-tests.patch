@@ -1,5 +1,5 @@
 diff --git a/src/cli/gateway-cli/run-loop-startup.test-support.ts b/src/cli/gateway-cli/run-loop-startup.test-support.ts
-index f3aea8e1b99..01ed20e7f62 100644
+index f3aea8e1b99..3cf9e999620 100644
 --- a/src/cli/gateway-cli/run-loop-startup.test-support.ts
 +++ b/src/cli/gateway-cli/run-loop-startup.test-support.ts
 @@ -26,6 +26,58 @@ export function registerGatewayStartupFailureTests(
@@ -103,7 +103,7 @@ index f3aea8e1b99..01ed20e7f62 100644
 +            if (!startupOperation) {
 +              throw new Error("expected the run loop to provide tracked startup ownership");
 +            }
-+            const startupSettled = startupOperation(async (signal) => {
++            return await startupOperation(async (signal) => {
 +              try {
 +                await waitForTailscaleBackendReady({
 +                  ...statusCommand,
@@ -115,8 +115,8 @@ index f3aea8e1b99..01ed20e7f62 100644
 +                startupError = error;
 +                throw error;
 +              }
++              return createGatewayServer(close);
 +            });
-+            return createGatewayServer(close, startupSettled ?? Promise.resolve());
 +          });
          const { runtime, exited } = createRuntimeWithExitSignal();
 -        const recoveryStarted = createDeferredCore();
@@ -204,7 +204,7 @@ index f3aea8e1b99..01ed20e7f62 100644
 +            ["sudo", ["-n", "tailscale", "status", "--json"]],
 +          ]);
 +          expect(onRestartStartupFailure).toHaveBeenCalledOnce();
-+          expect(close).toHaveBeenCalledExactlyOnceWith({ reason: "gateway startup failed" });
++          expect(close).not.toHaveBeenCalled();
            captureSignal("SIGTERM")();
            shutdownRequested = true;
 +          await awaitGateBeforeSettlement(
@@ -233,7 +233,8 @@ index f3aea8e1b99..01ed20e7f62 100644
 +          expect(statusExec).toHaveBeenCalledTimes(2);
            expect(onRestartStartupFailure).toHaveBeenCalledOnce();
            expect(start).toHaveBeenCalledOnce();
-           expect(close).toHaveBeenCalledOnce();
+-          expect(close).toHaveBeenCalledOnce();
++          expect(close).not.toHaveBeenCalled();
            expect(releaseLock).toHaveBeenCalledOnce();
          } finally {
            try {
