@@ -14,6 +14,8 @@ The owning workflow is [CI](../../.github/workflows/ci.yml). It builds the candi
 
 The public pin receipt records the product/workflow SHA, immutable image IDs, installed package version and archive/CLI hashes, and observed Tailscale version and binary hashes. Public phase evidence is restricted to booleans, bounded durations, fixed statuses, and those validated pins. Tailnet names, addresses, status JSON, tags, Serve configuration, Gateway configuration, tokens, logs, keys, and daemon state are not public receipt fields. Diagnostic files in `private/` can contain sensitive runtime output and must never be uploaded.
 
+The installed-process check verifies supervisor custody: the exact container launch command, Node executable, working directory and systemd invocation must match. It recognizes either the installed launcher argv or the Gateway's exact `openclaw-gateway` process title, which replaces argv on Linux. A legitimate respawn parent may remain PID 1; this check does not claim PID 1 itself serves requests. Parking signals, listener checks and graceful shutdown remain independent required observations.
+
 Full mode requires the dedicated test-tailnet secret `TS_QA_AUTHKEY` plus `TS_QA_EXPECTED_DNS_SUFFIX` and `TS_QA_TAG` variables. The workflow rejects missing values before building images. The key is mounted only into the sidecar's private auth directory for the separate operator step; it is not passed to this controller or the Gateway container. Parking mode needs none of those values.
 
 ## Proof limits

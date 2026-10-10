@@ -874,15 +874,19 @@ async function candidateConfigCheck(context, role, names) {
   };
 }
 
-async function candidateProcessCheck(names) {
+async function candidateProcessCheck(names, invocationId) {
   const script = [
     "const fs=require('node:fs');",
-    "const args=fs.readFileSync('/proc/1/cmdline','utf8').split('\\0');",
-    "const ok=args.includes('/opt/openclaw/bin/openclaw')&&args.includes('gateway')&&args.includes('run');",
+    "const args=fs.readFileSync('/proc/1/cmdline','utf8').split('\\0').filter(Boolean);",
+    "const launcher=fs.realpathSync('/opt/openclaw/bin/openclaw');",
+    "const original=args.some(arg=>{try{return fs.realpathSync(arg)===launcher;}catch{return false;}})&&args.includes('gateway')&&args.includes('run');",
+    "const renamed=args.length===1&&args[0]==='openclaw-gateway';",
+    "const env=fs.readFileSync('/proc/1/environ','utf8').split('\\0');",
+    "const ok=(original||renamed)&&fs.realpathSync('/proc/1/exe')===fs.realpathSync(process.execPath)&&fs.realpathSync('/proc/1/cwd')==='/opt/openclaw'&&env.includes('INVOCATION_ID='+process.argv[1]);",
     "process.stdout.write(ok?'true':'false');",
     "process.exitCode=ok?0:4;",
   ].join(" ");
-  const result = await docker(["exec", names.gateway, "node", "-e", script], {
+  const result = await docker(["exec", names.gateway, "node", "-e", script, invocationId], {
     timeoutMs: 10_000,
     maxOutputBytes: 64 * 1024,
     acceptedExitCodes: [0, 4],
@@ -966,7 +970,12 @@ async function containerShape(context, role, names, invocationId) {
   const sidecarLabels = sidecar.Config?.Labels ?? {};
   const labels = config.Labels ?? {};
   const actualRole = role === "recovery" ? "parking" : role;
+  const launchArgs = gatewayDockerArgs(context, actualRole, names);
+  const expectedCommand = launchArgs.slice(launchArgs.indexOf(context.gatewayImage) + 1);
   const safe =
+    JSON.stringify(config.Entrypoint) === JSON.stringify(["/bin/sh"]) &&
+    JSON.stringify(config.Cmd) === JSON.stringify(expectedCommand) &&
+    config.WorkingDir === "/opt/openclaw" &&
     config.User === "1000:1000" &&
     inspected.Image === context.gatewayImage &&
     host.RestartPolicy?.Name === "no" &&
@@ -1115,7 +1124,7 @@ async function parking() {
     const pins = await runtimePins(context, names.gateway, names.sidecar);
     state.runtimePins = pins;
     const config = await candidateConfigCheck(context, "parking", names);
-    const processOwned = await candidateProcessCheck(names);
+    const processOwned = await candidateProcessCheck(names, invocationId);
     assert(processOwned, "installed-gateway-not-foreground");
     const initialServe = await serveConfig(names.sidecar);
     assert(countServeRoutes(initialServe) === 0, "parking-serve-route-present");
@@ -1137,7 +1146,7 @@ async function parking() {
     assert(countServeRoutes(afterServe) === 0, "parking-serve-route-appeared");
     const afterListener = await listenerIsAbsent(names);
     assert(afterListener.absent, "parking-gateway-listener-appeared");
-    const secondProcessOwned = await candidateProcessCheck(names);
+    const secondProcessOwned = await candidateProcessCheck(names, invocationId);
     assert(secondProcessOwned, "parking-gateway-process-missing");
 
     state.startedAtUtc = new Date(startedAt).toISOString();
@@ -1264,7 +1273,7 @@ async function recovery() {
       "recovery-unit-identity-changed",
     );
     const gatewayShape = await containerShape(context, "recovery", names, invocationId);
-    const processOwned = await candidateProcessCheck(names);
+    const processOwned = await candidateProcessCheck(names, invocationId);
     assert(processOwned, "recovery-installed-gateway-missing");
     const health = await waitForHttp(names, context.gatewayPort, "/healthz", BACKEND_TIMEOUT_MS);
     const startup = await waitForHttp(names, context.gatewayPort, "/startupz", BACKEND_TIMEOUT_MS);
@@ -1438,9 +1447,12 @@ async function startCancel() {
     state.invocationIds.cancel = service.invocationId;
     writeJsonPrivate(path.join(state.privateRoot, "state.json"), state);
     const shape = await containerShape(context, "cancel", names, service.invocationId);
-    assert(await candidateProcessCheck(names), "cancel-installed-gateway-missing");
     const parkingSignalObserved = await waitForParkingSignal(context, "cancel", names);
     assert(parkingSignalObserved, "cancel-parking-signal-missing");
+    assert(
+      await candidateProcessCheck(names, service.invocationId),
+      "cancel-installed-gateway-missing",
+    );
     const serve = await serveConfig(names.sidecar);
     assert(countServeRoutes(serve) === 0, "cancel-serve-route-present-before-stop");
     const initialListener = await listenerIsAbsent(names);
