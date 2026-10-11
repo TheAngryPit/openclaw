@@ -1,0 +1,189 @@
+name: PR 163765 full smoke profile proof
+
+on:
+  push:
+    branches:
+      - qa/pr163765-restart-proof-20261011
+    paths:
+      - .github/workflows/qa-pr163765-full-profile-proof.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qa-pr163765-full-profile-proof-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  smoke-profile:
+    if: >-
+      github.repository == 'TheAngryPit/openclaw' &&
+      github.ref == 'refs/heads/qa/pr163765-restart-proof-20261011'
+    name: Original smoke profile ${{ matrix.part }} of 6
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - part: 2
+            profile_part: profile-2
+            profile_slug: profile-2-of-6
+          - part: 3
+            profile_part: profile-3
+            profile_slug: profile-3-of-6
+    steps:
+      - name: Checkout QA branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Verify QA branch contains only this workflow
+        id: verify_qa
+        env:
+          EXPECTED_PARENT: e1cc4b847b41831747cf0add3eb4f4d578172b11
+          EXPECTED_WORKFLOW: .github/workflows/qa-pr163765-full-profile-proof.yml
+          EXPECTED_REF: refs/heads/qa/pr163765-restart-proof-20261011
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$REPOSITORY" == "TheAngryPit/openclaw" ]]
+          [[ "$REF" == "$EXPECTED_REF" ]]
+          [[ "$(git rev-parse HEAD)" == "$SHA" ]]
+          [[ "$(git rev-parse HEAD^1)" == "$EXPECTED_PARENT" ]]
+          mapfile -t changed < <(git diff-tree --no-commit-id --name-only -r HEAD)
+          [[ "${#changed[@]}" -eq 1 && "${changed[0]}" == "$EXPECTED_WORKFLOW" ]]
+          echo "qa_head=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout pinned product source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: TheAngryPit/openclaw
+          ref: 0617f6b215b70c292d5928872360b28a8d469b9d
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify product source pin
+        env:
+          EXPECTED_PRODUCT_SHA: 0617f6b215b70c292d5928872360b28a8d469b9d
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_PRODUCT_SHA" ]]
+          echo "product_sha=$EXPECTED_PRODUCT_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Node environment
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.21.0"
+          cache-mode: off
+          install-bun: "false"
+          install-deps: "true"
+          frozen-lockfile: "true"
+          dependency-cache: "false"
+          node-compile-cache: "false"
+
+      - name: Build QA smoke runtime
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: OPENCLAW_BUILD_PRIVATE_QA=1 pnpm build qaRuntime
+
+      - name: Extract exact pinned CI profile step
+        id: extract_profile
+        env:
+          PROFILE_PART: ${{ matrix.profile_part }}
+          PROFILE_PART_COUNT: "6"
+          PROFILE_PART_SLUG: ${{ matrix.profile_slug }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'EOF'
+          import { writeFileSync, readFileSync } from "node:fs";
+          import { isMap, isSeq, parseDocument } from "yaml";
+
+          const workflow = readFileSync(".github/workflows/ci.yml", "utf8");
+          const document = parseDocument(workflow, { uniqueKeys: true });
+          if (document.errors.length > 0) {
+            throw new Error("Pinned CI workflow did not parse cleanly.");
+          }
+          const steps = document.getIn(["jobs", "qa-smoke-ci-profile", "steps"], true);
+          if (!isSeq(steps)) {
+            throw new Error("Pinned CI workflow has no QA smoke profile step sequence.");
+          }
+          const matches = steps.items.filter(
+            (step) => isMap(step) && step.get("name", true)?.value === "Run smoke profile part",
+          );
+          if (matches.length !== 1) {
+            throw new Error("Pinned CI workflow must contain exactly one smoke profile run step.");
+          }
+          const run = matches[0].get("run", true)?.value;
+          if (typeof run !== "string" || run.length === 0) {
+            throw new Error("Pinned CI smoke profile step has no shell script.");
+          }
+          const scriptPath = `${process.env.RUNNER_TEMP}/pr163765-smoke-profile-part.sh`;
+          writeFileSync(scriptPath, run, { encoding: "utf8", mode: 0o600 });
+          EOF
+          chmod 600 "$RUNNER_TEMP/pr163765-smoke-profile-part.sh"
+          script_sha256="$(sha256sum "$RUNNER_TEMP/pr163765-smoke-profile-part.sh" | cut -d ' ' -f 1)"
+          printf '%s\n' "$script_sha256" | tee "$RUNNER_TEMP/profile-script.sha256"
+          echo "script_sha256=$script_sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Run original smoke profile part
+        id: profile
+        env:
+          PROFILE_PART: ${{ matrix.profile_part }}
+          PROFILE_PART_COUNT: "6"
+          PROFILE_PART_SLUG: ${{ matrix.profile_slug }}
+          OPENCLAW_QA_SUITE_WORKER_START_STAGGER_MS: "1500"
+          OPENCLAW_BUILD_PRIVATE_QA: "1"
+          OPENCLAW_ENABLE_PRIVATE_QA_CLI: "1"
+          OPENCLAW_DISABLE_BUNDLED_PLUGINS: "0"
+          OPENCLAW_QA_REDACT_PUBLIC_METADATA: "1"
+          OPENCLAW_QA_TRANSPORT_READY_TIMEOUT_MS: "180000"
+          NODE_OPTIONS: --max-old-space-size=16384
+        shell: bash
+        run: bash "$RUNNER_TEMP/pr163765-smoke-profile-part.sh"
+
+      - name: Verify source remained pristine and write receipt
+        if: always()
+        env:
+          EXPECTED_PRODUCT_SHA: 0617f6b215b70c292d5928872360b28a8d469b9d
+          QA_HEAD: ${{ steps.verify_qa.outputs.qa_head }}
+          PROFILE_PART: ${{ matrix.profile_part }}
+          PROFILE_PART_COUNT: "6"
+          PROFILE_PART_SLUG: ${{ matrix.profile_slug }}
+          PROFILE_OUTCOME: ${{ steps.profile.outcome }}
+          SCRIPT_SHA256: ${{ steps.extract_profile.outputs.script_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_dir=".artifacts/qa-e2e/smoke-ci-profile-${PROFILE_PART_SLUG}"
+          mkdir -p "$output_dir"
+          source_clean=true
+          if [[ "$(git rev-parse HEAD)" != "$EXPECTED_PRODUCT_SHA" ]] || \
+            ! git diff --quiet "$EXPECTED_PRODUCT_SHA" -- || ! git diff --cached --quiet "$EXPECTED_PRODUCT_SHA" --; then
+            source_clean=false
+          fi
+          printf '{\n  "qaHead": "%s",\n  "productSha": "%s",\n  "profilePart": "%s",\n  "profilePartCount": %s,\n  "profilePartSlug": "%s",\n  "profileStepOutcome": "%s",\n  "profileStepScriptSha256": "%s",\n  "sourceClean": %s,\n  "diagnosticOverlay": false\n}\n' \
+            "$QA_HEAD" "$EXPECTED_PRODUCT_SHA" "$PROFILE_PART" "$PROFILE_PART_COUNT" \
+            "$PROFILE_PART_SLUG" "$PROFILE_OUTCOME" "$SCRIPT_SHA256" "$source_clean" \
+            > "$output_dir/root-proof-receipt.json"
+          if [[ "$source_clean" != true ]]; then
+            echo "::error::Pinned product source changed during the QA run."
+            exit 1
+          fi
+
+      - name: Upload smoke profile evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr163765-full-profile-${{ matrix.profile_slug }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/qa-e2e/smoke-ci-profile-${{ matrix.profile_slug }}/
+          if-no-files-found: warn
+          retention-days: 7
