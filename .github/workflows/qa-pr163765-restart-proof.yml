@@ -1,0 +1,114 @@
+name: PR 163765 restart-lock diagnostic
+
+on:
+  push:
+    branches:
+      - qa/pr163765-restart-proof-20261011
+    paths:
+      - .github/workflows/qa-pr163765-restart-proof.yml
+      - src/cli/gateway-cli/run-loop.ts
+      - src/cli/gateway-cli/run-loop.test.ts
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr163765-restart-lock-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  restart-lock-diagnostic:
+    name: Exact synthetic restart cases
+    if: github.repository == 'TheAngryPit/openclaw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout exact diagnostic branch head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Verify exact source pin and diagnostic-only overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_pin=0617f6b215b70c292d5928872360b28a8d469b9d
+          head="$(git rev-parse HEAD)"
+          parent="$(git rev-parse HEAD^)"
+          if [[ "$parent" != "$source_pin" ]]; then
+            echo "::error::Diagnostic commit parent does not match pinned product source"
+            exit 1
+          fi
+          expected_paths="$({
+            printf '%s\n' \
+              .github/workflows/qa-pr163765-restart-proof.yml \
+              src/cli/gateway-cli/run-loop.test.ts \
+              src/cli/gateway-cli/run-loop.ts
+          } | sort)"
+          actual_paths="$(git diff --name-only "$source_pin" "$head" | sort)"
+          if [[ "$actual_paths" != "$expected_paths" ]]; then
+            echo "::error::Diagnostic branch contains paths outside the reviewed overlay"
+            printf '%s\n' "$actual_paths"
+            exit 1
+          fi
+          git diff --check "$source_pin" "$head"
+          {
+            printf 'Source pin: %s\nDiagnostic overlay head: %s\nChanged paths: %s\n' "$source_pin" "$head" "$actual_paths"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up pinned Node and pnpm dependencies
+        uses: ./.github/actions/setup-node-env
+        with:
+          node-version: "24.21.0"
+          cache-mode: off
+          install-bun: "false"
+          install-deps: "true"
+          frozen-lockfile: "true"
+
+      - name: Verify bounded cause diagnostic
+        run: node scripts/run-vitest.mjs src/cli/gateway-cli/run-loop.test.ts
+
+      - name: Build smoke QA runtime
+        env:
+          OPENCLAW_BUILD_PRIVATE_QA: "1"
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: pnpm build qaRuntime
+
+      - name: Run only the two failed synthetic smoke cases
+        env:
+          OPENCLAW_BUILD_PRIVATE_QA: "1"
+          OPENCLAW_ENABLE_PRIVATE_QA_CLI: "1"
+          OPENCLAW_DISABLE_BUNDLED_PLUGINS: "0"
+          OPENCLAW_QA_REDACT_PUBLIC_METADATA: "1"
+          OPENCLAW_QA_TRANSPORT_READY_TIMEOUT_MS: "180000"
+          NODE_OPTIONS: --max-old-space-size=16384
+        shell: bash
+        run: |
+          set -euo pipefail
+          output_dir=".artifacts/qa-e2e/pr163765-restart-lock-diagnostic"
+          result=0
+          for scenario_id in \
+            subagent-completion-direct-fallback \
+            subagent-empty-completion-recovery; do
+            timeout --signal=TERM --kill-after=15s 10m node openclaw.mjs qa run \
+              --repo-root . \
+              --qa-profile smoke-ci \
+              --concurrency 10 \
+              --output-dir "$output_dir/$scenario_id" \
+              --scenario "$scenario_id" || result=$?
+          done
+          exit "$result"
+
+      - name: Verify tracked sources remain unchanged
+        if: always()
+        run: git diff --exit-code HEAD
+
+      - name: Upload redacted synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr163765-restart-lock-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .artifacts/qa-e2e/pr163765-restart-lock-diagnostic/
+          if-no-files-found: warn
+          retention-days: 7

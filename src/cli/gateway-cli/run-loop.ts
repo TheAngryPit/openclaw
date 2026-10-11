@@ -5,7 +5,12 @@ import * as restartTrace from "../../gateway/restart-trace.js";
 import { GatewayStartupCleanupError } from "../../gateway/server-shutdown.js";
 import type { startGatewayServer } from "../../gateway/server.js";
 import type { GatewayInstallationReplacement } from "../../gateway/stale-install.js";
-import { formatErrorMessage } from "../../infra/errors.js";
+import {
+  extractErrorCode,
+  formatErrorMessage,
+  readErrorCause,
+  readErrorName,
+} from "../../infra/errors.js";
 import type { GatewayBootLifecycleCompletion } from "../../infra/gateway-boot-lifecycle.js";
 import { acquireGatewayLock } from "../../infra/gateway-lock.js";
 import { consumeGatewaySuspendHandoff } from "../../infra/gateway-suspend-coordinator.js";
@@ -57,6 +62,112 @@ import {
 import { GatewayUpdateSuccessor } from "./update-successor.js";
 const gatewayLog = createSubsystemLogger("gateway");
 const HARD_EXIT_WATCHDOG_GRACE_MS = 2_000;
+
+const RESTART_DIAGNOSTIC_ERROR_NAMES = new Set([
+  "Error",
+  "TypeError",
+  "AggregateError",
+  "GatewayLockError",
+  "GatewayLockNamespaceError",
+  "GatewayStateOwnerContentionError",
+  "FsSafeError",
+  "OpenClawStateLeaseError",
+  "OpenClawStateLeaseAcquisitionError",
+]);
+const RESTART_DIAGNOSTIC_ERROR_CODES = new Set([
+  "EACCES",
+  "EBUSY",
+  "EDQUOT",
+  "EEXIST",
+  "EIO",
+  "EMFILE",
+  "ENFILE",
+  "ENOENT",
+  "ENOSPC",
+  "ENOTDIR",
+  "EPERM",
+  "EROFS",
+  "file_lock_timeout",
+  "file_lock_stale",
+  "path-mismatch",
+  "ERR_SQLITE_ERROR",
+  "SQLITE_BUSY",
+  "SQLITE_LOCKED",
+  "SQLITE_IOERR",
+  "SQLITE_CANTOPEN",
+  "OPENCLAW_STATE_LEASE_ABORTED",
+  "OPENCLAW_STATE_LEASE_HELD",
+  "OPENCLAW_STATE_LEASE_INVALID_INPUT",
+  "OPENCLAW_STATE_LEASE_LOST",
+  "OPENCLAW_STATE_LEASE_STORAGE_FAILED",
+]);
+const RESTART_DIAGNOSTIC_ERROR_REASONS = new Map([
+  ["Async work scope is closed", "async_work_scope_closed"],
+]);
+const MAX_RESTART_DIAGNOSTIC_CAUSES = 4;
+const UNREADABLE_ERROR_CAUSE = Symbol("unreadable-error-cause");
+
+function formatErrorCauseTypes(error: unknown): string | undefined {
+  const details: string[] = [];
+  const seen = new Set<unknown>([error]);
+  const readCause = (value: unknown): unknown | typeof UNREADABLE_ERROR_CAUSE => {
+    try {
+      return readErrorCause(value);
+    } catch {
+      return UNREADABLE_ERROR_CAUSE;
+    }
+  };
+  let candidate = readCause(error);
+  while (
+    candidate !== undefined &&
+    candidate !== null &&
+    candidate !== UNREADABLE_ERROR_CAUSE &&
+    details.length < MAX_RESTART_DIAGNOSTIC_CAUSES &&
+    !seen.has(candidate)
+  ) {
+    seen.add(candidate);
+    let name = "unknown";
+    try {
+      const observed = readErrorName(candidate);
+      if (RESTART_DIAGNOSTIC_ERROR_NAMES.has(observed)) {
+        name = observed;
+      } else if (!observed && candidate instanceof Error) {
+        name = "Error";
+      }
+    } catch {
+      name = "unreadable";
+    }
+    let code: string | undefined;
+    try {
+      const observed = extractErrorCode(candidate);
+      if (observed && RESTART_DIAGNOSTIC_ERROR_CODES.has(observed)) {
+        code = observed;
+      }
+    } catch {
+      // Unknown metadata is omitted; diagnostics must never replace loop failure handling.
+    }
+    let reason: string | undefined;
+    try {
+      if (candidate && typeof candidate === "object" && "message" in candidate) {
+        const message = (candidate as { message?: unknown }).message;
+        if (typeof message === "string") {
+          reason = RESTART_DIAGNOSTIC_ERROR_REASONS.get(message);
+        }
+      }
+    } catch {
+      // Only exact known public messages are labeled; arbitrary or unreadable text is omitted.
+    }
+    const labels = [code, reason].filter((label): label is string => label !== undefined);
+    details.push(labels.length > 0 ? `${name}[${labels.join(",")}]` : name);
+    if (details.length < MAX_RESTART_DIAGNOSTIC_CAUSES) {
+      candidate = readCause(candidate);
+    }
+  }
+  if (candidate === UNREADABLE_ERROR_CAUSE && details.length < MAX_RESTART_DIAGNOSTIC_CAUSES) {
+    details.push("unreadable");
+  }
+  return details.length > 0 ? details.join(" -> ") : undefined;
+}
 
 export async function runGatewayLoop(params: {
   start: (
@@ -299,8 +410,11 @@ export async function runGatewayLoop(params: {
           if (activeRestartRequest !== restartRequest) {
             continue;
           }
+          const causeTypes = formatErrorCauseTypes(err);
+          const causeDiagnostic = causeTypes ? ` [cause types: ${causeTypes}]` : "";
           gatewayLog.error(
-            `failed to reacquire gateway lock for in-process restart: ${String(err)}`,
+            `failed to reacquire gateway lock for in-process restart: ${String(err)}` +
+              causeDiagnostic,
           );
           finishLoop(1);
           return;

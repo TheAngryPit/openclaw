@@ -1112,33 +1112,125 @@ describe("runGatewayLoop", () => {
     },
   );
 
-  it("exits when lock reacquire fails during in-process restart fallback", async () => {
-    peekGatewayRestartReason.mockReturnValue(undefined);
-
-    await withIsolatedSignals(async ({ captureSignal }) => {
-      const lockRelease = vi.fn(async () => {});
-      acquireGatewayLock
-        .mockResolvedValueOnce({
-          release: lockRelease,
-        })
-        .mockRejectedValueOnce(new Error("lock timeout"));
-
-      restartGatewayProcessWithFreshPid.mockReturnValueOnce({
-        mode: "disabled",
+  const restartLockFailureCases = (() => {
+    let deepCauseReads = 0;
+    const makeDeepCause = (depth: number): Error => {
+      const error = new Error(`private cause text ${depth}`);
+      Object.defineProperties(error, {
+        name: { configurable: true, value: `PrivateGeneratedError${depth}` },
+        cause: {
+          configurable: true,
+          get() {
+            deepCauseReads += 1;
+            return depth < 8 ? makeDeepCause(depth + 1) : undefined;
+          },
+        },
       });
-
-      const { start, exited } = await createSignaledLoopHarness();
-      const restartSignal = captureSignal("SIGUSR2");
-      restartSignal();
-
-      await expect(exited).resolves.toBe(1);
-      expect(acquireGatewayLock).toHaveBeenCalledTimes(2);
-      expect(start).toHaveBeenCalledTimes(1);
-      expect(gatewayLog.error).toHaveBeenCalledWith(
-        "failed to reacquire gateway lock for in-process restart: Error: lock timeout",
-      );
+      return error;
+    };
+    const unreadableMetadata = new Error("private error metadata");
+    Object.defineProperties(unreadableMetadata, {
+      name: {
+        configurable: true,
+        get() {
+          throw new Error("private name getter");
+        },
+      },
+      code: {
+        configurable: true,
+        get() {
+          throw new Error("private code getter");
+        },
+      },
     });
-  });
+    const unknownMetadata = Object.assign(new Error("private error text"), {
+      name: "PrivateCustomerIdentifier",
+      code: "PRIVATE_INSTALL_PATH_47",
+    });
+    const boundedCause = makeDeepCause(0);
+    return [
+      {
+        name: "allowlisted filesystem code",
+        cause: Object.assign(new Error("private state path"), { code: "EACCES" }),
+        expectedCauses: "Error[EACCES]",
+        privateValues: ["private state path"],
+        verifyBoundedTraversal: undefined,
+      },
+      {
+        name: "known public reason is labeled without exposing message text",
+        cause: new Error("Async work scope is closed"),
+        expectedCauses: "Error[async_work_scope_closed]",
+        privateValues: ["Async work scope is closed"],
+        verifyBoundedTraversal: undefined,
+      },
+      {
+        name: "unknown names and codes are omitted",
+        cause: unknownMetadata,
+        expectedCauses: "unknown",
+        privateValues: [
+          "PrivateCustomerIdentifier",
+          "PRIVATE_INSTALL_PATH_47",
+          "private error text",
+        ],
+        verifyBoundedTraversal: undefined,
+      },
+      {
+        name: "throwing metadata getters do not suppress loop exit",
+        cause: unreadableMetadata,
+        expectedCauses: "unreadable",
+        privateValues: ["private error metadata", "private name getter", "private code getter"],
+        verifyBoundedTraversal: undefined,
+      },
+      {
+        name: "cause traversal is bounded",
+        cause: boundedCause,
+        expectedCauses: "unknown -> unknown -> unknown -> unknown",
+        privateValues: ["private cause text"],
+        verifyBoundedTraversal: () => expect(deepCauseReads).toBe(3),
+      },
+    ] as const;
+  })();
+
+  it.each(restartLockFailureCases)(
+    "exits when lock reacquire fails during in-process restart fallback: $name",
+    async ({ cause, expectedCauses, privateValues, verifyBoundedTraversal }) => {
+      peekGatewayRestartReason.mockReturnValue(undefined);
+
+      await withIsolatedSignals(async ({ captureSignal }) => {
+        const lockRelease = vi.fn(async () => {});
+        const lockFailure = Object.assign(new Error("failed to acquire gateway state ownership"), {
+          name: "GatewayLockError",
+          cause,
+        });
+        acquireGatewayLock
+          .mockResolvedValueOnce({
+            release: lockRelease,
+          })
+          .mockRejectedValueOnce(lockFailure);
+
+        restartGatewayProcessWithFreshPid.mockReturnValueOnce({
+          mode: "disabled",
+        });
+
+        const { start, exited } = await createSignaledLoopHarness();
+        const restartSignal = captureSignal("SIGUSR2");
+        restartSignal();
+
+        await expect(exited).resolves.toBe(1);
+        expect(acquireGatewayLock).toHaveBeenCalledTimes(2);
+        expect(start).toHaveBeenCalledTimes(1);
+        expect(gatewayLog.error).toHaveBeenCalledWith(
+          "failed to reacquire gateway lock for in-process restart: GatewayLockError: failed to acquire gateway state ownership " +
+            `[cause types: ${expectedCauses}]`,
+        );
+        const diagnostic = gatewayLog.error.mock.calls.flat().join("\n");
+        for (const privateValue of privateValues) {
+          expect(diagnostic).not.toContain(privateValue);
+        }
+        verifyBoundedTraversal?.();
+      });
+    },
+  );
 
   registerUpdateRespawnProgressTests(fixtures);
 
