@@ -97,6 +97,14 @@ final class NativeGatewayWebSocketFixture: @unchecked Sendable {
     private var connectAuth: [ConnectAuth] = []
     private var connectDeviceIDs: [String?] = []
     private var capturedRPCs: [CapturedRPC] = []
+    private struct RPCWaiter {
+        let method: String
+        let afterIndex: Int
+        let continuation: AsyncThrowingStream<Int, Error>.Continuation
+        let timeout: DispatchWorkItem
+    }
+
+    private var rpcWaiters: [UUID: RPCWaiter] = [:]
     private var pendingManualRPCIndices = Set<Int>()
     private var nextConnectionIndex = 0
     private var stopped = false
@@ -239,16 +247,47 @@ final class NativeGatewayWebSocketFixture: @unchecked Sendable {
     }
 
     func waitForRPC(method: String, afterIndex: Int = -1) async throws -> CapturedRPC {
-        let deadline = ContinuousClock.now + .seconds(5)
-        while ContinuousClock.now < deadline {
-            if let rpc = self.queue.sync(execute: {
-                self.capturedRPCs.first(where: { $0.method == method && $0.index > afterIndex })
-            }) {
-                return rpc
-            }
-            try await Task.sleep(for: .milliseconds(10))
+        try Task.checkCancellation()
+        let id = UUID()
+        let (stream, continuation) = AsyncThrowingStream<Int, Error>.makeStream()
+        continuation.onTermination = { [weak self] _ in
+            guard let self else { return }
+            self.queue.async { _ = self.removeRPCWaiter(id) }
         }
-        throw URLError(.timedOut)
+        self.queue.sync {
+            if self.stopped {
+                continuation.finish(throwing: CancellationError())
+            } else if let rpc = self.capturedRPCs.first(where: {
+                $0.method == method && $0.index > afterIndex
+            }) {
+                continuation.yield(rpc.index)
+                continuation.finish()
+            } else {
+                let timeout = DispatchWorkItem { [weak self] in
+                    self?.removeRPCWaiter(id)?.continuation.finish(throwing: URLError(.timedOut))
+                }
+                self.rpcWaiters[id] = RPCWaiter(
+                    method: method,
+                    afterIndex: afterIndex,
+                    continuation: continuation,
+                    timeout: timeout)
+                self.queue.asyncAfter(deadline: .now() + 5, execute: timeout)
+            }
+        }
+        defer {
+            continuation.finish()
+            self.queue.sync { _ = self.removeRPCWaiter(id) }
+        }
+        var iterator = stream.makeAsyncIterator()
+        guard let index = try await iterator.next() else { throw CancellationError() }
+        try Task.checkCancellation()
+        return self.queue.sync { self.capturedRPCs[index] }
+    }
+
+    private func removeRPCWaiter(_ id: UUID) -> RPCWaiter? {
+        guard let waiter = self.rpcWaiters.removeValue(forKey: id) else { return nil }
+        waiter.timeout.cancel()
+        return waiter
     }
 
     @discardableResult
@@ -282,6 +321,9 @@ final class NativeGatewayWebSocketFixture: @unchecked Sendable {
             guard !self.stopped else { return }
             self.stopped = true
             self.listener.cancel()
+            for id in Array(self.rpcWaiters.keys) {
+                self.removeRPCWaiter(id)?.continuation.finish(throwing: CancellationError())
+            }
             for index in Array(self.clients.keys) {
                 self.close(index)
             }
@@ -519,6 +561,11 @@ final class NativeGatewayWebSocketFixture: @unchecked Sendable {
         self.capturedRPCs.append(rpc)
         if self.manualResponseMethods.contains(method) {
             self.pendingManualRPCIndices.insert(rpc.index)
+        }
+        for (id, waiter) in self.rpcWaiters where waiter.method == method && rpc.index > waiter.afterIndex {
+            _ = self.removeRPCWaiter(id)
+            waiter.continuation.yield(rpc.index)
+            waiter.continuation.finish()
         }
     }
 
