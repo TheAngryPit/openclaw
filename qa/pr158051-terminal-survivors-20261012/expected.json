@@ -1,0 +1,131 @@
+{
+  "sourceSha": "0dd36bb2b48e09650723414a5626ab96327b5ad6",
+  "sourceParent": "28bc2cf00eb237ffafa0237c2bbe95e2167a74d9",
+  "bundle": "OpenClawTests",
+  "suite": "TerminalHubScreenTests",
+  "cases": [
+    "TerminalHubScreenTests/terminal URL flips scheme and preserves the Control UI base path()",
+    "TerminalHubScreenTests/terminal URL uses plain HTTP for insecure endpoints()",
+    "TerminalHubScreenTests/auth user script projects only the accepted legacy credential()",
+    "TerminalHubScreenTests/auth user script canonicalizes an explicit default port()",
+    "TerminalHubScreenTests/auth user script does not export stored identity grants or configured candidates()",
+    "TerminalHubScreenTests/auth user script omits an empty-scope stored grant and candidates()",
+    "TerminalHubScreenTests/auth user script omits stored device auth and configured password()",
+    "TerminalHubScreenTests/web content identity changes with stored operator token()",
+    "TerminalHubScreenTests/web content identity changes with the accepted TLS pin()",
+    "TerminalHubScreenTests/authenticated Control UI origin rejects authority changes()",
+    "TerminalHubScreenTests/authenticated Control UI canonicalizes IPv6 authorities()",
+    "TerminalHubScreenTests/authenticated Control UI navigation keeps the main frame on its origin()",
+    "TerminalHubScreenTests/authenticated dashboard navigation cannot leave its document scope()",
+    "TerminalHubScreenTests/authenticated Control UI TLS authority uses the normalized page authority()",
+    "TerminalHubScreenTests/auth user script opts in without projecting configured credentials()",
+    "TerminalHubScreenTests/authenticated Control UI follows the resolved app appearance()"
+  ],
+  "inputs": [
+    {
+      "path": "apps/ios/Tests/TerminalHubScreenTests.swift",
+      "sha256": "a2fb1d5d0ad9a4d2f7102feb8c8efa13929becd89649ae4687833aa8a04b7a3a",
+      "blob": "254368ba6b9691560d2ed86f5efe0a176d8eea55"
+    },
+    {
+      "path": "apps/ios/Sources/Web/ControlUIHubScreen.swift",
+      "sha256": "420bf833853832a5ee55246fc9bf51c27cda3061312b3c2befa4774a91abd95c",
+      "blob": "74edeec0f0491afd5a7ec8d2bda0d53565ac80bd"
+    },
+    {
+      "path": "apps/ios/Sources/Web/AuthenticatedControlUIWebView.swift",
+      "sha256": "83a43f75f3169d9bc456986da6d22e93125a4a56ceae6e260d22bdc719b35b51",
+      "blob": "1ffe26b3a38b421969df36b227b01137a70ae8e1"
+    },
+    {
+      "path": "apps/ios/Sources/OpenClawApp.swift",
+      "sha256": "ab71c681daf3d812a46161d529b5b67e283851dc6f9450f93efaebf50bf44107",
+      "blob": "26179e920c5eeeb3d6a3646cfaf86a2878bf4c14"
+    },
+    {
+      "path": "apps/ios/project.yml",
+      "sha256": "ae6cf74ab36111cc27f998d4f37467714efc17768e8dcd685dff68dfdab63402",
+      "blob": "68b0a97bdda756a9f9bbb5935c3cf8f7c52779e2"
+    },
+    {
+      "path": "apps/ios/Tests/Info.plist",
+      "sha256": "73491e734944300a2a3caf8c20299b33d828b6219216dff5654d36cad9fef9bb",
+      "blob": "060fe390b39ca27f05993bfbb8d3acda8a3f13e7"
+    },
+    {
+      "path": "apps/shared/OpenClawKit/Tests/OpenClawKitTests/NativeGatewayWebSocketFixture.swift",
+      "sha256": "07fdb37d78ef755c6ba308405a8a3d02b2c815de202972bfe0f195d569bf55af",
+      "blob": "a4f4e86468b146c360457636bca7492604c9c433"
+    },
+    {
+      "path": ".github/actions/setup-node-env/action.yml",
+      "sha256": "abae44122904a10b863de68f56cc9ebe67a667e5a4912cb0aa52a0412f2d6047",
+      "blob": "f6bc9068143d451c62acba4ee037f17924efe641"
+    },
+    {
+      "path": "scripts/lib/swift-toolchain.sh",
+      "sha256": "965da7c341a2c5778666dcfb65650e215fd01f37aa45ccf3e939ceb8884c790d",
+      "blob": "ba86111931391eee2017c52e62d60ff9fe536e25"
+    },
+    {
+      "path": "scripts/prepare-apple-mermaid.mjs",
+      "sha256": "06e816d4049823bbdcd81b02265e8ba4514bdd0139dbf5579e909d2298c2a5e3",
+      "blob": "ff17afb69dcc01f78d6100694dd592c603160901"
+    },
+    {
+      "path": "scripts/prepare-native-protocol.mjs",
+      "sha256": "0a57f0b7b517eed5a1679d3cd480416bb1f41ee6be133c5c7ee1970c174659b1",
+      "blob": "e43e9fc4db04f5be686c5d3a41e21cbc2dfdd9f8"
+    },
+    {
+      "path": "scripts/native-protocol-inputs.json",
+      "sha256": "c05cf550ae8192ba7dbe86551f8d2ef02d246f6a5848bb43669eb3139c6fac9f",
+      "blob": "affbb9950a674b582bab4c6dc1071439355a916f"
+    },
+    {
+      "path": "scripts/ci-xcodebuild.py",
+      "sha256": "f81d834963ed0bd6b0417643c73a404319934a4a4e041c5425095fa775b557b9",
+      "blob": "dbc850180373ee2b34b2e0b0b7ad57c11802b537"
+    },
+    {
+      "path": "scripts/install-swift-tools.sh",
+      "sha256": "c30055d7c5b3b8e844f2d8d5f1ce52805f34ff41b4219f27fd72a054d7edd932",
+      "blob": "8d3cbd6da12956081a1f7cec40f13f70aee5c3c3"
+    },
+    {
+      "path": "scripts/install-xcodegen.sh",
+      "sha256": "4f92e7c3bde37e97540f16558b423b5224f8392347698f4375a0586da746ab6b",
+      "blob": "76e7533b5007d7c7e42c5cc518f68783bc5de492"
+    },
+    {
+      "path": "scripts/install-simslim.sh",
+      "sha256": "e1b203c828e81010b4a3ae14ea1ae257cc9dcaa65a8f19830b6fb25762ac4b2f",
+      "blob": "0208fc10f4eb4f4aa979be33ff45801fcfe6bf32"
+    },
+    {
+      "path": "scripts/ios-simulator-prepare.sh",
+      "sha256": "39f7244350c5ab334eebaf6507c2337044ff051b9e83fd6efb9db7e270b27f33",
+      "blob": "7be67ac6ce780847c809e720ce94be78ef7bfdba"
+    },
+    {
+      "path": "scripts/ios-write-swift-filelist.mts",
+      "sha256": "e72717cfb218e70e4825a86da74d6108c955aca3e764fd3cc001c68ec29e1ddb",
+      "blob": "5f16241bbb6d7858743696ef53e8c0531d35ecc5"
+    },
+    {
+      "path": "scripts/ios-generate-test-tls-identity.sh",
+      "sha256": "b68f7ba68b6ace8b9cac9afe8c8af3d6677918d77d063b770a8ad95849a85acc",
+      "blob": "5d05b5b481f7db5dd2857b18e392c4c4b90113a0"
+    },
+    {
+      "path": "pnpm-lock.yaml",
+      "sha256": "bbc076a49308f5817ba6772c1001cb41e1adb8f6480693ef3ed5adc6f4954f97",
+      "blob": "b03e3f38a5217354d538273a3466db482a73260f"
+    },
+    {
+      "path": "package.json",
+      "sha256": "cb7ab9559113e0a23b01edc7c8afa7c4eafca9a94f583857381a880e82bfc7a5",
+      "blob": "6e9fba39fecfa35f120c80906f5333e5fc742290"
+    }
+  ]
+}
