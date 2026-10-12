@@ -23,6 +23,7 @@ import type {
   SessionActorTarget,
 } from "./session-actor-contract.js";
 import type { SessionActorExecutor, SessionActorExecutorGuards } from "./session-actor-executor.js";
+import { SessionActorReadInvalidatedError } from "./session-actor-read-error.js";
 import type { createSessionActorReplica } from "./session-actor-replica.js";
 
 type NativeAdmission = {
@@ -159,7 +160,7 @@ export function createSqliteSessionActorExecutor(
         }
       }
       if (!snapshot) {
-        throw new Error("Session actor changed before its read could publish");
+        throw new SessionActorReadInvalidatedError();
       }
       fenced = false;
       params.assertReadable();
