@@ -78,12 +78,50 @@ function insertBootRows(
 }
 
 describe("gateway crash-loop breaker", () => {
-  it("projects replacement history only while it is the latest shutdown", () => {
+  it.each(["completed", "interrupted"] as const)(
+    "preserves %s shutdown accounting after database retirement",
+    async (shutdown) => {
+      const lifecycle = createLifecycleDb();
+      insertBootRows(lifecycle, [
+        { bootId: "prior-crash-a", startedAtMs: 1_000 },
+        { bootId: "prior-crash-b", startedAtMs: 2_000 },
+      ]);
+      const bootId = recordGatewayBootStart(lifecycle.env, 3_000);
+      const prepare = vi.spyOn(lifecycle.db, "prepare");
+      const exec = vi.spyOn(lifecycle.db, "exec");
+      try {
+        if (shutdown === "completed") {
+          await completeGatewayBootLifecycle(
+            bootId,
+            { outcome: "clean_stop", reason: "stop (SIGTERM)" },
+            lifecycle.env,
+            4_000,
+          );
+        }
+        expect(prepare).not.toHaveBeenCalled();
+        expect(exec).not.toHaveBeenCalled();
+        await closeOpenClawStateDatabaseAsync();
+      } finally {
+        prepare.mockRestore();
+        exec.mockRestore();
+      }
+
+      expect(readGatewayLastShutdown(lifecycle.env)).toEqual(
+        shutdown === "completed" ? { reason: "stop (SIGTERM)", completedAtMs: 4_000 } : undefined,
+      );
+      expect(inspectGatewayCrashLoopBreaker(lifecycle.env, 4_001)).toMatchObject({
+        tripped: shutdown === "interrupted",
+        uncleanBoots: shutdown === "interrupted" ? 3 : 2,
+      });
+    },
+  );
+
+  it("projects replacement history only while it is the latest shutdown", async () => {
     const lifecycle = createLifecycleDb();
     expect(readGatewayLastInstallationReplacement(lifecycle.env)).toBeUndefined();
     const reason = "gateway.installation_replaced: on-disk 2026.9.5 differs from running 2026.9.4";
     const replacedBoot = recordGatewayBootStart(lifecycle.env, 1_000);
-    completeGatewayBootLifecycle(
+    await completeGatewayBootLifecycle(
       replacedBoot,
       { outcome: "planned_restart", reason },
       lifecycle.env,
@@ -94,7 +132,7 @@ describe("gateway crash-loop breaker", () => {
       reason,
       completedAtMs: 2_000,
     });
-    completeGatewayBootLifecycle(
+    await completeGatewayBootLifecycle(
       successor,
       { outcome: "clean_stop", reason: "stop (SIGTERM)" },
       lifecycle.env,
@@ -105,7 +143,7 @@ describe("gateway crash-loop breaker", () => {
 
   it.each(["SIGTERM", "SIGINT"])(
     "warns about repeated %s stops across process lifetimes",
-    (signal) => {
+    async (signal) => {
       const lifecycle = createLifecycleDb();
       const warn = vi.fn();
       setLoggerOverride({ level: "silent", consoleLevel: "warn", consoleStyle: "json" });
@@ -129,7 +167,7 @@ describe("gateway crash-loop breaker", () => {
         },
       ]);
       const secondBoot = recordGatewayBootStart(lifecycle.env, nowMs - 1_000);
-      completeGatewayBootLifecycle(
+      await completeGatewayBootLifecycle(
         secondBoot,
         { outcome: "clean_stop", reason },
         lifecycle.env,
@@ -137,7 +175,7 @@ describe("gateway crash-loop breaker", () => {
       );
       expect(warn).not.toHaveBeenCalled();
       const thirdBoot = recordGatewayBootStart(lifecycle.env, nowMs + 1_000);
-      completeGatewayBootLifecycle(
+      await completeGatewayBootLifecycle(
         thirdBoot,
         { outcome: "clean_stop", reason },
         lifecycle.env,
@@ -150,11 +188,11 @@ describe("gateway crash-loop breaker", () => {
     },
   );
 
-  it("reads the last shutdown without mistaking recovery segments or live boots for stops", () => {
+  it("reads the last shutdown without mistaking recovery segments or live boots for stops", async () => {
     const lifecycle = createLifecycleDb();
     expect(readGatewayLastShutdown(lifecycle.env)).toBeUndefined();
     const bootId = recordGatewayBootStart(lifecycle.env, 1_000);
-    completeGatewayBootLifecycle(
+    await completeGatewayBootLifecycle(
       bootId,
       { outcome: "clean_stop", reason: "stop (SIGTERM)" },
       lifecycle.env,
@@ -236,10 +274,10 @@ describe("gateway crash-loop breaker", () => {
     expect(decision.uncleanBoots).toBe(1);
   });
 
-  it("keeps a completed Tailscale authentication prerequisite visible without counting it as a crash", () => {
+  it("keeps a completed Tailscale authentication prerequisite visible without counting it as a crash", async () => {
     const db = createLifecycleDb();
     const nowMs = 1_000_000;
-    const recordCompletedFailure = (params: {
+    const recordCompletedFailure = async (params: {
       startedAtMs: number;
       completedAtMs: number;
       startupReason?: string;
@@ -249,7 +287,7 @@ describe("gateway crash-loop breaker", () => {
       if (!bootId) {
         throw new Error("expected Gateway boot to be recorded");
       }
-      completeGatewayBootLifecycle(
+      await completeGatewayBootLifecycle(
         bootId,
         {
           outcome: "startup_failed",
@@ -261,18 +299,18 @@ describe("gateway crash-loop breaker", () => {
       );
       return bootId;
     };
-    const prerequisiteBootId = recordCompletedFailure({
+    const prerequisiteBootId = await recordCompletedFailure({
       startedAtMs: nowMs - 3,
       completedAtMs: nowMs - 2,
       startupReason: TAILSCALE_BACKEND_AUTH_REQUIRED_REASON,
       reason: "gateway.tailscale_authentication_required: NeedsLogin",
     });
-    recordCompletedFailure({
+    await recordCompletedFailure({
       startedAtMs: nowMs - 1,
       completedAtMs: nowMs,
       reason: "EADDRINUSE",
     });
-    recordCompletedFailure({
+    await recordCompletedFailure({
       startedAtMs: nowMs,
       completedAtMs: nowMs + 1,
       reason: "gateway startup cleanup failed",
@@ -297,7 +335,7 @@ describe("gateway crash-loop breaker", () => {
       reason: "gateway.tailscale_authentication_required: NeedsLogin",
     });
 
-    recordCompletedFailure({
+    await recordCompletedFailure({
       startedAtMs: nowMs + 2,
       completedAtMs: nowMs + 3,
       reason: "unknown startup error",
@@ -308,7 +346,7 @@ describe("gateway crash-loop breaker", () => {
     });
   });
 
-  it("keeps an unfinished boot in breaker accounting even when its startup reason is known", () => {
+  it("keeps an unfinished boot in breaker accounting even when its startup reason is known", async () => {
     const db = createLifecycleDb();
     const nowMs = 1_000_000;
     expect(
@@ -322,7 +360,7 @@ describe("gateway crash-loop breaker", () => {
       if (!recordedBootId) {
         throw new Error("expected Gateway boot to be recorded");
       }
-      completeGatewayBootLifecycle(
+      await completeGatewayBootLifecycle(
         recordedBootId,
         { outcome: "startup_failed", reason },
         db.env,
@@ -336,12 +374,12 @@ describe("gateway crash-loop breaker", () => {
     });
   });
 
-  it("does not count maintenance refusals toward channel suppression", () => {
+  it("does not count maintenance refusals toward channel suppression", async () => {
     const lifecycle = createLifecycleDb();
     const nowMs = 1_000_000;
     for (let index = 0; index < 3; index++) {
       const bootId = recordGatewayBootStart(lifecycle.env, nowMs + index);
-      completeGatewayBootLifecycle(
+      await completeGatewayBootLifecycle(
         bootId,
         {
           outcome: "startup_failed",
@@ -368,7 +406,7 @@ describe("gateway crash-loop breaker", () => {
     );
     for (let index = 0; index < 3; index++) {
       const bootId = recordGatewayBootStart(lifecycle.env, nowMs + index);
-      completeGatewayBootLifecycle(
+      await completeGatewayBootLifecycle(
         bootId,
         {
           outcome: "startup_failed",
@@ -397,7 +435,7 @@ describe("gateway crash-loop breaker", () => {
       recovered: false,
       uncleanBoots: 1,
     });
-    completeGatewayBootLifecycle(
+    await completeGatewayBootLifecycle(
       recoveredBootId,
       { outcome: "clean_stop" },
       lifecycle.env,
@@ -508,13 +546,13 @@ describe("gateway crash-loop breaker", () => {
     });
   });
 
-  it("records forced stops without tripping the breaker", () => {
+  it("records forced stops without tripping the breaker", async () => {
     const db = createLifecycleDb();
     const nowMs = 1_000_000;
 
     for (let index = 0; index < GATEWAY_BOOT_LOOP_UNCLEAN_THRESHOLD; index += 1) {
       const bootId = recordGatewayBootStart(db.env, nowMs + index);
-      completeGatewayBootLifecycle(
+      await completeGatewayBootLifecycle(
         bootId,
         { outcome: "forced_stop", reason: "gateway.stop_shutdown_timeout" },
         db.env,

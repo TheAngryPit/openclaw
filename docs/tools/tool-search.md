@@ -128,6 +128,10 @@ Tool Search changes the shape:
   direct-only tools
 - during the turn: the model can load remaining schemas as needed
 
+An enabled `message` tool stays directly visible in both modes, even when the
+current turn delivers final replies automatically. Switching reply delivery
+modes does not change that tool prefix or grant access to unavailable tools.
+
 Tool Search is useful when one run can see many tools, especially from MCP
 servers or client-provided app tools. Structured search is the default, but
 actual request size and latency depend on the catalog and the model's calls.
@@ -425,7 +429,7 @@ OpenClaw does not record serialized tool or prompt byte counts. The
 [E2E scenario](#e2e-validation) measures provider payload bytes separately from
 the mock provider lane.
 
-Regardless of mode, completed target calls persist as bounded, redacted display
+Regardless of mode, completed target calls persist as bounded display
 activity in session history without adding synthetic model turns to replay.
 Search, describe, and call results carry each tool's `id` and `source`.
 Session logs therefore still answer:

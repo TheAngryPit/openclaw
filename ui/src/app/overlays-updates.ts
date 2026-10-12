@@ -25,7 +25,6 @@ import {
   createUpdateStatusRefresher,
   projectUpdateSentinel,
   projectUpdateStatusResponse,
-  projectUpdateCheckoutResponse,
   projectUpdateRunFailure,
   resolveUnknownUpdateOutcomeBanner,
   resolveUpdateStatusBanner,
@@ -84,6 +83,10 @@ export function createApplicationUpdateOverlays(
   let activeHello = gateway.snapshot.hello;
   let connectedSource: NonNullable<typeof activeClient> | null = null;
   let connectedEpoch = 0;
+  let confirmationTargetGeneration = 0;
+  // connectedEpoch also fences scope changes, so it cannot tell a first
+  // connection from a reconnect; legacy version-only skew needs that fact.
+  let connectedBefore = false;
   let operatorAccess = readGatewayOperatorAccess(gateway.snapshot);
   let updateGatewayScope = gatewayCredentialScope(gateway.connection.gatewayUrl);
   let profileId = gateway.snapshot.selfUser?.id ?? null;
@@ -311,12 +314,9 @@ export function createApplicationUpdateOverlays(
     }
   };
 
-  const applyUpdateStatusResponse = (
-    response: UpdateRestartStatusResponse,
-    preserveInstall = false,
-  ) => {
+  const applyUpdateStatusResponse = (response: UpdateRestartStatusResponse) => {
     const { failure, updateStatusBanner, recordedUpdateAttempt, ...status } =
-      projectUpdateStatusResponse(response, snapshot, preserveInstall);
+      projectUpdateStatusResponse(response, snapshot);
     const run = response.activeRun ?? response.lastRun;
     const history = updateAttempt?.history;
     // A failed history read is not an empty baseline. Until a current identity
@@ -354,7 +354,7 @@ export function createApplicationUpdateOverlays(
   const refreshUpdateStatus = createUpdateStatusRefresher({
     getClient: () => activeClient,
     getEpoch: () => connectedEpoch,
-    getRevision: () => updateStatusRevision,
+    getAuthorization: () => activeHello?.auth,
     canRefresh: () => !disposed && operatorAccess.canAdmin,
     isCurrent: (client, epoch) => epoch === connectedEpoch && isCurrentClient(client),
     onRefreshing: (updateStatusRefreshing) => {
@@ -362,18 +362,6 @@ export function createApplicationUpdateOverlays(
       publish();
     },
     onStatus: applyUpdateStatusResponse,
-    onCheckout: (response, preserveSchedule) => {
-      snapshot = {
-        ...snapshot,
-        ...projectUpdateCheckoutResponse(
-          response,
-          snapshot,
-          preserveSchedule ? "schedule" : undefined,
-        ),
-        updateStatusCheckBanner: null,
-      };
-      publish(true);
-    },
     onError: (error, mode) => {
       if (mode === "completion" && snapshot.updateStatusCheckBanner?.mode === "manual") {
         return;
@@ -410,17 +398,21 @@ export function createApplicationUpdateOverlays(
 
   const synchronizeGateway = (next: ApplicationGateway["snapshot"]) => {
     const nextScope = gatewayCredentialScope(gateway.connection.gatewayUrl);
-    const nextProfile = next.selfUser?.id ?? null;
+    // Reconnect can admit hello before users.self resolves; only a known profile retires it.
+    const nextProfile = next.selfUser === undefined ? profileId : (next.selfUser?.id ?? null);
     const nextAccess = readGatewayOperatorAccess(next);
     const accessGranted = !operatorAccess.canAdmin && nextAccess.canAdmin;
     const connected = next.phase === "connected";
     // Disconnects can omit identity. An explicit new auth grant is authoritative
     // even when build-skew fencing delays connection admission.
-    const scopeChanged =
-      nextScope !== updateGatewayScope ||
-      (connected && nextProfile !== profileId) ||
-      (Boolean(next.hello?.auth) && !nextAccess.canAdmin);
+    const targetChanged =
+      nextScope !== updateGatewayScope || (connected && nextProfile !== profileId);
+    const scopeChanged = targetChanged || (Boolean(next.hello?.auth) && !nextAccess.canAdmin);
+    if (targetChanged) {
+      confirmationTargetGeneration++;
+    }
     if (scopeChanged) {
+      connectedEpoch++;
       updateFailureReporter.invalidate();
       updateRunGeneration++;
       updateReadGeneration++;
@@ -482,6 +474,7 @@ export function createApplicationUpdateOverlays(
         snapshot = { ...snapshot, controlUiRefreshRequired: true };
       } else if (!next.client) {
         connectedEpoch = 0;
+        connectedBefore = false;
         snapshot = { ...snapshot, controlUiRefreshRequired: false };
       } else if (next.hello) {
         snapshot = { ...snapshot, controlUiRefreshRequired: true };
@@ -502,10 +495,11 @@ export function createApplicationUpdateOverlays(
       // Vite owns this document; reloading cannot adopt its proxied Gateway's build.
       controlUiRefreshRequired: connectedSourceChanged
         ? !isConfiguredUiDevGateway(gateway.connection.gatewayUrl) &&
-          (Boolean(serverBuildIdentity.buildId?.trim()) || connectedEpoch > 1) &&
+          (Boolean(serverBuildIdentity.buildId?.trim()) || connectedBefore) &&
           controlUiBuildDiffersFrom(serverBuildIdentity)
         : snapshot.controlUiRefreshRequired,
     };
+    connectedBefore = true;
     publish(true);
     if ((connectedSourceChanged || scopeChanged || accessGranted) && operatorAccess.canAdmin) {
       void runConnectionBootstrap("update-run", () =>
@@ -567,6 +561,15 @@ export function createApplicationUpdateOverlays(
     },
     refreshUpdateStatus,
     diagnoseUpdateFailure,
+    captureUpdateTarget(this: void) {
+      const generation = confirmationTargetGeneration;
+      const revision = gateway.connectionRevision;
+      // Keep target identity across reconnects; each action checks its live authority separately.
+      return () =>
+        !disposed &&
+        generation === confirmationTargetGeneration &&
+        revision === gateway.connectionRevision;
+    },
     acknowledgeUpdateRun(this: void) {
       const run = snapshot.updateRun;
       if (run && run.status !== "running") {
