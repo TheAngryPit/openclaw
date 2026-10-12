@@ -705,7 +705,12 @@ struct GatewayEndpointStoreTests {
             (remoteTokenRoot, nil, "custom-password", true, remoteTokenSnapshot), // pragma: allowlist secret
             (remoteTokenRoot, "service-token", nil, true, serviceTokenSnapshot),
             (remotePasswordRoot, nil, "remote-password", true, remotePasswordSnapshot), // pragma: allowlist secret
-            (remotePasswordWithLocalPasswordRefRoot, "service-token", nil, true, remotePasswordWithServiceTokenSnapshot),
+            (
+                remotePasswordWithLocalPasswordRefRoot,
+                "service-token",
+                nil,
+                true,
+                remotePasswordWithServiceTokenSnapshot),
             (trustedProxyRemotePasswordRoot, nil, nil, false, noAuthSnapshot),
         ]
         for testCase in cases {
