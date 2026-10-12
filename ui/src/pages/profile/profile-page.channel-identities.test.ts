@@ -47,6 +47,79 @@ afterEach(async () => {
   await i18n.setLocale("en");
 });
 
+it("renders the first added channel link and restores the empty view after removing it", async () => {
+  const linked = {
+    profileId: modelAccountProfile.id,
+    identity: { channelId: "matrix", accountId: "work", senderId: "sender" },
+  };
+  let links: (typeof linked)[] = [];
+  const request = vi.fn(async (method: string, params?: unknown) => {
+    if (method === "users.self") {
+      return { profile: modelAccountProfile };
+    }
+    if (method === "users.listModelAccounts") {
+      return { profileId: modelAccountProfile.id, accounts: [], links: [] };
+    }
+    if (method === "users.listChannelIdentities") {
+      return { links };
+    }
+    if (method === "users.linkChannelIdentity") {
+      expect(params).toEqual(linked);
+      links = [linked];
+      return linked;
+    }
+    if (method === "users.unlinkChannelIdentity") {
+      expect(params).toEqual(linked);
+      links = [];
+      return { removed: true };
+    }
+    throw new Error("unexpected method: " + method);
+  });
+  // SAFETY: the synthetic RPC implements the exact methods consumed by this mounted Profile.
+  const harness = createChannelIdentityHarness(request as GatewayBrowserClient["request"]);
+  const page = mountProfilePage(harness.context);
+  await waitForFast(() =>
+    expect(
+      page.querySelector("#settings-profile-channel-identities .settings-empty")?.textContent,
+    ).toContain("No channel accounts are linked"),
+  );
+  const section = page.querySelector<HTMLElement>("#settings-profile-channel-identities")!;
+  for (const [label, value] of [
+    ["Channel ID", "matrix"],
+    ["Configured account ID", "work"],
+    ["Native sender ID", "sender"],
+  ] as const) {
+    const input = section.querySelector<HTMLInputElement>('input[aria-label="' + label + '"]')!;
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  section.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
+  const removeSelector = 'button[aria-label="Remove link matrix, work, sender"]';
+  await waitForFast(() => expect(section.querySelectorAll(removeSelector)).toHaveLength(1));
+  const remove = section.querySelector<HTMLButtonElement>(removeSelector)!;
+  const row = remove.closest(".settings-row")!;
+  expect([...row.querySelectorAll("code")].map((code) => code.textContent)).toEqual([
+    "matrix",
+    "work",
+    "sender",
+  ]);
+  expect(section.querySelector(".settings-empty")).toBeNull();
+  expect(section.querySelector('[role="status"]')?.textContent).toContain(
+    "Channel account link added.",
+  );
+  remove.click();
+  await waitForFast(() =>
+    expect(section.querySelector(".settings-empty")?.textContent).toContain(
+      "No channel accounts are linked",
+    ),
+  );
+  expect(section.querySelectorAll(removeSelector)).toHaveLength(0);
+  expect(section.querySelector('[role="status"]')?.textContent).toContain(
+    "Channel account link removed.",
+  );
+  expect(request).toHaveBeenCalledWith("users.unlinkChannelIdentity", linked);
+});
+
 it.each(["removed", "already absent", "ownership rejected"])(
   "lists and links exact bindings, then handles unlink %s from the current Profile",
   async (outcome) => {

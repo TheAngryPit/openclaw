@@ -120,47 +120,42 @@ const ChannelIdentities = defineSolidBridge<ProfileChannelIdentityInputs>(
             <Show when={state().status}>
               {(status) => <SettingsRow title={status()} role="status" />}
             </Show>
-            <Show when={state().links}>
-              {(links) =>
-                links().length === 0 ? (
-                  <SettingsEmpty message={t("profilePage.channelIdentities.empty")} />
-                ) : (
-                  <For each={links()}>
-                    {(link) => (
-                      <SettingsRow
-                        title={<code>{link.identity.channelId}</code>}
-                        description={
-                          <>
-                            {t("profilePage.channelIdentities.accountId")}:{" "}
-                            <code>{link.identity.accountId}</code> ·{" "}
-                            {t("profilePage.channelIdentities.senderId")}:{" "}
-                            <code>{link.identity.senderId}</code>
-                          </>
-                        }
-                        stackedOnNarrow
-                        control={
-                          <button
-                            type="button"
-                            class="btn"
-                            aria-label={`${t("profilePage.channelIdentities.remove")} ${[
-                              link.identity.channelId,
-                              link.identity.accountId,
-                              link.identity.senderId,
-                            ].join(", ")}`}
-                            disabled={state().busy}
-                            onClick={() => void controller.unlinkIdentity(link)}
-                          >
-                            {state().isRemoving(link)
-                              ? t("profilePage.channelIdentities.removing")
-                              : t("profilePage.channelIdentities.remove")}
-                          </button>
-                        }
-                      />
-                    )}
-                  </For>
-                )
-              }
+            <Show when={state().links?.length === 0}>
+              <SettingsEmpty message={t("profilePage.channelIdentities.empty")} />
             </Show>
+            <For each={state().links ?? []}>
+              {(link) => (
+                <SettingsRow
+                  title={<code>{link.identity.channelId}</code>}
+                  description={
+                    <>
+                      {t("profilePage.channelIdentities.accountId")}:{" "}
+                      <code>{link.identity.accountId}</code> ·{" "}
+                      {t("profilePage.channelIdentities.senderId")}:{" "}
+                      <code>{link.identity.senderId}</code>
+                    </>
+                  }
+                  stackedOnNarrow
+                  control={
+                    <button
+                      type="button"
+                      class="btn"
+                      aria-label={`${t("profilePage.channelIdentities.remove")} ${[
+                        link.identity.channelId,
+                        link.identity.accountId,
+                        link.identity.senderId,
+                      ].join(", ")}`}
+                      disabled={state().busy}
+                      onClick={() => void controller.unlinkIdentity(link)}
+                    >
+                      {state().isRemoving(link)
+                        ? t("profilePage.channelIdentities.removing")
+                        : t("profilePage.channelIdentities.remove")}
+                    </button>
+                  }
+                />
+              )}
+            </For>
             <For each={["channelId", "accountId", "senderId"] as const}>
               {(field) => (
                 <SettingsRow
