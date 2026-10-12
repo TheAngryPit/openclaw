@@ -322,7 +322,10 @@ export function registerGatewayStartupFailureTests(
         const onRestartStartupFailure = vi.fn(async (error: unknown, signal: AbortSignal) => {
           expect(error).toBe(startupError);
           expect(signal.aborted).toBe(false);
-          expect(firstClose).toHaveBeenCalledExactlyOnceWith({ reason: "gateway startup failed" });
+          expect(firstClose).toHaveBeenCalledExactlyOnceWith({
+            reason: "gateway startup failed",
+            retainSharedState: true,
+          });
           recoveryStarted.resolve();
           await allowRecovery.promise;
           return "completed" as const;
@@ -534,7 +537,10 @@ export function registerGatewayStartupFailureTests(
             createGatewayServer(close, Promise.reject(startupError)),
           );
         await expect(runGatewayLoop({ start, onRestartStartupFailure })).rejects.toBe(startupError);
-        expect(close).toHaveBeenCalledExactlyOnceWith({ reason: "gateway startup failed" });
+        expect(close).toHaveBeenCalledExactlyOnceWith({
+          reason: "gateway startup failed",
+          retainSharedState: true,
+        });
         expect(onRestartStartupFailure).not.toHaveBeenCalled();
       });
     } finally {
