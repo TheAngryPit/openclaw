@@ -631,6 +631,8 @@ export const en: TranslationMap & {
     },
     sidebar: {
       campaignTarget: "{status} · {target}",
+      checking: "Checking for updates…",
+      checkFailed: "Could not check the latest update. Try again.",
       updating: "Updating Gateway…",
       availableTitle: "Update available",
       availableSummary: "A newer revision is ready.",
@@ -944,6 +946,7 @@ export const en: TranslationMap & {
     runErrorUnknown: "Unknown error",
     attentionRequired: "Session needs attention",
     openSession: "Open session",
+    openFailed: "Could not open this session. Try again.",
     model: "Model",
     provider: "Provider",
     runtime: "Runtime",
@@ -965,6 +968,11 @@ export const en: TranslationMap & {
     unread: "Unread",
     automationAttached: "Automation attached",
     incognito: "Incognito session",
+    incognitoLabel: "Incognito",
+    incognitoDescription:
+      "Incognito session. History expires 24 hours after creation or when the Gateway restarts, whichever comes first.",
+    incognitoLimits:
+      "Your model provider still processes messages. Tools, plugins, and uploads may save data.",
     cloudWorkerPlacement: "Placement: {state}",
     placementWorkspaceConflict: "{placement} · 1 workspace conflict",
     placementWorkspaceConflicts: "{placement} · {count} workspace conflicts",
@@ -1635,8 +1643,6 @@ export const en: TranslationMap & {
     more: "More",
     home: "Home",
     pages: "Pages",
-    scopeMine: "Mine",
-    scopeAll: "All",
     pin: "Pin",
     unpin: "Unpin",
     customize: "Edit pinned items",
@@ -2821,6 +2827,7 @@ export const en: TranslationMap & {
     },
     waitingForApproval: "Waiting for approval…",
     waitingOnSubagents: "Waiting on subagents",
+    waitingOnSubagentCount: "Waiting on {count} subagent",
     waitingOnSubagentsCount: "Waiting on {count} subagents",
     waitingOnSubagent: "Waiting on {name}",
     waitingOnSession: "Waiting on 1 session",
@@ -2850,6 +2857,7 @@ export const en: TranslationMap & {
       finished: "Finished ({count})",
       callsOne: "{count} call",
       callsMany: "{count} calls",
+      callsAtLeast: "{count}+ calls",
       empty: "No subagents in this conversation.",
       noRunning: "No running subagents",
       refresh: "Refresh subagents",
@@ -2978,6 +2986,7 @@ export const en: TranslationMap & {
     },
     sessionSharing: {
       menu: "Session sharing",
+      share: "Share",
       current: "Session visibility: {visibility}",
       visibility: "Visibility",
       shared: "Shared",
@@ -3000,7 +3009,7 @@ export const en: TranslationMap & {
       copyPublicLink: "Copy public link",
       publicConfirmTitle: "Make this session world-readable?",
       publicConfirmMessage:
-        "Anyone with the public link can read existing and future conversation text without signing in. Tools, reasoning, files, and widgets are excluded. Review the conversation for private information before sharing. Disabling access cannot recall copies already downloaded.",
+        "Anyone with the public link can read existing and future conversation text, including all user and assistant messages and progress, plus tool names, short argument summaries, and images without signing in.\n\nReasoning, tool-result text, and private dashboards stay hidden. Image contents are not redacted. Review for private information before sharing; disabling access cannot recall downloaded copies.",
       publicConfirmEnable: "Make public",
       publicEnabled: "Public access enabled. Copy the public link from Session sharing.",
       publicDisabled: "Public access disabled.",
@@ -3047,6 +3056,7 @@ export const en: TranslationMap & {
       renameInputAria: "Session title",
       renameInputPlaceholder: "Session title",
       openParent: "Open parent session {title}",
+      subagentsRunning: "Subagents · {count} running",
       panels: "Panels",
       layout: "Layout",
       continueInTerminal: {
@@ -3068,13 +3078,15 @@ export const en: TranslationMap & {
       copyPath: "Copy path",
       copyBranch: "Copy branch name",
       copied: "Copied",
-      incognito: "Incognito session",
-      branches: "Session branches",
-      branchSwitchUnavailable: "Branch switch is unavailable while the agent is working.",
-      untitledBranch: "Untitled branch",
+      branches: "Versions",
+      versionsHelpLabel: "About versions",
+      versionsHelp:
+        "Saved copies of this conversation from rewinds or repairs. You can return to an earlier version here.",
+      branchSwitchUnavailable: "Versions cannot be switched while the agent is working.",
+      untitledBranch: "Untitled version",
       oneMessage: "{count} message",
       messages: "{count} messages",
-      activeBranch: "Active branch",
+      activeBranch: "Current version",
     },
     board: {
       faceLabel: "Session face",
@@ -3374,6 +3386,7 @@ export const en: TranslationMap & {
       dropOpenHere: "Open here",
     },
     sidebar: {
+      mySessions: "My sessions",
       updateMacAndGateway: "Update Mac app + Gateway",
       updateGateway: "Update Gateway",
       serverUpdatedTitle: "Server updated",
@@ -3491,6 +3504,8 @@ export const en: TranslationMap & {
       draftConflict: "This question was edited in another tab. Copy your answer before reloading.",
     },
     questions: {
+      showSecret: "Show secret",
+      hideSecret: "Hide secret",
       resourcePreview: "Preview resource",
       addResources: "Add resources",
       resourceUploadTooLarge: "Selected resources exceed the upload limits.",
@@ -3522,6 +3537,7 @@ export const en: TranslationMap & {
       unavailable: "Unavailable",
       expired: "Expired",
       disconnected: "Not connected. Try again after reconnecting.",
+      loadFailed: "Could not load this question. Try again.",
     },
     imageLightbox: {
       actions: "Image actions",
@@ -3713,6 +3729,8 @@ export const en: TranslationMap & {
       badge: "Expired",
     },
     composer: {
+      running: "running",
+      viewSubagents: "View",
       composerInput: "Chat composer",
       emojiSuggestions: "Emoji suggestions",
       placeholder: "Message {name}",
@@ -3801,6 +3819,7 @@ export const en: TranslationMap & {
         clear: "Clear session overrides",
       },
       contextUsage: {
+        label: "Context",
         title: "Context usage details",
         open: "Open context usage details",
         summary: "Session context usage: {used} of {limit} ({pct}%)",
