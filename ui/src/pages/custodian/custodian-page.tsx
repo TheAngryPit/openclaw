@@ -262,7 +262,7 @@ function OnboardingNamePrompt(props: { name: ReturnType<typeof createOnboardingN
               maxLength={256}
               autocomplete="nickname"
               aria-describedby={`custodian-name-description${props.name.read().error ? " custodian-name-error" : ""}`}
-              prop:value={props.name.read().draft}
+              value={props.name.read().draft}
               disabled={props.name.read().busy}
               onInput={(event) => props.name.setDraft(event.currentTarget.value)}
             />
