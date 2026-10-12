@@ -3,8 +3,9 @@ import { GatewayPendingRequests } from "../../../../packages/gateway-client/src/
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import { peekModelCatalog } from "../../lib/model-catalog-store.ts";
+import { requestProviderUsage } from "../../lib/provider-usage-request.ts";
 import { createTestGatewayClient } from "../../test-helpers/gateway-client.ts";
-import { loadModelProviderCost, loadModelProvidersData, loadModelProviderUsage } from "./load.ts";
+import { loadModelProviderCost, loadModelProvidersData } from "./load.ts";
 
 describe("loadModelProvidersData", () => {
   it.each([false, true])(
@@ -333,14 +334,19 @@ describe("loadModelProvidersData", () => {
         controller.abort();
       }
       const loading = Promise.allSettled([
-        loadModelProviderUsage(client, controller.signal),
+        requestProviderUsage(client, { signal: controller.signal }),
         loadModelProviderCost(client, controller.signal),
       ]);
       try {
         if (when === "while pending") {
           expect(sent.map(({ method }) => method)).toEqual(["usage.status", "sessions.usage"]);
           expect(sent[0]?.params).toBeUndefined();
-          expect(sent[1]?.params).toMatchObject({ agentScope: "all", groupBy: "family" });
+          expect(sent[1]?.params).toMatchObject({
+            agentScope: "all",
+            groupBy: "family",
+            projection: "overview",
+            limit: 50,
+          });
           expect(sent[1]?.params).not.toHaveProperty("agentId");
           expect(pending.hasPending).toBe(true);
           controller.abort();

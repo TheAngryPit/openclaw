@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { setRuntimeConfigSnapshot } from "../config/runtime-snapshot.js";
 import * as sessionsConfig from "../config/sessions.js";
 import * as sessionAccessor from "../config/sessions/session-accessor.js";
 import {
@@ -56,6 +57,7 @@ describe("session event authorization store work", () => {
   it("does not capture a replacement for an already prepared mutation target", async () => {
     await withOpenClawTestState({ scenario: "minimal" }, async () => {
       const cfg: OpenClawConfig = {};
+      setRuntimeConfigSnapshot(cfg);
       const scope = { agentId: "main", sessionKey: "agent:main:prepared-target" };
       const entry = {
         sessionId: "prepared-session",
@@ -97,6 +99,7 @@ describe("session event authorization store work", () => {
     "bounds metadata work for %i event targets while refreshing membership",
     async (targetCount) => {
       await withOpenClawTestState({ scenario: "minimal" }, async () => {
+        setRuntimeConfigSnapshot({});
         const keys = Array.from(
           { length: 64 },
           (_, index) => `agent:main:event-${targetCount}-${index}`,
@@ -172,6 +175,7 @@ describe("session mutation authorization store caches", () => {
     "bounds single-target metadata work and refreshes every %s guard",
     async (method) => {
       await withOpenClawTestState({ scenario: "minimal" }, async () => {
+        setRuntimeConfigSnapshot({});
         const sessionKey = "agent:main:scalar-authorization";
         const entry = { sessionId: "scalar-authorization", updatedAt: 1 };
         await sessionAccessor.upsertSessionEntryCore({ agentId: "main", sessionKey }, entry);
@@ -226,9 +230,19 @@ describe("session mutation authorization store caches", () => {
     await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
       const cfg: OpenClawConfig = {
         session: { scope: "global" },
-        agents: { entries: { ops: { default: true }, research: {} } },
+        agents: {
+          ownership: "explicit",
+          defaults: {
+            heartbeat: { agentId: "ops" },
+            systemAgent: { agentId: "ops" },
+            authInheritance: { agentId: "ops" },
+          },
+          entries: { ops: { workspace: state.statePath("workspace") }, research: {} },
+        },
+        talk: { agentId: "ops" },
       };
       await state.writeConfig(cfg);
+      setRuntimeConfigSnapshot(cfg);
       for (const agentId of ["ops", "research"]) {
         await sessionAccessor.upsertSessionEntryCore(
           { agentId, sessionKey: "global" },
@@ -265,9 +279,19 @@ describe("session mutation authorization store caches", () => {
       await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
         const cfg: OpenClawConfig = {
           session: { scope: "global" },
-          agents: { entries: { ops: { default: true }, research: {} } },
+          agents: {
+            ownership: "explicit",
+            defaults: {
+              heartbeat: { agentId: "ops" },
+              systemAgent: { agentId: "ops" },
+              authInheritance: { agentId: "ops" },
+            },
+            entries: { ops: { workspace: state.statePath("workspace") }, research: {} },
+          },
+          talk: { agentId: "ops" },
         };
         await state.writeConfig(cfg);
+        setRuntimeConfigSnapshot(cfg);
         for (const agentId of ["ops", "research"]) {
           await sessionAccessor.upsertSessionEntryCore(
             { agentId, sessionKey: "global" },
@@ -316,6 +340,7 @@ describe("session mutation authorization store caches", () => {
 
   it("fails a patchMany request when a nested target is incognito", async () => {
     await withOpenClawTestState({ scenario: "minimal" }, async () => {
+      setRuntimeConfigSnapshot({});
       const sessionKey = "agent:main:dashboard:incognito-patch-many";
       await sessionAccessor.upsertSessionEntryCore(
         { agentId: "main", sessionKey },
@@ -336,6 +361,7 @@ describe("session mutation authorization store caches", () => {
 
   it("authorizes every patchMany target before dispatch", async () => {
     await withOpenClawTestState({ scenario: "minimal" }, async () => {
+      setRuntimeConfigSnapshot({});
       const sharedKey = "agent:main:batch-shared";
       const draftKey = "agent:main:batch-private";
       await sessionAccessor.upsertSessionEntryCore(
@@ -372,6 +398,7 @@ describe("session mutation authorization store caches", () => {
 
   it("reuses metadata for padded patchMany targets and fences replacements", async () => {
     await withOpenClawTestState({ scenario: "minimal" }, async () => {
+      setRuntimeConfigSnapshot({});
       const sessionKey = "agent:main:padded-batch-target";
       const prompt = "authorization does not need this prompt snapshot".repeat(512);
       await sessionAccessor.upsertSessionEntryCore(
@@ -415,6 +442,7 @@ describe("session mutation authorization store caches", () => {
 
   it("bounds malformed patchMany target discovery before schema validation", async () => {
     await withOpenClawTestState({ scenario: "minimal" }, async () => {
+      setRuntimeConfigSnapshot({});
       const hiddenKey = "agent:main:dashboard:incognito-over-limit";
       await sessionAccessor.upsertSessionEntryCore(
         { agentId: "main", sessionKey: hiddenKey },
@@ -439,6 +467,8 @@ describe("session mutation authorization store caches", () => {
 
   it("uses resident metadata when one request resolves multiple targets", async () => {
     await withOpenClawTestState({ scenario: "minimal" }, async () => {
+      const cfg = {};
+      setRuntimeConfigSnapshot(cfg);
       for (const [sessionKey, sessionId] of [
         ["agent:main:cache-one", "session-cache-one"],
         ["agent:main:cache-two", "session-cache-two"],
@@ -449,7 +479,6 @@ describe("session mutation authorization store caches", () => {
         );
       }
 
-      const cfg = {};
       const context = requestContext(cfg);
       await initializeSessionReadContext(context);
       await getSessionRowProjection(context)!.prepareMembership();

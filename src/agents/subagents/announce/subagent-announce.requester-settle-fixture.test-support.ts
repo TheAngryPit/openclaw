@@ -1,5 +1,10 @@
-import { beforeEach, vi } from "vitest";
+import { afterEach, beforeEach, vi } from "vitest";
+import {
+  clearRuntimeConfigSnapshot,
+  setRuntimeConfigSnapshot,
+} from "../../../config/runtime-snapshot.js";
 import type { SubagentRunRecord } from "../registry/subagent-registry.types.js";
+import * as announceOutput from "./subagent-announce-output.js";
 import type { createRequesterDescendantReader } from "./subagent-announce.requester-settle-descendants.js";
 import type { maybeWakeRequesterAfterAllChildrenSettled } from "./subagent-announce.requester-settle-wake.js";
 import {
@@ -11,8 +16,12 @@ import {
   completeBatchSpy,
   deliverSpy,
 } from "./subagent-announce.requester-settle-wake.test-support.js";
+import { getRuntimeConfig } from "./subagent-announce.runtime.js";
 
-let sessionStore: Record<string, { sessionId?: string; lastChannel?: string; lastTo?: string }>;
+let sessionStore: Record<
+  string,
+  { sessionId?: string; lifecycleRevision?: string; lastChannel?: string; lastTo?: string }
+>;
 
 const { registryRuntimeMock, findTranscriptEventMock, readDescendantFacts } = vi.hoisted(() => ({
   readDescendantFacts: vi.fn<
@@ -24,9 +33,12 @@ const { registryRuntimeMock, findTranscriptEventMock, readDescendantFacts } = vi
     typeof import("../../../config/sessions/session-accessor.js").findTranscriptEvent
   >(async () => undefined),
   registryRuntimeMock: {
-    getLatestLiveSubagentRunByChildSessionKey: vi.fn<() => SubagentRunRecord | undefined>(
-      () => undefined,
-    ),
+    getLatestLiveSubagentRunByChildSessionKey: vi.fn<
+      (
+        sessionKey: string,
+        matches?: (entry: SubagentRunRecord) => boolean,
+      ) => SubagentRunRecord | undefined
+    >(() => undefined),
     countPendingDescendantRuns: vi.fn((_rootSessionKey: string) => 0),
     isSubagentSessionRunActive: vi.fn((_childSessionKey: string) => true),
     shouldIgnorePostCompletionAnnounceForSession: vi.fn((_childSessionKey: string) => false),
@@ -52,7 +64,8 @@ vi.mock("../../../config/sessions/session-accessor.js", () => ({
   loadSessionEntryReadOnly: ({ sessionKey }: { sessionKey: string }) => sessionStore[sessionKey],
 }));
 
-vi.mock("./subagent-announce.runtime.js", () => ({
+vi.mock("./subagent-announce.runtime.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./subagent-announce.runtime.js")>()),
   callSubagentLifecycleGateway: vi.fn(async () => ({})),
   dispatchGatewayMethodInProcess: vi.fn(async () => ({})),
   isEmbeddedAgentRunActive: vi.fn(() => false),
@@ -62,7 +75,6 @@ vi.mock("./subagent-announce.runtime.js", () => ({
   readSubagentSessionEntry: vi.fn(
     (_storePath: string, sessionKey: string) => sessionStore[sessionKey],
   ),
-  resolveAgentIdFromSessionKey: vi.fn(() => "main"),
   resolveMainSessionKey: vi.fn(() => "agent:main:main"),
   resolveSessionStorePathCore: vi.fn(() => "/tmp/sessions.json"),
   waitForEmbeddedAgentRunEnd: vi.fn(async () => true),
@@ -86,8 +98,12 @@ vi.mock("../spawn/subagent-depth.js", () => ({
     sessionKey.split(":subagent:").length - 1,
 }));
 
-function listedRequesterRuns(): SubagentRunRecord[] {
-  return registryRuntimeMock.listSubagentRunsForRequester(REQUESTER) as SubagentRunRecord[];
+const readChildCompletionFindings = announceOutput.readChildCompletionFindings;
+
+function listedRequesterRuns(requesterSessionKey = REQUESTER): SubagentRunRecord[] {
+  return registryRuntimeMock.listSubagentRunsForRequester(
+    requesterSessionKey,
+  ) as SubagentRunRecord[];
 }
 
 function wakeParams(
@@ -106,6 +122,12 @@ function wakeParams(
 }
 
 beforeEach(() => {
+  setRuntimeConfigSnapshot(getRuntimeConfig());
+  vi.spyOn(announceOutput, "readChildCompletionFindings").mockImplementation((children) =>
+    readChildCompletionFindings(children, (runId) =>
+      listedRequesterRuns(children[0]?.requesterSessionKey).find((entry) => entry.runId === runId),
+    ),
+  );
   findTranscriptEventMock.mockReset().mockResolvedValue(undefined);
   deliverSpy.mockClear();
   transitionBatchSpy.mockClear();
@@ -117,6 +139,11 @@ beforeEach(() => {
   registryRuntimeMock.getLatestLiveSubagentRunByChildSessionKey
     .mockReset()
     .mockReturnValue(undefined);
+});
+
+afterEach(() => {
+  vi.mocked(announceOutput.readChildCompletionFindings).mockRestore();
+  clearRuntimeConfigSnapshot();
 });
 
 function setSessionStore(store: typeof sessionStore): void {

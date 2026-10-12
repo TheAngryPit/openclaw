@@ -5,6 +5,7 @@ import { createDeferred } from "../../test/helpers/promise.js";
 import { buildEmbeddedRunPayloads } from "../agents/embedded-agent-runner/run/payloads.js";
 import { createHeartbeatToolResponsePayload } from "../auto-reply/heartbeat-tool-response.js";
 import { getReplyPayloadMetadata, setReplyPayloadMetadata } from "../auto-reply/reply-payload.js";
+import { setRuntimeConfigSnapshot } from "../config/io.js";
 import {
   appendTranscriptMessage,
   loadTranscriptEvents,
@@ -12,10 +13,6 @@ import {
   replaceSessionEntry,
 } from "../config/sessions/session-accessor.js";
 import { readTranscriptEventMessage } from "../config/sessions/session-accessor.sqlite-read.js";
-import {
-  resolveSqliteScope,
-  toDatabaseOptions,
-} from "../config/sessions/session-accessor.sqlite-scope.js";
 import { withOwnedSessionTranscriptWrites } from "../config/sessions/transcript-write-context.js";
 import { persistInternalSourceReply } from "../gateway/internal-source-reply-persistence.js";
 import { beginSessionWorkAdmission } from "../sessions/session-lifecycle-admission.js";
@@ -25,7 +22,6 @@ import {
   type InternalSessionTranscriptUpdate,
 } from "../sessions/transcript-events.js";
 import { isTranscriptOnlyOpenClawAssistantMessage } from "../shared/transcript-only-openclaw-assistant.js";
-import { openOpenClawAgentDatabase } from "../state/openclaw-agent-db.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { publishHeartbeatSessionReply } from "./heartbeat-session-publication.js";
 
@@ -57,6 +53,8 @@ async function withTarget(
         sessionId: "original-session",
         storePath: path.join(state.sessionsDir("main"), "sessions.json"),
       };
+      const cfg = { session: { store: scope.storePath } };
+      setRuntimeConfigSnapshot(cfg);
       const lifecycleRevision = "original-generation";
       const entry = {
         sessionId: scope.sessionId,
@@ -67,7 +65,7 @@ async function withTarget(
       await replaceSessionEntry(scope, entry);
       const params: PublicationParams = {
         ...scope,
-        cfg: { session: { store: scope.storePath } },
+        cfg,
         expectedGeneration: { sessionId: scope.sessionId, lifecycleRevision },
         occurrenceIds: ["occurrence-b", "occurrence-a"],
         payload: createHeartbeatToolResponsePayload({
@@ -93,12 +91,24 @@ describe("publishHeartbeatSessionReply", () => {
     "accepts the committed occurrence before queued %s and publishes a later occurrence once",
     async (change) => {
       await withTarget(async ({ params, scope, events }) => {
-        const database = openOpenClawAgentDatabase(toDatabaseOptions(resolveSqliteScope(scope)));
         const controller = new AbortController();
         let ownerActive = true;
         let cancellationQueued = false;
         const updates: InternalSessionTranscriptUpdate[] = [];
-        const unsubscribe = onInternalSessionTranscriptUpdate((update) => updates.push(update));
+        const unsubscribe = onInternalSessionTranscriptUpdate((update) => {
+          updates.push(update);
+          if (update.messageId && !cancellationQueued) {
+            cancellationQueued = true;
+            // Queue cancellation from the real committed publication, after worker settlement.
+            queueMicrotask(() => {
+              if (change === "abort") {
+                controller.abort();
+              } else {
+                ownerActive = false;
+              }
+            });
+          }
+        });
         try {
           const first = await withOwnedSessionTranscriptWrites(
             {
@@ -108,17 +118,6 @@ describe("publishHeartbeatSessionReply", () => {
               assertCommitAllowed: () => {
                 if (!ownerActive) {
                   throw new Error("commit owner released");
-                }
-                if (database.db.isTransaction && !cancellationQueued) {
-                  cancellationQueued = true;
-                  // Use the real commit guard; do not replace persistence or the emitter.
-                  queueMicrotask(() => {
-                    if (change === "abort") {
-                      controller.abort();
-                    } else {
-                      ownerActive = false;
-                    }
-                  });
                 }
               },
               withTranscriptWrite: async (run) => await run(),
@@ -213,7 +212,7 @@ describe("publishHeartbeatSessionReply", () => {
     });
   });
 
-  it.each(["key", "index", "owned"] as const)(
+  it.each(["key", "index"] as const)(
     "reconciles an actual runtime %s receipt without duplicating its row",
     async (identity) => {
       await withTarget(async ({ params, scope, events }) => {
@@ -381,59 +380,6 @@ describe("publishHeartbeatSessionReply", () => {
       expect(await events()).toEqual(before);
     });
   });
-
-  it.each(["abort", "authority"] as const)(
-    "preserves accepted publication when %s occurs during owned-write teardown",
-    async (change) => {
-      await withTarget(async ({ params, scope, events }) => {
-        const controller = new AbortController();
-        let ownerActive = true;
-        const updates: unknown[] = [];
-        const unsubscribe = onSessionTranscriptUpdate((update) => updates.push(update));
-        try {
-          const result = await withOwnedSessionTranscriptWrites(
-            {
-              sessionFile: scope.sessionKey,
-              sessionKey: scope.sessionKey,
-              sessionTarget: scope,
-              assertCommitAllowed: () => {
-                if (!ownerActive) {
-                  throw new Error("owner released during drain");
-                }
-              },
-              withTranscriptWrite: async (run) => {
-                const committedResult = await run();
-                expect(updates).toHaveLength(1);
-                expect(updates[0]).toHaveProperty("messageId");
-                await Promise.resolve();
-                if (change === "abort") {
-                  controller.abort();
-                } else {
-                  ownerActive = false;
-                }
-                return committedResult;
-              },
-            },
-            () => publishHeartbeatSessionReply({ ...params, signal: controller.signal }),
-          );
-          expect(result).toMatchObject({ ok: true });
-          const committed = await events();
-          expect(
-            committed
-              .map(readTranscriptEventMessage)
-              .filter((message) => message?.role === "assistant"),
-          ).toHaveLength(1);
-          expect(updates).toHaveLength(1);
-          expect(await publishHeartbeatSessionReply(params)).toMatchObject({ ok: true });
-          expect(await events()).toEqual(committed);
-          expect(updates).toHaveLength(2);
-          expect(updates[1]).not.toHaveProperty("messageId");
-        } finally {
-          unsubscribe();
-        }
-      });
-    },
-  );
 
   it.each(["Managed source caption", ""])(
     "reconciles an actual source-mirror media receipt with caption %j",

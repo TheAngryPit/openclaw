@@ -11,6 +11,7 @@ import { createDeferred } from "../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { runWorkerProviderReplayRoundTrip } from "../../test/helpers/worker-provider-replay-roundtrip.js";
 import { SessionManager } from "../agents/sessions/session-manager.js";
+import { clearRuntimeConfigSnapshot, setRuntimeConfigSnapshot } from "../config/config.js";
 import { getAgentEventLifecycleGeneration } from "../infra/agent-events.js";
 import {
   claimAgentRunContext,
@@ -97,6 +98,7 @@ describe("cloud worker milestone 2 fault injection", () => {
 
   beforeEach(async () => {
     harness = await ComposedGatewayHarness.create(tempDirs.make("oc-wf-"));
+    setRuntimeConfigSnapshot(harness.cfg);
     await harness.start();
   });
 
@@ -105,6 +107,7 @@ describe("cloud worker milestone 2 fault injection", () => {
       await stopClients(current);
     }
     await harness.close();
+    clearRuntimeConfigSnapshot();
   });
 
   it.skipIf(process.platform === "win32" || process.getuid?.() === 0).each([
@@ -127,10 +130,12 @@ describe("cloud worker milestone 2 fault injection", () => {
         token: "synthetic-worker-cleanup-token",
         branch: "openclaw/cleanup-fixture",
       };
+      const skillsSnapshot = await buildSkillSnapshot(harness.root, {
+        entries: loadWorkspaceSkills(harness.root, { workspaceOnly: true }),
+      });
+      descriptor.assignment.systemPrompt = skillsSnapshot.prompt;
       descriptor.assignment.skillResources = await prepareSkillResourceDelivery(
-        await buildSkillSnapshot(harness.root, {
-          entries: loadWorkspaceSkills(harness.root, { workspaceOnly: true }),
-        }),
+        skillsSnapshot,
         () => {},
       );
       const previousStateDir = process.env.OPENCLAW_STATE_DIR;
@@ -242,7 +247,7 @@ describe("cloud worker milestone 2 fault injection", () => {
         if (outcome === "cancellation") {
           expect(payload).toHaveProperty("aborted", true);
         }
-        expect(harness.placementStore.listPendingWorkspaceResults()).toMatchObject([
+        expect(await harness.placementStore.listPendingWorkspaceResultsAsync()).toMatchObject([
           { sessionId: SESSION_ID, environmentId: ENVIRONMENT_ID, runId: RUN_ID },
         ]);
         expect(harness.placementStore.get(SESSION_ID)?.lastLiveEventAckCursor).toBe(
@@ -403,7 +408,7 @@ describe("cloud worker milestone 2 fault injection", () => {
         expect(settled).toBe(false);
         expect(SessionManager.open(harness.sessionTarget).getEntries()).toHaveLength(2);
         expect(harness.placementStore.get(SESSION_ID)?.lastLiveEventAckCursor).toBeGreaterThan(0);
-        expect(harness.placementStore.listPendingWorkspaceResults()).toMatchObject([
+        expect(await harness.placementStore.listPendingWorkspaceResultsAsync()).toMatchObject([
           { sessionId: SESSION_ID, environmentId: ENVIRONMENT_ID, runId: RUN_ID },
         ]);
 

@@ -3,6 +3,7 @@ import { reserveWorkerEnvironmentNativePublication } from "../gateway/worker-env
 import { sessionChanges } from "../sessions/session-row-changes.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
+import type { OpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.types.js";
 import { runOpenClawStateWorkerOperation } from "../state/openclaw-state-worker-store.js";
 import type { DevicePairingAdmissionFacts } from "./device-pairing-admission.types.js";
 import { invalidatePairedCardRendererCache } from "./device-pairing-card-renderer.js";
@@ -103,12 +104,52 @@ function commitReceipt(value: unknown): DevicePairingCommitReceipt {
       updatedAtMs: environment.updatedAtMs,
     };
   }
+  let nodeApproval: DevicePairingCommitReceipt["nodeApproval"];
+  if (value.nodeApproval !== undefined) {
+    const approved = value.nodeApproval;
+    if (
+      !isRecord(approved) ||
+      typeof approved.nodeId !== "string" ||
+      typeof approved.pairingIdentity !== "string" ||
+      (approved.previousPairingGeneration !== undefined &&
+        typeof approved.previousPairingGeneration !== "string") ||
+      typeof approved.nextPairingGeneration !== "string" ||
+      !isRecord(approved.surface) ||
+      !Array.isArray(approved.surface.caps) ||
+      !approved.surface.caps.every((cap) => typeof cap === "string") ||
+      !Array.isArray(approved.surface.commands) ||
+      !approved.surface.commands.every((command) => typeof command === "string")
+    ) {
+      throw new Error("Invalid node approval receipt");
+    }
+    let permissions: Record<string, boolean> | undefined;
+    if (approved.surface.permissions !== undefined) {
+      if (!isRecord(approved.surface.permissions)) {
+        throw new Error("Invalid node approval permissions receipt");
+      }
+      permissions = {};
+      for (const [key, allowed] of Object.entries(approved.surface.permissions)) {
+        if (typeof allowed !== "boolean") {
+          throw new Error("Invalid node approval permissions receipt");
+        }
+        permissions[key] = allowed;
+      }
+    }
+    nodeApproval = {
+      nodeId: approved.nodeId,
+      pairingIdentity: approved.pairingIdentity,
+      previousPairingGeneration: approved.previousPairingGeneration,
+      nextPairingGeneration: approved.nextPairingGeneration,
+      surface: { caps: approved.surface.caps, commands: approved.surface.commands, permissions },
+    };
+  }
   return {
     kind: "devicePairing",
     beforeRevision: value.beforeRevision,
     revision: value.revision,
     ...(tokensReplaced ? { tokensReplaced } : {}),
     ...(workerEnvironment ? { workerEnvironment } : {}),
+    ...(nodeApproval ? { nodeApproval } : {}),
     changed: value.changed.map((entry) => ({
       deviceId: entry.deviceId,
       binding:
@@ -128,24 +169,39 @@ export function executeDevicePairingMutation<Key extends keyof DevicePairingWork
   command: { type: Key; input: DevicePairingWorkerOperations[Key]["input"] },
   options: {
     baseDir?: string;
+    context?: OpenClawStateWorkerContext;
     assertCurrent?: () => void;
     admit?: (facts: DevicePairingAdmissionFacts) => void;
     onTokensReplaced?: (deviceId: string, roles: readonly string[]) => void;
+    onNodeApproved?: (approval: NonNullable<DevicePairingCommitReceipt["nodeApproval"]>) => void;
+    /** Map a refused operation only after its admission and publication have settled. */
+    onAuthorityRefused?: () => DevicePairingWorkerOperations[Key]["output"];
   } = {},
 ): Promise<DevicePairingWorkerOperations[Key]["output"]> {
-  const context = captureOpenClawStateWorkerContext(
-    options.baseDir ? { env: { ...process.env, OPENCLAW_STATE_DIR: options.baseDir } } : {},
-  );
+  const context =
+    options.context ??
+    captureOpenClawStateWorkerContext(
+      options.baseDir ? { env: { ...process.env, OPENCLAW_STATE_DIR: options.baseDir } } : {},
+    );
   const captured = structuredClone(command);
-  return withDevicePairingLock(async () => {
+  const operation = withDevicePairingLock(async () => {
     context.admission.assertCurrent();
     options.assertCurrent?.();
-    const publication = captureDevicePairingPublication(context.admission);
-    const mutation = publication.beginMutation();
+    // Join codes and retained setup cleanup cannot change paired-device authority.
+    const publication =
+      captured.type === "devicePairing.registerJoinCode" ||
+      captured.type === "devicePairing.redeemJoinCode" ||
+      captured.type === "bootstrap.prune"
+        ? undefined
+        : captureDevicePairingPublication(context.admission);
+    const mutation = publication?.beginMutation();
     let admission: SqliteWorkerOperationAdmission | undefined;
     let published = false;
     let publishEnvironment: ReturnType<typeof reserveWorkerEnvironmentNativePublication>;
     const install = () => {
+      if (!mutation) {
+        return;
+      }
       const committed = admission?.committed;
       if (committed && !published) {
         const receipt = commitReceipt(committed.facts);
@@ -158,10 +214,13 @@ export function executeDevicePairingMutation<Key extends keyof DevicePairingWork
             updatedAtMs: environment.updatedAtMs,
           });
         }
-        mutation.publish(receipt);
-        invalidatePairedCardRendererCache();
         // A callback can throw or read publication recursively; the commit is already installed.
         published = true;
+        mutation.publish(receipt);
+        if (receipt.nodeApproval) {
+          options.onNodeApproved?.(receipt.nodeApproval);
+        }
+        invalidatePairedCardRendererCache();
         if (environmentPublished) {
           sessionChanges.emit({ all: true, scope: "worker-environments" });
         }
@@ -170,7 +229,7 @@ export function executeDevicePairingMutation<Key extends keyof DevicePairingWork
         }
       }
     };
-    const removeService = publication.servicePending(install);
+    const removeService = publication?.servicePending(install);
     try {
       return await runOpenClawStateWorkerOperation(
         context,
@@ -191,8 +250,8 @@ export function executeDevicePairingMutation<Key extends keyof DevicePairingWork
               }
               context.admission.assertCurrent();
               options.assertCurrent?.();
-              for (const facts of admissionFacts(request.facts)) {
-                options.admit?.(facts);
+              for (const fact of admissionFacts(request.facts)) {
+                options.admit?.(fact);
               }
               if (request.stage === "commit" && captured.type === "bootstrap.consume") {
                 publishEnvironment = reserveWorkerEnvironmentNativePublication(
@@ -212,20 +271,33 @@ export function executeDevicePairingMutation<Key extends keyof DevicePairingWork
       try {
         install();
       } finally {
-        mutation.finish(!admission || admission.settlement?.kind === "completed");
-        removeService();
+        mutation?.finish(!admission || admission.settlement?.kind === "completed");
+        removeService?.();
       }
     }
   });
+  const onAuthorityRefused = options.onAuthorityRefused;
+  return onAuthorityRefused
+    ? operation.catch((error: unknown) => {
+        if (error instanceof DevicePairingAuthorityRefusedError) {
+          return onAuthorityRefused();
+        }
+        throw error;
+      })
+    : operation;
 }
 
 /** Start the privileged effect in the same interval that publishes its pairing facts. */
 export async function withCurrentDevicePairingSnapshot<T>(
   baseDir: string | undefined,
   prepare: (paired: readonly PairedDevice[]) => { start: () => T | Promise<T> } | undefined,
+  preparePublication?: () => Promise<void>,
 ): Promise<T | undefined> {
   const begun = await withDevicePairingLock(async () => {
     const { paired } = await listDevicePairingStoreRecordsReadOnly(baseDir, true);
+    if (preparePublication) {
+      await preparePublication();
+    }
     const action = prepare(paired);
     return { value: action?.start() };
   });

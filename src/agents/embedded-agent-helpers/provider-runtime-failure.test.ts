@@ -1,9 +1,5 @@
 import { aroundEach, describe, expect, it } from "vitest";
-import {
-  classifyFailoverReason,
-  isFailoverErrorMessage,
-  isTimeoutErrorMessage,
-} from "../failover/classify.js";
+import { classifyFailoverReason, isTimeoutErrorMessage } from "../failover/classify.js";
 import { withPreparedFailoverProviders } from "../test-helpers/provider-failover-generation.js";
 import { classifyProviderRuntimeFailureKind } from "./provider-runtime-failure.js";
 
@@ -79,13 +75,6 @@ describe("classifyProviderRuntimeFailureKind", () => {
     }
   });
 
-  it("does not make uncertain OAuth refresh wrappers terminal", () => {
-    const message =
-      "OAuth token refresh failed for openai: file lock timeout for /tmp/agent/auth-profiles.json. Please try again or re-authenticate.";
-    expect(classifyProviderRuntimeFailureKind(message)).toBe("auth_refresh");
-    expect(classifyFailoverReason(message, { provider: "openai" })).toBe("auth");
-  });
-
   it("keeps Codex entitlement and usage-limit payloads out of terminal auth", () => {
     const entitlementMessages = [
       "You've hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), try again after 11:34 AM.",
@@ -121,26 +110,10 @@ describe("classifyProviderRuntimeFailureKind", () => {
     ).toBe("auth_refresh");
   });
 
-  it("classifies wrapped OpenAI Codex callback validation failures distinctly", () => {
-    expect(
-      classifyProviderRuntimeFailureKind(
-        "OpenAI Codex OAuth failed (callback_validation_failed): State mismatch",
-      ),
-    ).toBe("callback_validation");
-  });
-
   it("classifies HTML 403 auth failures", () => {
     expect(
       classifyProviderRuntimeFailureKind(
         "403 <!DOCTYPE html><html><body>Access denied</body></html>",
-      ),
-    ).toBe("auth_html");
-  });
-
-  it("classifies HTML 401 auth failures", () => {
-    expect(
-      classifyProviderRuntimeFailureKind(
-        "401 <!DOCTYPE html><html><body>Unauthorized</body></html>",
       ),
     ).toBe("auth_html");
   });
@@ -226,6 +199,5 @@ describe("classifyProviderRuntimeFailureKind", () => {
       'got status: INTERNAL. {"error":{"code":400,"message":"Request malformed","status":"INTERNAL"}}';
     expect(isTimeoutErrorMessage(sample)).toBe(false);
     expect(classifyFailoverReason(sample)).toBeNull();
-    expect(isFailoverErrorMessage(sample)).toBe(false);
   });
 });

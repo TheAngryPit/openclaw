@@ -1,5 +1,7 @@
 import {
   createSqliteWorkerOperationAdmission,
+  observeSqliteWorkerCommittedFacts,
+  type SqliteWorkerAdmissionRequest,
   type SqliteWorkerOperationAdmission,
 } from "../../infra/sqlite-worker-operation-admission.js";
 import type { OpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.types.js";
@@ -15,6 +17,8 @@ export function createPlacementWorkerMutation<Receipt>(params: {
   nativeLocation: string;
   orderedAdmission?: boolean;
   assertCurrent?: () => void;
+  assertGrantCurrent?: () => void;
+  admissionFacts?(request: SqliteWorkerAdmissionRequest): unknown;
   stageCommit(facts: unknown): Publication | undefined;
   readReceipt(facts: unknown, publication: Publication | undefined): Receipt | undefined;
   publish?(receipt: Receipt): void;
@@ -27,13 +31,24 @@ export function createPlacementWorkerMutation<Receipt>(params: {
   let publication: Publication | undefined;
   let transactionGranted = false;
   let commitGranted = false;
+  let published = false;
+  let installed = false;
   const check = () => {
     params.context.admission.assertCurrent();
     params.assertCurrent?.();
   };
+  const install = () => {
+    if (!installed) {
+      publication?.commit();
+      installed = true;
+    }
+  };
   const publish = (receipt: Receipt) => {
-    publication?.commit();
-    params.publish?.(receipt);
+    install();
+    if (!published) {
+      published = true;
+      params.publish?.(receipt);
+    }
     return receipt;
   };
   return {
@@ -59,9 +74,13 @@ export function createPlacementWorkerMutation<Receipt>(params: {
                 if (params.orderedAdmission && request.stage !== stage) {
                   throw new Error(`${params.label} admission is out of order`);
                 }
-                check();
+                params.context.admission.assertCurrent();
+                (params.assertGrantCurrent ?? params.assertCurrent)?.();
+                const facts = params.admissionFacts
+                  ? params.admissionFacts(request)
+                  : request.facts;
                 if (request.stage === "commit") {
-                  publication = params.stageCommit(request.facts) ?? publication;
+                  publication = params.stageCommit(facts) ?? publication;
                 }
                 if (!grant()) {
                   publication?.rollback();
@@ -70,6 +89,16 @@ export function createPlacementWorkerMutation<Receipt>(params: {
                 transactionGranted ||= request.stage === "transaction";
                 commitGranted ||= request.stage === "commit";
                 stage = "commit";
+              });
+              observeSqliteWorkerCommittedFacts(admission, ({ facts }) => {
+                const receipt = params.readReceipt(facts, publication);
+                if (receipt === undefined) {
+                  publication?.invalidate();
+                  throw new Error(`${params.label} committed receipt is invalid`);
+                }
+                // Settlement-dependent waiters must not enqueue work on a transport whose reply
+                // can still fail; committed authority itself is already available to consumers.
+                install();
               });
               return { nativeLocations: [params.nativeLocation], admission };
             },
