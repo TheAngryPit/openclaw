@@ -65,12 +65,6 @@ function commitReceipt(value: unknown): DevicePairingCommitReceipt {
       (entry) =>
         isRecord(entry) &&
         typeof entry.deviceId === "string" &&
-        (entry.operatorBinding === undefined ||
-          entry.operatorBinding === null ||
-          (isRecord(entry.operatorBinding) &&
-            typeof entry.operatorBinding.identity === "string" &&
-            Array.isArray(entry.operatorBinding.scopes) &&
-            entry.operatorBinding.scopes.every((scope) => typeof scope === "string"))) &&
         (entry.binding === null ||
           (isRecord(entry.binding) &&
             typeof entry.binding.identity === "string" &&
@@ -110,17 +104,54 @@ function commitReceipt(value: unknown): DevicePairingCommitReceipt {
       updatedAtMs: environment.updatedAtMs,
     };
   }
+  let nodeApproval: DevicePairingCommitReceipt["nodeApproval"];
+  if (value.nodeApproval !== undefined) {
+    const approved = value.nodeApproval;
+    if (
+      !isRecord(approved) ||
+      typeof approved.nodeId !== "string" ||
+      typeof approved.pairingIdentity !== "string" ||
+      (approved.previousPairingGeneration !== undefined &&
+        typeof approved.previousPairingGeneration !== "string") ||
+      typeof approved.nextPairingGeneration !== "string" ||
+      !isRecord(approved.surface) ||
+      !Array.isArray(approved.surface.caps) ||
+      !approved.surface.caps.every((cap) => typeof cap === "string") ||
+      !Array.isArray(approved.surface.commands) ||
+      !approved.surface.commands.every((command) => typeof command === "string")
+    ) {
+      throw new Error("Invalid node approval receipt");
+    }
+    let permissions: Record<string, boolean> | undefined;
+    if (approved.surface.permissions !== undefined) {
+      if (!isRecord(approved.surface.permissions)) {
+        throw new Error("Invalid node approval permissions receipt");
+      }
+      permissions = {};
+      for (const [key, allowed] of Object.entries(approved.surface.permissions)) {
+        if (typeof allowed !== "boolean") {
+          throw new Error("Invalid node approval permissions receipt");
+        }
+        permissions[key] = allowed;
+      }
+    }
+    nodeApproval = {
+      nodeId: approved.nodeId,
+      pairingIdentity: approved.pairingIdentity,
+      previousPairingGeneration: approved.previousPairingGeneration,
+      nextPairingGeneration: approved.nextPairingGeneration,
+      surface: { caps: approved.surface.caps, commands: approved.surface.commands, permissions },
+    };
+  }
   return {
     kind: "devicePairing",
     beforeRevision: value.beforeRevision,
     revision: value.revision,
     ...(tokensReplaced ? { tokensReplaced } : {}),
     ...(workerEnvironment ? { workerEnvironment } : {}),
+    ...(nodeApproval ? { nodeApproval } : {}),
     changed: value.changed.map((entry) => ({
       deviceId: entry.deviceId,
-      operatorBinding: entry.operatorBinding
-        ? { identity: entry.operatorBinding.identity, scopes: [...entry.operatorBinding.scopes] }
-        : null,
       binding:
         entry.binding === null
           ? null
@@ -140,8 +171,9 @@ export function executeDevicePairingMutation<Key extends keyof DevicePairingWork
     baseDir?: string;
     context?: OpenClawStateWorkerContext;
     assertCurrent?: () => void;
-    admit?: (facts: Exclude<DevicePairingAdmissionFacts, { kind: "pairing-publication" }>) => void;
+    admit?: (facts: DevicePairingAdmissionFacts) => void;
     onTokensReplaced?: (deviceId: string, roles: readonly string[]) => void;
+    onNodeApproved?: (approval: NonNullable<DevicePairingCommitReceipt["nodeApproval"]>) => void;
     /** Map a refused operation only after its admission and publication have settled. */
     onAuthorityRefused?: () => DevicePairingWorkerOperations[Key]["output"];
   } = {},
@@ -162,12 +194,7 @@ export function executeDevicePairingMutation<Key extends keyof DevicePairingWork
       captured.type === "bootstrap.prune"
         ? undefined
         : captureDevicePairingPublication(context.admission);
-    // Runtime facts preserve pairing identity; publishing them must not interrupt live node work.
-    const mutation = publication?.beginMutation(
-      captured.type !== "node.updateSessionHost" &&
-        captured.type !== "node.recordHostStats" &&
-        captured.type !== "node.updateBins",
-    );
+    const mutation = publication?.beginMutation();
     let admission: SqliteWorkerOperationAdmission | undefined;
     let published = false;
     let publishEnvironment: ReturnType<typeof reserveWorkerEnvironmentNativePublication>;
@@ -190,6 +217,9 @@ export function executeDevicePairingMutation<Key extends keyof DevicePairingWork
         // A callback can throw or read publication recursively; the commit is already installed.
         published = true;
         mutation.publish(receipt);
+        if (receipt.nodeApproval) {
+          options.onNodeApproved?.(receipt.nodeApproval);
+        }
         invalidatePairedCardRendererCache();
         if (environmentPublished) {
           sessionChanges.emit({ all: true, scope: "worker-environments" });
@@ -205,12 +235,7 @@ export function executeDevicePairingMutation<Key extends keyof DevicePairingWork
         context,
         async (scope) => {
           try {
-            const result = await scope.execute(captured);
-            if (captured.type === "bootstrap.prune" && result === 0) {
-              context.admission.assertCurrent();
-              options.assertCurrent?.();
-            }
-            return result;
+            return await scope.execute(captured);
           } finally {
             install();
           }
@@ -225,19 +250,8 @@ export function executeDevicePairingMutation<Key extends keyof DevicePairingWork
               }
               context.admission.assertCurrent();
               options.assertCurrent?.();
-              const facts = admissionFacts(request.facts);
-              // Publication receipts belong to this broker, not domain policy callbacks.
-              for (const fact of facts) {
-                if (fact.kind !== "pairing-publication") {
-                  options.admit?.(fact);
-                }
-              }
-              if (request.stage === "commit" && mutation) {
-                const publicationFact = facts.find((fact) => fact.kind === "pairing-publication");
-                if (!publicationFact) {
-                  throw new Error("Pairing commit requires its prospective publication");
-                }
-                mutation.prepare(commitReceipt(publicationFact.receipt));
+              for (const fact of admissionFacts(request.facts)) {
+                options.admit?.(fact);
               }
               if (request.stage === "commit" && captured.type === "bootstrap.consume") {
                 publishEnvironment = reserveWorkerEnvironmentNativePublication(

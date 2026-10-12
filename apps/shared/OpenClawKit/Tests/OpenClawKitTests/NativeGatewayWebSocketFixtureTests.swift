@@ -4,7 +4,7 @@ import Testing
 
 struct NativeGatewayWebSocketFixtureTests {
     @Test
-    func rpcWaitAfterFixtureStopThrowsCancellation() async throws {
+    func `RPC wait after fixture stop throws cancellation`() async throws {
         let fixture = try await NativeGatewayWebSocketFixture.start(issuedDeviceTokens: [])
         defer { fixture.stop() }
         fixture.stop()
