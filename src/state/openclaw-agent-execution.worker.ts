@@ -477,10 +477,11 @@ function openAgentDatabaseBackend(
     "usageCache.acquireLock": loadUsageCacheOperations,
     "usageCache.releaseLock": loadUsageCacheOperations,
   });
-  const context: AgentWorkerOperationContext = {
+  const context: AgentWorkerOperationContext & { transferLargeSessionActorReceipts: true } = {
     open: openWriter,
     options,
     admit,
+    transferLargeSessionActorReceipts: true,
     writeTransaction,
     writeSharedTransaction(source, write) {
       const retained = expectDefined(shared, "Native binding shared-state owner");

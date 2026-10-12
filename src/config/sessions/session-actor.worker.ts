@@ -12,10 +12,12 @@ import { stageSqliteTransactionState } from "../../infra/sqlite-post-commit.js";
 import { readSqliteNativeMutationRevision } from "../../infra/sqlite-schema-facts.js";
 import { assertTransactionUsable } from "../../infra/sqlite-transaction.js";
 import {
+  SQLITE_WORKER_MAX_MESSAGE_BYTES,
   hasSqliteWorkerOutcomeUnknown,
   type SqliteWorkerCommand,
 } from "../../infra/sqlite-worker-contract.js";
 import { deferSqliteWorkerCommitReceipt } from "../../infra/sqlite-worker-operation-admission.js";
+import { createSqliteWorkerTransferOwner } from "../../infra/sqlite-worker-transfer.js";
 import { freezeJsonSnapshot } from "../../shared/immutable-data.js";
 import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db-contract.js";
 import type { AgentWorkerOperationContext } from "../../state/openclaw-agent-operation-context.js";
@@ -64,6 +66,7 @@ export function createSessionActorWorker(
   physicalIdentity: () => SessionActorTarget["database"],
 ) {
   const residents = new Map<string, { state: SessionActorStoredState; bytes: number }>();
+  const transfer = createSqliteWorkerTransferOwner();
   let residentBytes = 0;
   let closed = false;
   const drop = (key: string) => {
@@ -332,17 +335,66 @@ export function createSessionActorWorker(
             ) {
               throw new Error("Session actor requires managed transaction settlement");
             }
-            if (context.captureCommitReceipt) {
-              context.captureCommitReceipt(opened.db, accepted);
-            } else {
-              deferSqliteWorkerCommitReceipt(opened.db, accepted);
-            }
             const turn =
               value && "kind" in value && value.kind === "session-turn"
                 ? value
                 : value && "turn" in value
                   ? value.turn
                   : undefined;
+            if (context.captureCommitReceipt) {
+              context.captureCommitReceipt(opened.db, accepted);
+            } else if (context.transferLargeSessionActorReceipts) {
+              const serialized = serialize(accepted);
+              if (serialized.byteLength > SQLITE_WORKER_MAX_MESSAGE_BYTES) {
+                const handle = transfer.start([{ kind: "outcome", serialized }].values(), {
+                  kinds: ["outcome"],
+                });
+                try {
+                  admit("transaction", {
+                    kind: "session-actor-admission",
+                    snapshot: projectSessionActorAuthority(working.hot),
+                    publication: { kind: "session-actor-outcome-transfer", handle },
+                  });
+                  for (;;) {
+                    const frame = transfer.next(handle.id);
+                    admit("transaction", {
+                      kind: "session-actor-admission",
+                      snapshot: projectSessionActorAuthority(working.hot),
+                      publication: { kind: "session-actor-outcome-frame", frame },
+                    });
+                    if (frame.done) {
+                      break;
+                    }
+                  }
+                  const receipt = {
+                    kind: "session-actor-committed-transfer" as const,
+                    transferId: handle.id,
+                    commandId: command.input.commandId,
+                    phaseId: command.input.phaseId,
+                    phase,
+                    beforeVersion: accepted.receipt.beforeVersion,
+                    afterVersion: accepted.receipt.afterVersion,
+                  };
+                  deferSqliteWorkerCommitReceipt(opened.db, receipt);
+                  admit("commit", {
+                    kind: "session-actor-admission",
+                    snapshot: projectSessionActorAuthority(working.hot),
+                    publication: {
+                      kind: "session-actor-outcome-commit",
+                      receipt,
+                      publication: turn ?? commitPublication,
+                    },
+                    final: true,
+                  });
+                  return accepted;
+                } finally {
+                  transfer.cancel();
+                }
+              }
+              deferSqliteWorkerCommitReceipt(opened.db, accepted);
+            } else {
+              deferSqliteWorkerCommitReceipt(opened.db, accepted);
+            }
             admit("commit", {
               kind: "session-actor-admission",
               snapshot: projectSessionActorAuthority(working.hot),
@@ -410,6 +462,7 @@ export function createSessionActorWorker(
       closed = true;
       residents.clear();
       residentBytes = 0;
+      transfer.close();
     },
   };
 }
