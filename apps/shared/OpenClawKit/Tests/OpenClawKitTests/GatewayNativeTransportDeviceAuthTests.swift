@@ -58,7 +58,11 @@ struct GatewayNativeTransportDeviceAuthTests {
         options.role = "operator"
         options.clientMode = "ui"
         options.requiredAuthMethod = .tailscale
-        try await gateway.connectThroughURLSessionForTest(fixture.url(), options: options)
+        let connections = AsyncStream<Void>.makeStream()
+        try await gateway.connectThroughURLSessionForTest(
+            fixture.url(),
+            options: options,
+            onConnected: { connections.continuation.yield() })
         #expect(fixture.capturedAuth(at: 0) == .init(
             role: "operator",
             token: nil,
@@ -70,7 +74,14 @@ struct GatewayNativeTransportDeviceAuthTests {
         #expect(await gateway.httpResourceAuthorization(ifCurrentRoute: route)?.bearer == nil)
         #expect(await gateway.currentDeviceAuthRoles().persisted.isEmpty)
         fixture.closeConnection(at: 0)
-        try await waitUntil("personal credentialless reconnect") { await fixture.capturedAuth(at: 1) != nil }
+        try await AsyncTimeout.withTimeout(
+            seconds: 15,
+            onTimeout: { URLError(.timedOut) },
+            operation: {
+                var events = connections.stream.makeAsyncIterator()
+                _ = await events.next()
+                _ = await events.next()
+            })
         #expect(fixture.capturedAuth(at: 1) == .init(
             role: "operator",
             token: nil,
