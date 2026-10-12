@@ -1,0 +1,170 @@
+name: QA PR 163765 synthetic MCP client diagnostic
+
+on:
+  push:
+    branches:
+      - qa/pr163765-docker-seed-diagnostic-proof-20261012-v2
+    paths:
+      - .github/workflows/qa-pr163765-native-gateway-rpc-proof.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qa-pr163765-docker-seed-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PRODUCT_SHA: 607c2865576744873bd7ce0ba2f81a0107aa9a48
+  OPENCLAW_DOCKER_E2E_SELECTED_SHA: 607c2865576744873bd7ce0ba2f81a0107aa9a48
+  WORKFLOW_PATH: .github/workflows/qa-pr163765-native-gateway-rpc-proof.yml
+  OPENCLAW_DOCKER_ALL_LANES: mcp-code-mode-gateway
+  OPENCLAW_DOCKER_ALL_FAILURE_TAIL_LINES: "400"
+  OPENCLAW_DOCKER_ALL_LIVE_MODE: skip
+  OPENCLAW_DOCKER_E2E_ALLOW_UNRELEASED_CHANGELOG: "true"
+  OPENCLAW_DOCKER_ALL_PARALLELISM: "1"
+  OPENCLAW_DOCKER_ALL_TAIL_PARALLELISM: "1"
+
+jobs:
+  synthetic-mcp-diagnostic:
+    if: github.repository == 'TheAngryPit/openclaw' && github.ref == 'refs/heads/qa/pr163765-docker-seed-diagnostic-proof-20261012-v2' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 115
+    steps:
+      - name: Checkout the isolated QA overlay
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Verify the exact workflow-only parent and source pins
+        env:
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EVENT_SHA"
+          test "$(git rev-parse HEAD^)" = "$PRODUCT_SHA"
+          test "$(git rev-list --parents -n 1 HEAD | awk '{ print NF - 1 }')" = "1"
+          paths="$(git diff-tree --no-commit-id --name-only -r HEAD)"
+          test "$paths" = "$WORKFLOW_PATH"
+          {
+            echo "QA=$EVENT_SHA"
+            echo "product=$PRODUCT_SHA"
+            echo "workflow=$WORKFLOW_PATH"
+            echo "lane=$OPENCLAW_DOCKER_ALL_LANES"
+            echo "failureTailLines=$OPENCLAW_DOCKER_ALL_FAILURE_TAIL_LINES"
+            sha256sum "$WORKFLOW_PATH"
+          } | tee "$RUNNER_TEMP/pr163765-docker-provenance.txt"
+
+      - name: Checkout frozen product source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.PRODUCT_SHA }}
+          path: product
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up the canonical pinned Node toolchain
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+
+      - name: Install frozen dependencies
+        working-directory: product
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          test -z "$(git status --porcelain)"
+          test -z "${OPENAI_API_KEY:-}"
+          test -z "${ANTHROPIC_API_KEY:-}"
+          test -z "${CODEX_API_KEY:-}"
+          corepack enable
+          corepack prepare pnpm@12.9.0 --activate
+          test "$(pnpm --version)" = "12.9.0"
+          pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Build and package through the canonical Docker seed entry
+        working-directory: product
+        run: |
+          set -euo pipefail
+          pnpm clean:dist
+          pnpm build:ci-artifacts
+          package_dir="$RUNNER_TEMP/pr163765-docker-seed-package"
+          node scripts/package-openclaw-for-docker.mjs --skip-build \
+            --allow-unreleased-changelog --output-dir "$package_dir" \
+            --output-name openclaw-current.tgz
+          test -s "$package_dir/openclaw-current.tgz"
+          sha256sum "$package_dir/openclaw-current.tgz" > "$RUNNER_TEMP/pr163765-docker-package.sha256"
+          printf 'OPENCLAW_CURRENT_PACKAGE_TGZ=%s/openclaw-current.tgz\n' "$package_dir" >> "$GITHUB_ENV"
+
+      - name: Execute the single mock-provider MCP lane once
+        working-directory: product
+        run: |
+          set -euo pipefail
+          test "$OPENCLAW_DOCKER_ALL_LANES" = "mcp-code-mode-gateway"
+          test "$OPENCLAW_DOCKER_ALL_LIVE_MODE" = "skip"
+          log="$RUNNER_TEMP/pr163765-docker-diagnostic.log"
+          set +e
+          pnpm test:docker:all > "$log" 2>&1
+          status=$?
+          set -e
+          printf '%s\n' "$status" > "$RUNNER_TEMP/pr163765-docker-command-status.txt"
+          tail -n 500 "$log"
+          exit "$status"
+
+      - name: Audit one executed lane and joined cleanup without hiding failure
+        if: always()
+        working-directory: product
+        run: |
+          set -euo pipefail
+          node --input-type=module - "$RUNNER_TEMP/pr163765-docker-lane-receipt.json" <<'NODE'
+          import assert from "node:assert/strict";
+          import fs from "node:fs";
+          import path from "node:path";
+          const root = ".artifacts/docker-tests";
+          const summaries = fs.readdirSync(root, { withFileTypes: true })
+            .filter((entry) => entry.isDirectory() && /^[0-9]{8}T[0-9]{6}Z$/.test(entry.name))
+            .map((entry) => path.join(root, entry.name, "summary.json"))
+            .filter((file) => fs.existsSync(file));
+          assert.equal(summaries.length, 1, "Require one fresh canonical run summary.");
+          const summary = JSON.parse(fs.readFileSync(summaries[0], "utf8"));
+          const receipt = { product: process.env.PRODUCT_SHA, summary: summaries[0],
+            selectedLanes: summary.selectedLanes, lanes: summary.lanes,
+            status: summary.status, cleanup: summary.cleanup };
+          fs.writeFileSync(process.argv[2], JSON.stringify(receipt, null, 2) + "\n");
+          console.log(JSON.stringify(receipt));
+          assert.deepEqual(summary.selectedLanes, ["mcp-code-mode-gateway"]);
+          assert.equal(summary.lanes?.length, 1, "Zero or additional executed lanes do not qualify.");
+          assert.equal(summary.lanes[0].name, "mcp-code-mode-gateway");
+          assert.equal(summary.lanes[0].timedOut, false);
+          assert.equal(summary.lanes[0].noOutputTimedOut, false);
+          assert.equal(summary.cleanup?.joined, true, "Canonical child cleanup must join.");
+          assert.ok(Number.isInteger(summary.lanes[0].status));
+          NODE
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+          printf 'product=%s\nsourcePristine=true\n' "$PRODUCT_SHA" \
+            > "$RUNNER_TEMP/pr163765-docker-source-cleanup.txt"
+
+      - name: Retain the full synthetic lane and provenance receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr163765-docker-seed-diagnostic-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/pr163765-docker-provenance.txt
+            ${{ runner.temp }}/pr163765-docker-package.sha256
+            ${{ runner.temp }}/pr163765-docker-diagnostic.log
+            ${{ runner.temp }}/pr163765-docker-command-status.txt
+            ${{ runner.temp }}/pr163765-docker-lane-receipt.json
+            ${{ runner.temp }}/pr163765-docker-source-cleanup.txt
+            product/.artifacts/docker-tests/????????T??????Z/mcp-code-mode-gateway.log
+            product/.artifacts/docker-tests/????????T??????Z/summary.json
+            product/.artifacts/docker-tests/????????T??????Z/failures.json
+            product/.artifacts/docker-tests/lane-timings.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
