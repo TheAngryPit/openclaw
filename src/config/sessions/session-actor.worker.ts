@@ -66,7 +66,6 @@ export function createSessionActorWorker(
   physicalIdentity: () => SessionActorTarget["database"],
 ) {
   const residents = new Map<string, { state: SessionActorStoredState; bytes: number }>();
-  const transfer = createSqliteWorkerTransferOwner();
   let residentBytes = 0;
   let closed = false;
   const drop = (key: string) => {
@@ -227,11 +226,10 @@ export function createSessionActorWorker(
         | undefined;
       let stale: Extract<SessionActorOutcome<never>, { kind: "stale-version" }> | undefined;
       try {
-        database = context.open();
-        registerSessionActorEntryPatchOwner(database, prepareEntryPatch);
         requireTarget(target);
-        const opened = database;
         if (command.type === "session.actor.read") {
+          database = context.open();
+          registerSessionActorEntryPatchOwner(database, prepareEntryPatch);
           const before = read(database, target);
           context.admit("transaction", {
             kind: "session-actor-admission",
@@ -240,7 +238,10 @@ export function createSessionActorWorker(
           observed.settled("read");
           return structuredClone(before.hot);
         }
-        const outcome = context.writeTransaction(`session.actor.${phase}`, "Session actor", () => {
+        const operationLabel = `session.actor.${phase}`;
+        const outcome = context.writeTransaction(operationLabel, "Session actor", (opened) => {
+          database = opened;
+          registerSessionActorEntryPatchOwner(opened, prepareEntryPatch);
           const admit = (stage: "transaction" | "commit", publication: unknown) => {
             const revision = readSqliteNativeMutationRevision(opened.db);
             withoutSqliteDatabaseWriteScope(opened.db, () => context.admit(stage, publication));
@@ -343,45 +344,43 @@ export function createSessionActorWorker(
                   : undefined;
             if (context.captureCommitReceipt) {
               context.captureCommitReceipt(opened.db, accepted);
-            } else if (context.transferLargeSessionActorReceipts) {
+            } else {
               const serialized = serialize(accepted);
               if (serialized.byteLength > SQLITE_WORKER_MAX_MESSAGE_BYTES) {
+                const transfer = createSqliteWorkerTransferOwner();
                 const handle = transfer.start([{ kind: "outcome", serialized }].values(), {
                   kinds: ["outcome"],
                 });
                 try {
-                  admit("transaction", {
-                    kind: "session-actor-admission",
-                    snapshot: projectSessionActorAuthority(working.hot),
-                    publication: { kind: "session-actor-outcome-transfer", handle },
-                  });
+                  let frame = transfer.next(handle.id);
+                  let finalFrames;
                   for (;;) {
-                    const frame = transfer.next(handle.id);
+                    const next = transfer.next(handle.id);
+                    if (next.done) {
+                      finalFrames = [frame, next];
+                      break;
+                    }
                     admit("transaction", {
                       kind: "session-actor-admission",
                       snapshot: projectSessionActorAuthority(working.hot),
-                      publication: { kind: "session-actor-outcome-frame", frame },
+                      publication: {
+                        kind: "session-actor-outcome",
+                        transfer: { handle, frames: [frame] },
+                      },
                     });
-                    if (frame.done) {
-                      break;
-                    }
+                    frame = next;
                   }
                   const receipt = {
                     kind: "session-actor-committed-transfer" as const,
                     transferId: handle.id,
-                    commandId: command.input.commandId,
-                    phaseId: command.input.phaseId,
-                    phase,
-                    beforeVersion: accepted.receipt.beforeVersion,
-                    afterVersion: accepted.receipt.afterVersion,
                   };
                   deferSqliteWorkerCommitReceipt(opened.db, receipt);
                   admit("commit", {
                     kind: "session-actor-admission",
                     snapshot: projectSessionActorAuthority(working.hot),
                     publication: {
-                      kind: "session-actor-outcome-commit",
-                      receipt,
+                      kind: "session-actor-outcome",
+                      transfer: { handle, frames: finalFrames },
                       publication: turn ?? commitPublication,
                     },
                     final: true,
@@ -391,8 +390,6 @@ export function createSessionActorWorker(
                   transfer.cancel();
                 }
               }
-              deferSqliteWorkerCommitReceipt(opened.db, accepted);
-            } else {
               deferSqliteWorkerCommitReceipt(opened.db, accepted);
             }
             admit("commit", {
@@ -462,7 +459,6 @@ export function createSessionActorWorker(
       closed = true;
       residents.clear();
       residentBytes = 0;
-      transfer.close();
     },
   };
 }

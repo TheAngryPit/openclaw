@@ -15,7 +15,6 @@ import {
 import { createAgentRunDirectAbortError } from "../../agents/run-termination.js";
 import { killSubagentRunAdmin } from "../../agents/subagents/registry/subagent-control-kill.js";
 import { ensureSubagentControllerOwnsRun } from "../../agents/subagents/registry/subagent-control-scope.js";
-import type { SubagentRequestSessionOrigin } from "../../agents/subagents/registry/subagent-exec-request-ownership.js";
 import {
   getCurrentSubagentRunOwner,
   subagentRuns,
@@ -40,6 +39,8 @@ import { resolveSessionStoreKey } from "../session-utils.js";
 import type { WorkerInferenceCancellation } from "../worker-environments/inference-control-internal.js";
 import {
   canRequesterAbortChatRun,
+  captureSessionAbortRequestFilter,
+  captureSessionAbortRequestOrigin,
   resolveAuthorizedPreRegisteredRunsForSessionKeys,
   resolveAuthorizedRunsForSessionKeys,
   resolveAuthorizedQueuedTurnsForSession,
@@ -215,7 +216,9 @@ export function abortQueuedCollectorSession(
         {
           assertCurrent,
           preparePublication: publication,
-          beforeSessionKill: () => {
+          beforeSessionKill: async () => {
+            await params.beforeAbort?.();
+            assertCurrent();
             // Resolve Gateway owners under the kill runtime's session fence.
             // Signal them only after this collector's FIFO reservation is held.
             const plan = prepareChatSessionAbort(
@@ -291,11 +294,7 @@ function prepareChatSessionAbort(
     defaultAgentId: params.defaultAgentId,
     requester: params.requester,
   };
-  const acceptsRequest: SubagentRequestSessionOrigin["acceptsRequest"] = (identity) =>
-    canRequesterAbortChatRun(identity, params.requester) &&
-    (params.includeProtectedRuns === true ||
-      (identity.controlUiVisible !== false &&
-        !(params.preserveSideRuns && identity.turnKind === "btw")));
+  const acceptsRequest = captureSessionAbortRequestFilter(params);
   const commands = captureExecRequestCancellation(
     {
       sessionKey: params.sessionKey,
@@ -346,22 +345,7 @@ function prepareChatSessionAbort(
     stopReason: params.stopReason,
     assertCurrent: params.assertCurrent,
   });
-  const sessionOrigin: SubagentRequestSessionOrigin | undefined =
-    session?.entry &&
-    (params.requiredSessionId === undefined ||
-      session.entry.sessionId === params.requiredSessionId) &&
-    (params.sessionId === undefined || session.entry.sessionId === params.sessionId)
-      ? {
-          target: {
-            agentId: session.agentId,
-            storePath: session.storePath,
-            sessionKey: session.canonicalKey,
-            sessionId: session.entry.sessionId,
-            lifecycleRevision: session.entry.lifecycleRevision ?? null,
-          },
-          acceptsRequest,
-        }
-      : undefined;
+  const sessionOrigin = captureSessionAbortRequestOrigin(params, acceptsRequest);
   const queuedPlan = resolveAuthorizedQueuedTurnsForSession({
     ...ownerScope,
     context: params.context,
@@ -426,6 +410,7 @@ function prepareChatSessionAbort(
     }
   };
   const cancelWorker = () => {
+    params.assertCurrent?.();
     workerCancellationPersistence = workerCancellation?.cancel({
       assertCurrent: params.assertCurrent,
       onCancelled: recordRun,
@@ -603,7 +588,6 @@ function prepareChatSessionAbort(
       params.requester.isAdmin &&
       canCancelWorkerSession
     ) {
-      params.assertCurrent?.();
       cancelWorker();
     }
   };
@@ -634,12 +618,11 @@ function prepareChatSessionAbort(
         ...admittedAbortPersistence,
       ]);
       // A captured session failure can also surface through partial persistence.
-      const failures = new Set<unknown>();
-      for (const settled of [worker, partial, exec, embedded, ...admitted]) {
-        if (settled.status === "rejected") {
-          failures.add(settled.reason);
-        }
-      }
+      const failures = new Set<unknown>(
+        [worker, partial, exec, embedded, ...admitted].flatMap((settled) =>
+          settled.status === "rejected" ? [settled.reason] : [],
+        ),
+      );
       if (params.session && !params.session.ok) {
         failures.add(params.session.error);
       }
@@ -681,15 +664,20 @@ export async function abortChatRunsForSessionKeyWithPartials(
         sessionKey: params.sessionKey,
         agentId: params.agentId,
         sessionId: params.sessionId,
+        lifecycleRevision: params.session?.ok
+          ? params.session.value.entry?.lifecycleRevision
+          : undefined,
         execCancellation: plan.commands,
         sessionOrigin: plan.sessionOrigin,
         assertCurrent: params.assertCurrent,
-        beforeKill: () => {
+        beforeKill: async () => {
+          await params.beforeAbort?.();
           plan.abort();
           return true;
         },
       });
     } else {
+      await params.beforeAbort?.();
       plan.abort();
     }
     if (!result.unauthorized && !result.error) {
@@ -718,9 +706,7 @@ export async function abortChatRunsForSessionKeyWithPartials(
     ...result,
     aborted:
       result.aborted ||
-      Boolean(descendants?.killed) ||
-      Boolean(descendants?.continuationRetired) ||
-      Boolean(descendants?.execAborted),
+      Boolean(descendants?.killed || descendants?.continuationRetired || descendants?.execAborted),
     descendants,
     ...(warning ? { warning } : {}),
   };

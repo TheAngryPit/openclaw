@@ -12,8 +12,6 @@ export type AgentWorkerOperationContext = {
   admit: (stage: "transaction" | "commit", publication?: unknown) => void;
   /** Native incognito delegates commit evidence to its existing host transaction owner. */
   captureCommitReceipt?: (database: DatabaseSync, facts: unknown) => void;
-  /** Durable session actors can transfer a large domain receipt before staging its small witness. */
-  transferLargeSessionActorReceipts?: true;
   writeTransaction: <T>(
     operationLabel: string,
     owner: string,

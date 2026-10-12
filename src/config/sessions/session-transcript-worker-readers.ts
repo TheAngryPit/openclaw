@@ -282,6 +282,7 @@ export function createSessionHistoryWorkerReaders(
       "a transcript watermark",
       (value) => value.watermark,
     ),
+    readStats: reader("transcript-stats", "transcript statistics", (value) => value.stats),
     readActivitySummarySource: reader(
       "session-activity-summary-source",
       "an Activity recap source",
@@ -420,12 +421,6 @@ export function createSessionHistoryWorkerReaders(
       (value) => value.message,
     ),
     readVoiceSessions: reader("voice-sessions", "voice sessions", (value) => value),
-    readUsageCache: reader(
-      "usage-refresh-lock",
-      "usage cache",
-      (value) => value,
-      (input) => ({ kind: "usage-cache", ...input }),
-    ),
     readMembershipFacts: reader("session-membership-facts", "membership facts", (value) => value),
     readMembers: reader("session-members", "members", (value) => value),
     readSuggestions: reader("session-suggestions", "suggestions", (value) => value.suggestions),

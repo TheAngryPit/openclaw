@@ -73,10 +73,9 @@ function createFixture() {
     afterTransaction?: () => void;
     transactions: number;
   } = { transactions: 0 };
-  const context: AgentWorkerOperationContext & { transferLargeSessionActorReceipts: true } = {
+  const context: AgentWorkerOperationContext = {
     open: () => database,
     options: { agentId: "main", path: database.path },
-    transferLargeSessionActorReceipts: true,
     admit: (stage, facts) => hooks.admit?.(stage, facts),
     writeTransaction(_label, _owner, write) {
       hooks.transactions += 1;
