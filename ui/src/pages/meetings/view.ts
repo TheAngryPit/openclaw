@@ -11,6 +11,7 @@ import { repeat } from "lit/directives/repeat.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import MarkdownIt from "markdown-it";
 import { pathForRoute } from "../../app-route-paths.ts";
+import { shellLayoutTraits } from "../../app/shell-layout-traits.ts";
 import { renderHubTabs } from "../../components/hub-tabs.ts";
 import { icons } from "../../components/icons.ts";
 import { toSanitizedMarkdownHtml } from "../../components/markdown.ts";
@@ -90,6 +91,7 @@ type TranscriptsViewProps = {
   onSummaryRetry?: () => void;
   exportState: { kind: "idle" | "loading" | "done" | "error"; message?: string };
   onNavigate: (patch: Record<string, string | null>) => void;
+  onOpenCaptureSettings: () => void;
   onRefresh: () => void;
   onReaderRetry: () => void;
   onReaderTab: (tab: "text" | "summary") => void;
@@ -573,7 +575,10 @@ export function renderTranscripts(props: TranscriptsViewProps) {
   const selected = Boolean(new URLSearchParams(props.search).get("selector"));
   const captureTarget = SETTINGS_SEARCH_TARGETS.meetingCapture;
   return html`<section class="transcripts-workspace">
-    <header class="content-header content-header--page">
+    <header
+      class="content-header content-header--page"
+      ${shellLayoutTraits({ toolbarHeader: true })}
+    >
       <div>
         <h1 class="page-title">${t("tabs.meetings")}</h1>
         <p class="page-sub">${t("subtitles.meetings")}</p>
@@ -586,6 +591,13 @@ export function renderTranscripts(props: TranscriptsViewProps) {
             captureTarget.search +
             captureTarget.hash
           }
+          @click=${(event: MouseEvent) => {
+            if (!shouldHandleNavigationClick(event)) {
+              return;
+            }
+            event.preventDefault();
+            props.onOpenCaptureSettings();
+          }}
           >${icons.settings}${t("meetingCapture.title")}</a
         >
         <button

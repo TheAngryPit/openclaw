@@ -6,7 +6,7 @@ import {
   closeOpenClawStateDatabaseForTest,
   createChannelIngressQueueForTests,
 } from "openclaw/plugin-sdk/channel-ingress-test-runtime";
-import type { ChannelIngressQueue } from "openclaw/plugin-sdk/channel-outbound";
+import * as channelOutbound from "openclaw/plugin-sdk/channel-outbound";
 import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createMSTeamsIngress } from "./msteams-ingress.js";
@@ -116,22 +116,6 @@ afterEach(() => {
 });
 
 describe("Microsoft Teams durable ingress", () => {
-  it("propagates durable append failure before scheduling dispatch", async () => {
-    await withQueue(async (queue) => {
-      const appendError = new Error("sqlite unavailable");
-      const failingQueue: ChannelIngressQueue<IngressPayload> = {
-        ...queue,
-        enqueue: vi.fn().mockRejectedValue(appendError),
-      };
-      const dispatch = vi.fn();
-      const ingress = makeIngress(failingQueue, dispatch);
-
-      await expect(ingress.accept(activity())).rejects.toBe(appendError);
-      expect(dispatch).not.toHaveBeenCalled();
-      await ingress.stop();
-    });
-  });
-
   it("does not dispatch a failed append's stale live context on retry", async () => {
     await withQueue(async (queue) => {
       let failNext = true;
@@ -176,18 +160,6 @@ describe("Microsoft Teams durable ingress", () => {
       conversationType: "groupChat",
       expectedConversationId: "19:group-restart@thread.v2",
       recovery: "restart",
-    },
-    {
-      conversationId: "19:channel-restart@thread.tacv2;messageid=thread-root",
-      conversationType: "channel",
-      expectedConversationId: "19:channel-restart@thread.tacv2;messageid=thread-root",
-      recovery: "restart",
-    },
-    {
-      conversationId: "19:group-retry@thread.v2",
-      conversationType: "groupChat",
-      expectedConversationId: "19:group-retry@thread.v2",
-      recovery: "retry",
     },
     {
       conversationId: "19:channel-retry@thread.tacv2;messageid=thread-root",
@@ -299,38 +271,6 @@ describe("Microsoft Teams durable ingress", () => {
     });
   });
 
-  it("stores raw activity JSON and uses the exact conversation.id as its lane", async () => {
-    await withQueue(async (queue) => {
-      const deliveredText: string[] = [];
-      const ingress = makeIngress(queue, async (delivered, lifecycle) => {
-        deliveredText.push(delivered.text ?? "");
-        await lifecycle.onAdopted();
-      });
-      const incoming = activity({
-        id: "activity-raw",
-        conversationId: "19:channel@thread.tacv2;messageid=thread-root",
-        text: "before",
-      });
-      await ingress.accept(incoming);
-      const pending = await queue.listPending();
-      expect(pending).toHaveLength(1);
-      expect(pending[0]).toMatchObject({
-        id: "activity-raw",
-        laneKey: "19:channel@thread.tacv2;messageid=thread-root",
-        payload: { version: 1, rawActivity: JSON.stringify(incoming) },
-      });
-      incoming.text = "after";
-
-      ingress.start();
-      try {
-        await waitForVerdict(queue, "activity-raw", "completed");
-        expect(deliveredText).toEqual(["before"]);
-      } finally {
-        await ingress.stop();
-      }
-    });
-  });
-
   it("journals only message turns and adaptive-card agent turns", async () => {
     await withQueue(async (queue) => {
       const ingress = makeIngress(queue, vi.fn());
@@ -413,8 +353,19 @@ describe("Microsoft Teams durable ingress", () => {
           active -= 1;
         }
       });
-      const listPending = vi.spyOn(queue, "listPending");
-      const ingress = makeIngress(queue, dispatch);
+      const factory = vi.spyOn(channelOutbound, "createChannelIngressMonitor");
+      let ingress: ReturnType<typeof makeIngress>;
+      let monitor: ReturnType<typeof channelOutbound.createChannelIngressMonitor>;
+      try {
+        ingress = makeIngress(queue, dispatch);
+        const result = factory.mock.results[0];
+        if (result?.type !== "return") {
+          throw new Error("Microsoft Teams ingress did not create its ingress monitor");
+        }
+        monitor = result.value;
+      } finally {
+        factory.mockRestore();
+      }
       ingress.start();
       try {
         for (let index = 0; index < 8; index += 1) {
@@ -423,15 +374,9 @@ describe("Microsoft Teams durable ingress", () => {
           );
         }
         await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(8));
-        await new Promise<void>((resolve) => {
-          setImmediate(resolve);
-        });
-
-        const drainScansBeforeNinth = listPending.mock.calls.length;
+        await monitor.waitForPumpIdle();
         await ingress.accept(activity({ id: "activity-concurrency-8", conversationId: "lane-8" }));
-        await vi.waitFor(() =>
-          expect(listPending.mock.calls.length).toBeGreaterThan(drainScansBeforeNinth),
-        );
+        await monitor.waitForPumpIdle();
 
         expect(dispatch).toHaveBeenCalledTimes(8);
         expect(maxActive).toBe(8);

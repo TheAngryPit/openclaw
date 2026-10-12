@@ -48,57 +48,17 @@ const activeExecApprovalHint: ChannelOutboundPayloadHint = {
 };
 
 describe("googleChatApprovalCapability", () => {
-  it("declares native exec, plugin, and system-agent approval runtime support", () => {
-    const runtime = googleChatApprovalCapability.nativeRuntime;
-    expect(runtime?.eventKinds).toEqual(["exec", "plugin", "system-agent"]);
-    expect(runtime?.availability.isConfigured({ cfg: approvalConfig() })).toBe(true);
-  });
+  it("directs exec approval recovery to the Web UI and account setup", () => {
+    const text = googleChatApprovalCapability.describeExecApprovalSetup?.({
+      channel: "googlechat",
+      channelLabel: "Google Chat",
+      accountId: "work",
+    });
 
-  it("does not enable native cards when webhook callback audience auth is incomplete", () => {
-    const runtime = googleChatApprovalCapability.nativeRuntime;
-    const account = {
-      serviceAccount: GOOGLE_CHAT_APPROVAL_ACCOUNT.serviceAccount,
-      allowFrom: ["users/123"],
-    };
-    expect(runtime?.availability.isConfigured({ cfg: approvalConfig(account) })).toBe(false);
-    expect(
-      runtime?.availability.isConfigured({
-        cfg: approvalConfig({ ...account, audienceType: "project-number" }),
-      }),
-    ).toBe(false);
-  });
-
-  it("requires a top-level approval forwarding route before enabling native cards", () => {
-    const runtime = googleChatApprovalCapability.nativeRuntime;
-    const googlechat = { ...GOOGLE_CHAT_APPROVAL_ACCOUNT, appPrincipal: undefined };
-
-    expect(runtime?.availability.isConfigured({ cfg: { channels: { googlechat } } })).toBe(false);
-    expect(
-      runtime?.availability.isConfigured({
-        cfg: approvalConfig(googlechat, { exec: { enabled: false } }),
-      }),
-    ).toBe(false);
-    expect(
-      runtime?.availability.isConfigured({
-        cfg: approvalConfig(googlechat, { exec: { enabled: true, mode: "targets" } }),
-      }),
-    ).toBe(false);
-    expect(
-      runtime?.availability.isConfigured({
-        cfg: approvalConfig(googlechat, { plugin: { enabled: true } }),
-      }),
-    ).toBe(true);
-  });
-
-  it("enables native cards for supported webhook audience modes", () => {
-    const runtime = googleChatApprovalCapability.nativeRuntime;
-    const account = { ...GOOGLE_CHAT_APPROVAL_ACCOUNT, appPrincipal: undefined };
-    expect(runtime?.availability.isConfigured({ cfg: approvalConfig(account) })).toBe(true);
-    expect(
-      runtime?.availability.isConfigured({
-        cfg: approvalConfig({ ...account, audienceType: "project-number", audience: "1234567890" }),
-      }),
-    ).toBe(true);
+    expect(text).toContain("Approve it from the Web UI for now.");
+    expect(text).not.toMatch(/terminal UI|\bTUI\b/i);
+    expect(text).toContain("`channels.googlechat.accounts.work.allowFrom`");
+    expect(text).toContain("`channels.googlechat.accounts.work.defaultTo`");
   });
 
   it("preserves Google Chat approval actor authorization", () => {
@@ -203,43 +163,5 @@ describe("googleChatApprovalCapability", () => {
         hint: activeExecApprovalHint,
       }),
     ).toBe(true);
-  });
-
-  it("keeps the local exec prompt when native Google Chat delivery cannot own it", () => {
-    const prompt = { payload: execApprovalPayload, hint: activeExecApprovalHint };
-    expect(
-      shouldSuppressLocalGoogleChatExecApprovalPrompt({
-        ...prompt,
-        cfg: approvalConfig(),
-        hint: { ...activeExecApprovalHint, nativeRouteActive: false },
-      }),
-    ).toBe(false);
-    expect(
-      shouldSuppressLocalGoogleChatExecApprovalPrompt({
-        ...prompt,
-        cfg: approvalConfig(GOOGLE_CHAT_APPROVAL_ACCOUNT, { exec: { enabled: false } }),
-      }),
-    ).toBe(false);
-    expect(
-      shouldSuppressLocalGoogleChatExecApprovalPrompt({
-        ...prompt,
-        cfg: approvalConfig({ ...GOOGLE_CHAT_APPROVAL_ACCOUNT, audience: undefined }),
-      }),
-    ).toBe(false);
-    expect(
-      shouldSuppressLocalGoogleChatExecApprovalPrompt({
-        cfg: approvalConfig(),
-        payload: {
-          channelData: {
-            execApproval: {
-              approvalId: "12345678-1234-1234-1234-123456789012",
-              approvalSlug: "12345678",
-              approvalKind: "plugin",
-            },
-          },
-        },
-        hint: { kind: "approval-pending", approvalKind: "plugin", nativeRouteActive: true },
-      }),
-    ).toBe(false);
   });
 });

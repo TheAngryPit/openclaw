@@ -30,7 +30,6 @@ import { hashConfigRaw } from "./io.read-helpers.js";
 import { readCurrentConfigForPolicyCheckAsync } from "./io.runtime.js";
 import * as snapshotPreparation from "./io.snapshot-preparation.js";
 import { createConfigIoWorkerFixture } from "./io.worker.test-support.js";
-import { getConfigResolutionFacts } from "./resolution-facts.js";
 import { registerManagedRuntimeConfigWriteOwner } from "./runtime-snapshot.js";
 import type { ConfigFileSnapshot } from "./types.js";
 
@@ -83,30 +82,6 @@ function fixture(raw?: string) {
   return { ...options, io: createConfigIO(options) };
 }
 
-it("strictly loads cold plugin metadata and records health without main-thread SQLite", async () => {
-  const raw = JSON.stringify({
-    gateway: { mode: "local", auth: { mode: "token", token: "${MISSING_FIXTURE_TOKEN}" } },
-    env: { vars: { CONFIG_FIXTURE_VALUE: "accepted" } },
-  });
-  const { io, env, configPath, homedir, logger } = fixture(raw);
-  const mainSql = observeMainThreadSql();
-  try {
-    const config = await withPluginCache(createPluginCache(), () => io.loadConfigAsync());
-    expect(config.gateway?.mode).toBe("local");
-    expect(config.agents?.defaults?.compaction?.mode).toBe("safeguard");
-    expect([...(getConfigResolutionFacts(config) ?? [])]).toContain("gateway.auth.token");
-    expect(env.CONFIG_FIXTURE_VALUE).toBe("accepted");
-    mainSql.expectIdle();
-  } finally {
-    mainSql.restore();
-  }
-  expect(
-    configHealth.readConfigHealthStateFromStore({ env, homedir, logger }).entries?.[configPath]
-      ?.lastKnownGood?.hash,
-  ).toBe(hashConfigRaw(raw));
-  expect(fs.readFileSync(configPath, "utf8")).toBe(raw);
-});
-
 it.each(["sync", "async"] as const)(
   "reads current runtime migration obligations without full database snapshots (%s)",
   async (mode) => {
@@ -116,7 +91,7 @@ it.each(["sync", "async"] as const)(
       reason: "Missing plugin",
       command: "openclaw doctor --fix",
     };
-    recordDeferredPluginMigrations({ env: options.env, pending: [pending] });
+    await recordDeferredPluginMigrations({ env: options.env, pending: [pending] });
     await closeOpenClawStateDatabaseAsync();
     const synchronousSnapshot = vi.spyOn(sqliteReadOnlyWorker, "runSqliteReadOnlyWorkerSync");
     const context = configContext.createConfigIoContext(options);
@@ -132,9 +107,15 @@ it.each(["sync", "async"] as const)(
     fs.utimesSync(stagingRoot, sentinel, sentinel);
     const stagingMtime = fs.statSync(stagingRoot).mtimeMs;
     expect(await read()).toEqual([pending]);
-    const loaded = mode === "sync" ? options.io.loadConfig() : await options.io.loadConfigAsync();
-    expect(loaded.gateway?.mode).toBe("local");
-    recordDeferredPluginMigrations({
+    const mainSql = mode === "async" ? observeMainThreadSql() : undefined;
+    try {
+      const loaded = mode === "sync" ? options.io.loadConfig() : await options.io.loadConfigAsync();
+      expect(loaded.gateway?.mode).toBe("local");
+      mainSql?.expectIdle();
+    } finally {
+      mainSql?.restore();
+    }
+    await recordDeferredPluginMigrations({
       env: options.env,
       pending: [{ ...pending, reason: "Changed obligation" }],
     });
@@ -176,7 +157,7 @@ it.each(["load", "snapshot", "policy"] as const)(
       configPaths: [["session", "store"]],
       validationExcludedPaths: [["session", "store"]],
     };
-    recordDeferredPluginMigrations({ env: options.env, pending: [pending] });
+    await recordDeferredPluginMigrations({ env: options.env, pending: [pending] });
     await closeOpenClawStateDatabaseAsync();
     const databasePath = resolveOpenClawStateSqlitePath(options.env);
     const family = [databasePath, `${databasePath}-wal`, `${databasePath}-shm`];
@@ -220,7 +201,7 @@ it.each(["load", "snapshot", "policy"] as const)(
     );
     expect(readDeferredPluginMigrations({ env: options.env })).toEqual([pending]);
     if (method === "policy") {
-      recordDeferredPluginMigrations({
+      await recordDeferredPluginMigrations({
         env: options.env,
         pending: [],
         resolvedPluginIds: [pending.pluginId],

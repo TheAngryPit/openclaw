@@ -68,22 +68,14 @@ enum ExecHostExecutor {
                     reason: "approval-cancelled")
             }
 
-            let followupDecision: ExecApprovalDecision
-            switch decision {
-            case .deny:
-                followupDecision = .deny
-            case .allowAlways:
+            if decision != .deny {
                 explicitlyApproved = true
-                followupDecision = .allowAlways
-            case .allowOnce:
-                explicitlyApproved = true
-                followupDecision = .allowOnce
             }
-            persistAllowlist = followupDecision == .allowAlways
+            persistAllowlist = decision == .allowAlways
 
             switch ExecHostRequestEvaluator.evaluate(
                 context: context,
-                approvalDecision: followupDecision,
+                approvalDecision: decision,
                 approvalSource: approvalSource)
             {
             case let .deny(error):
@@ -116,8 +108,13 @@ enum ExecHostExecutor {
             executionCommand = validatedRequest.command
         }
 
-        if let errorResponse = await self.ensureScreenRecordingAccess(request.needsScreenRecording) {
-            return errorResponse
+        if request.needsScreenRecording == true,
+           await PermissionManager.grantedStatus([.screenRecording])[.screenRecording] != true
+        {
+            return self.errorResponse(
+                code: "UNAVAILABLE",
+                message: "PERMISSION_MISSING: screenRecording",
+                reason: "permission:screenRecording")
         }
 
         // Awaited policy, approval, and permission work cannot revive a closed caller.
@@ -132,7 +129,10 @@ enum ExecHostExecutor {
         let timeoutSec = request.timeoutMs.flatMap { Double($0) / 1000.0 }
         let env = context.env
         if case .failure = ExecApprovalsStore.commitExecution(executionCommit) {
-            return self.approvalStoreErrorResponse()
+            return self.errorResponse(
+                code: "UNAVAILABLE",
+                message: "SYSTEM_RUN_DENIED: exec approvals update unavailable",
+                reason: "approval-store-unavailable")
         }
 
         // The store commit linearizes authorization. Enqueue before the next
@@ -176,25 +176,5 @@ enum ExecHostExecutor {
                     ? nil
                     : ExecCommandResolution.approvalCwdDriftDeniedMessage
             })
-    }
-
-    private static func approvalStoreErrorResponse() -> ExecHostResponse {
-        self.errorResponse(
-            code: "UNAVAILABLE",
-            message: "SYSTEM_RUN_DENIED: exec approvals update unavailable",
-            reason: "approval-store-unavailable")
-    }
-
-    private static func ensureScreenRecordingAccess(_ needsScreenRecording: Bool?) async -> ExecHostResponse? {
-        guard needsScreenRecording == true else { return nil }
-        let authorized = await PermissionManager
-            .grantedStatus([.screenRecording])[.screenRecording] ?? false
-        if authorized {
-            return nil
-        }
-        return self.errorResponse(
-            code: "UNAVAILABLE",
-            message: "PERMISSION_MISSING: screenRecording",
-            reason: "permission:screenRecording")
     }
 }

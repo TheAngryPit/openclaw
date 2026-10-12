@@ -5,10 +5,13 @@ import type { GatewaySessionRow } from "../api/types.ts";
 import type { CatalogOpenTarget } from "../app/settings.ts";
 import { readPresenceEntries, resolveCurrentSelfUser } from "../app/user-profile.ts";
 import { t } from "../i18n/index.ts";
+import { registerSessionOrganizationEnglish } from "../i18n/locales/en-session-organization.ts";
 import { renderHoverMarquee } from "../lib/hover-marquee.ts";
 import {
-  isPresenceViewerIdle,
+  presenceViewerActivity,
+  presenceActivityLabel,
   presenceViewerLabel,
+  type PresenceActivity,
   projectPresenceViewers,
 } from "../lib/presence-users.ts";
 import type { CatalogProjectGrouping } from "../lib/sessions/catalog-project-grouping.ts";
@@ -17,7 +20,6 @@ import type { SessionCatalogGroupsRenderer } from "./app-sidebar-session-catalog
 import type { SidebarSessionCatalog } from "./app-sidebar-session-catalogs.ts";
 import {
   renderPersonalSessionEmpty,
-  renderSessionListToolbar,
   renderSessionMutationError,
 } from "./app-sidebar-session-filter-summary.ts";
 import type { SidebarVisibleSections } from "./app-sidebar-session-projection.ts";
@@ -40,16 +42,18 @@ import { renderNewSessionLink } from "./new-session-link.ts";
 import { areSessionCatalogsSettled } from "./session-data-controller-catalog.ts";
 import type { SessionDataController } from "./session-data-controller.ts";
 
+registerSessionOrganizationEnglish();
+
 type RenderableSessionSection = SidebarVisibleSections["sections"][number];
 
 type SidebarSessionListHost = SessionListHost & {
   readonly sidebarAgentsMode: "chip" | "roster";
-  readonly sessionInvolvingMeFilterActive: boolean;
   readonly sessionData: SessionListHost["sessionData"] &
     Pick<
       SessionDataController,
       | "context"
       | "sessionsLoading"
+      | "sessionsStartingUp"
       | "sessionsResult"
       | "sessionCatalogs"
       | "sessionCatalogLive"
@@ -73,7 +77,7 @@ type SessionCatalogRenderSnapshot = {
 };
 
 type PersonHeaders = {
-  presence: ReadonlyMap<string, "active" | "idle">;
+  presence: ReadonlyMap<string, PresenceActivity>;
   selfProfileId?: string;
 };
 
@@ -96,9 +100,7 @@ export function renderSessionSection(params: {
   const personCardKey = personCard
     ? presenceUserKey({ id: personOwner.id, identity: personIdentity })
     : undefined;
-  const presenceLabel = presence
-    ? t(presence === "idle" ? "presence.idle" : "presence.rosterTitle")
-    : undefined;
+  const presenceLabel = presence ? presenceActivityLabel(presence) : undefined;
   // The person button's explicit aria-label hides descendant text, so the live
   // state is exposed as its accessible description via this indicator id.
   const presenceId =
@@ -130,11 +132,6 @@ export function renderSessionSection(params: {
           : group
             ? "category"
             : "threads";
-  const personFilterActive =
-    host.sessionOwnerFilterActive && host.sessionOwnerFilterId === personOwner?.id;
-  const personFilterLabel = personFilterActive
-    ? t("chat.sidebar.showEveryone")
-    : t("chat.sidebar.showOnlyPerson", { name: label });
   // Collapsed Coding still signals live runs so background work stays visible.
   const collapsedRunningDot =
     collapsed &&
@@ -191,9 +188,7 @@ export function renderSessionSection(params: {
           presence
             ? html`<span
                 id=${presenceId ?? nothing}
-                class="sidebar-session-group-presence ${
-                  presence === "idle" ? "sidebar-session-group-presence--idle" : ""
-                }"
+                class="sidebar-session-group-presence ${`sidebar-session-group-presence--${presence}`}"
                 role="img"
                 aria-label=${presenceLabel}
               ></span>`
@@ -316,27 +311,6 @@ export function renderSessionSection(params: {
                       >
                         ${chevron}${ownerAvatar}${labelText}
                       </button>`
-                }
-                ${
-                  personOwner &&
-                  host.sessionOwnershipVisibility.filters &&
-                  host.sessionOwnerOptions.some((owner) => owner.id === personOwner.id)
-                    ? html`<button
-                        type="button"
-                        class="sidebar-session-group-actions sidebar-session-person-filter ${
-                          personFilterActive ? "sidebar-session-sort--filtered" : ""
-                        }"
-                        aria-pressed=${personFilterActive}
-                        title=${personFilterLabel}
-                        aria-label=${personFilterLabel}
-                        @click=${(event: MouseEvent) => {
-                          event.stopPropagation();
-                          host.setSessionOwnerFilter(personFilterActive ? null : personOwner.id);
-                        }}
-                      >
-                        ${icons.listFilter}
-                      </button>`
-                    : nothing
                 }
                 ${
                   group || section.id === "ungrouped"
@@ -517,7 +491,6 @@ function renderSessionCatalog(params: {
   return html`
     ${renderer({
       catalogs: [catalog],
-      connected: host.connected,
       basePath: snapshot.basePath,
       routeSessionKey: snapshot.routeSessionKey,
       newSessionAgentId: snapshot.newSessionAgentId,
@@ -587,14 +560,14 @@ function renderSessionListBody(params: {
       presenceEntries: readPresenceEntries(host.sessionData.presencePayload),
       presenceInstanceId: host.sessionData.presenceInstanceId,
     });
-    const presence = new Map<string, "active" | "idle">();
+    const presence = new Map<string, PresenceActivity>();
     for (const user of projectPresenceViewers(
       host.sessionData.presencePayload,
       selfUser,
       host.sessionData.presenceInstanceId,
     )) {
       if (user.identity?.type === "profile") {
-        presence.set(user.identity.id, isPresenceViewerIdle(user) ? "idle" : "active");
+        presence.set(user.identity.id, presenceViewerActivity(user));
       }
     }
     personHeaders = {
@@ -696,8 +669,25 @@ export function renderSessionListFrame(host: SidebarSessionListHost, body: unkno
       @dragleave=${(event: DragEvent) => host.sessionOrganizer.handleSessionListDragLeave(event)}
       @drop=${(event: DragEvent) => host.sessionOrganizer.handleSessionListDrop(event)}
     >
-      ${host.sidebarAgentsMode === "roster" ? nothing : renderSessionListToolbar(host)}
+      ${
+        host.sessionData.sessionsStartingUp && !host.sidebarSnapshot
+          ? html`<div
+              class="sidebar-session-empty-hint sidebar-session-empty-hint--startup"
+              role="status"
+              aria-live="polite"
+            >
+              <span class="btn__spinner" aria-hidden="true"></span> ${t("agentStartup.short")}
+            </div>`
+          : nothing
+      }
       ${homeLoadKeys.map((key) => renderChildSessionLoadError(host, key))}
+      ${
+        host.sessionOrganizer.isDraggingChildSession
+          ? html`<div class="sidebar-session-root-drop" data-session-root-drop role="status">
+              ${t("sessionsView.moveToTopLevel")}
+            </div>`
+          : nothing
+      }
       ${renderSessionMutationError(host)} ${body}
     </section>
   `;

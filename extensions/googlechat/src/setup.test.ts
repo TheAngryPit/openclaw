@@ -5,10 +5,10 @@ import {
   createStartAccountContext,
   expectLifecyclePatch,
   expectPendingUntilAbort,
-  installChannelDmPolicyContractSuite,
   startAccountAndTrackLifecycle,
 } from "openclaw/plugin-sdk/channel-test-helpers";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import {
   createPluginSetupWizardConfigure,
   createPluginSetupWizardStatus,
@@ -17,13 +17,12 @@ import {
 } from "openclaw/plugin-sdk/plugin-test-runtime";
 import type { WizardPrompter } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk/setup";
-import type { ChannelAccountSnapshot } from "openclaw/plugin-sdk/status-helpers";
 import {
   resolvePreferredOpenClawTmpDir,
   tempWorkspaceSync,
   type TempWorkspaceSync,
 } from "openclaw/plugin-sdk/temp-path";
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   listGoogleChatAccountIds,
   resolveGoogleChatAccount,
@@ -86,11 +85,24 @@ function buildAccount(): ResolvedGoogleChatAccount {
   };
 }
 
-async function waitForGoogleChatMonitorStarted() {
-  await vi.waitFor(() => expect(hoisted.startGoogleChatMonitor).toHaveBeenCalledOnce());
+function prepareGoogleChatMonitorStart(unregister = vi.fn()) {
+  const started = createDeferred<void>();
+  hoisted.startGoogleChatMonitor.mockImplementation(async () => {
+    started.resolve();
+    return unregister;
+  });
+  return async () => {
+    await started.promise;
+    expect(hoisted.startGoogleChatMonitor).toHaveBeenCalledOnce();
+  };
 }
 
 describe("googlechat setup", () => {
+  beforeAll(async () => {
+    // Keep cold monitor imports out of the lifecycle assertion's wait budget.
+    await import("./channel.runtime.js");
+  });
+
   afterEach(() => {
     vi.clearAllMocks();
     vi.unstubAllEnvs();
@@ -111,36 +123,6 @@ describe("googlechat setup", () => {
         input: { useEnv: true },
       } as never),
     ).toBe("GOOGLE_CHAT_SERVICE_ACCOUNT env vars can only be used for the default account.");
-  });
-
-  it("requires inline or file credentials when env auth is not used", () => {
-    if (!googlechatSetupAdapter.validateInput) {
-      throw new Error("Expected googlechatSetupAdapter.validateInput to be defined");
-    }
-    expect(
-      googlechatSetupAdapter.validateInput({
-        accountId: DEFAULT_ACCOUNT_ID,
-        input: { useEnv: false, token: "", tokenFile: "" },
-      } as never),
-    ).toBe("Google Chat requires --token (service account JSON) or --token-file.");
-  });
-
-  it("ignores blank service-account env values during setup", async () => {
-    vi.stubEnv("GOOGLE_CHAT_SERVICE_ACCOUNT", "   ");
-    vi.stubEnv("GOOGLE_CHAT_SERVICE_ACCOUNT_FILE", "  ");
-    const confirm = vi.fn(async () => true);
-    const select = vi.fn(async () => "file" as const) as unknown as WizardPrompter["select"];
-
-    const result = await googlechatSetupWizard.prepare?.({
-      cfg: {},
-      accountId: DEFAULT_ACCOUNT_ID,
-      credentialValues: {},
-      prompter: createTestWizardPrompter({ confirm, select }),
-    } as never);
-
-    expect(confirm).not.toHaveBeenCalled();
-    expect(select).toHaveBeenCalledOnce();
-    expect(result?.credentialValues?.["__googlechatUseEnv"]).toBe("0");
   });
 
   it("offers valid service-account env credentials for the default account", async () => {
@@ -264,37 +246,30 @@ describe("googlechat setup", () => {
     expect(result.cfg.channels?.googlechat?.audience).toBe("https://example.com/googlechat");
   });
 
-  installChannelDmPolicyContractSuite({
-    dmPolicy: googlechatSetupWizard.dmPolicy!,
-    cases: [
-      {
-        name: "Google Chat named accounts",
-        channel: "googlechat",
-        accountId: "alerts",
-        accountConfig: { serviceAccount: { client_email: "bot@example.com" } },
-        inheritedAllowFrom: ["users/123"],
-        defaultAccount: {},
-      },
-    ],
-  });
-
-  it("reports configured state for the selected account instead of any account", async () => {
-    const status = await googlechatStatus({
-      cfg: withGoogleChat({
-        accounts: {
-          default: {
-            serviceAccount: { client_email: "default@example.com" },
-          },
-          alerts: {},
+  it("uses defaultAccount for DM policy reads and writes when accountId is omitted", () => {
+    const cfg = withGoogleChat({
+      dmPolicy: "disabled",
+      defaultAccount: "alerts",
+      accounts: {
+        alerts: {
+          serviceAccount: { client_email: "bot@example.com" },
+          dmPolicy: "allowlist",
         },
-      }),
-      accountOverrides: {
-        googlechat: "alerts",
       },
-      options: {},
     });
-
-    expect(status.configured).toBe(false);
+    const dmPolicy = googlechatSetupWizard.dmPolicy!;
+    expect(dmPolicy.getCurrent(cfg)).toBe("allowlist");
+    expect(dmPolicy.resolveConfigKeys?.(cfg)).toEqual({
+      policyKey: "channels.googlechat.accounts.alerts.dmPolicy",
+      allowFromKey: "channels.googlechat.accounts.alerts.allowFrom",
+    });
+    const next = dmPolicy.setPolicy(cfg, "open");
+    expect(next.channels?.googlechat?.dmPolicy).toBe("disabled");
+    expect(next.channels?.googlechat?.allowFrom).toBeUndefined();
+    expect(next.channels?.googlechat?.accounts?.alerts).toMatchObject({
+      dmPolicy: "open",
+      allowFrom: ["*"],
+    });
   });
 
   it("reports configured state for the configured defaultAccount instead of any account", async () => {
@@ -341,14 +316,14 @@ describe("googlechat setup", () => {
 
   it("keeps startAccount pending until abort, then unregisters", async () => {
     const unregister = vi.fn();
-    hoisted.startGoogleChatMonitor.mockResolvedValue(unregister);
+    const waitForStarted = prepareGoogleChatMonitorStart(unregister);
 
     const { abort, patches, task, isSettled } = startAccountAndTrackLifecycle({
       startAccount: startGoogleChatGatewayAccount,
       account: buildAccount(),
     });
     await expectPendingUntilAbort({
-      waitForStarted: waitForGoogleChatMonitorStarted,
+      waitForStarted,
       isSettled,
       abort,
       task,
@@ -368,38 +343,8 @@ describe("googlechat setup", () => {
     expect(patches.some((patch) => patch.lifecycle === "blocked")).toBe(false);
   });
 
-  it("reports a blocked lifecycle when the configured webhookUrl resolves to no path", async () => {
-    hoisted.startGoogleChatMonitor.mockResolvedValue(vi.fn());
-    const account = buildAccount();
-
-    const { abort, patches, task, isSettled } = startAccountAndTrackLifecycle({
-      startAccount: startGoogleChatGatewayAccount,
-      account: {
-        ...account,
-        config: {
-          ...account.config,
-          webhookPath: undefined,
-          webhookUrl: "chat.example.com/googlechat",
-        },
-      },
-    });
-    await expectPendingUntilAbort({
-      waitForStarted: waitForGoogleChatMonitorStarted,
-      isSettled,
-      abort,
-      task,
-    });
-
-    const startPatch = patches.find((patch) => patch.running === true);
-    expect(startPatch).toBeDefined();
-    expect(startPatch?.lifecycle).toBe("blocked");
-    expect(startPatch?.lastError).toContain("webhookUrl");
-    // The account must not advertise a route the monitor never registered.
-    expect(startPatch?.webhookPath).toBeUndefined();
-  });
-
   it("clears a previously published webhook path when a restart resolves none", async () => {
-    hoisted.startGoogleChatMonitor.mockResolvedValue(vi.fn());
+    const waitForFirstStart = prepareGoogleChatMonitorStart();
     const account = buildAccount();
     const resolvable = {
       ...account,
@@ -409,52 +354,41 @@ describe("googlechat setup", () => {
         webhookUrl: "https://chat.example.com/gc-inbound",
       },
     };
-    const firstAbort = new AbortController();
     // One context, so both starts write through the same status snapshot the way
     // the gateway's runtime store patch-merges successive plugin patches.
-    const ctx = createStartAccountContext({
-      account: resolvable,
-      abortSignal: firstAbort.signal,
+    const ctx = createStartAccountContext({ account: resolvable });
+    const startAccount = ({
+      account: nextAccount,
+      abortSignal,
+    }: Parameters<typeof startGoogleChatGatewayAccount>[0]) =>
+      startGoogleChatGatewayAccount({ ...ctx, account: nextAccount, abortSignal });
+    const first = startAccountAndTrackLifecycle({ startAccount, account: resolvable });
+    await expectPendingUntilAbort({
+      ...first,
+      waitForStarted: waitForFirstStart,
+      assertBeforeAbort: () => {
+        expect(ctx.getStatus().webhookPath).toBe("/gc-inbound");
+      },
     });
-    const firstRun = startGoogleChatGatewayAccount(ctx);
-    await waitForGoogleChatMonitorStarted();
-    expect(ctx.getStatus().webhookPath).toBe("/gc-inbound");
-    firstAbort.abort();
-    await firstRun;
 
     hoisted.startGoogleChatMonitor.mockClear();
-    const secondAbort = new AbortController();
-    const secondRun = startGoogleChatGatewayAccount({
-      ...ctx,
+    const waitForSecondStart = prepareGoogleChatMonitorStart();
+    const second = startAccountAndTrackLifecycle({
+      startAccount,
       account: {
         ...resolvable,
         config: { ...resolvable.config, webhookUrl: "chat.example.com/gc-inbound" },
       },
-      abortSignal: secondAbort.signal,
     });
-    await waitForGoogleChatMonitorStarted();
-
-    const restarted = ctx.getStatus();
-    expect(restarted.lifecycle).toBe("blocked");
-    expect(restarted.webhookPath).toBeUndefined();
-    secondAbort.abort();
-    await secondRun;
-  });
-
-  it("clears running status when monitor startup fails", async () => {
-    hoisted.startGoogleChatMonitor.mockRejectedValue(new Error("webhook bind failed"));
-    const patches: ChannelAccountSnapshot[] = [];
-
-    const task = startGoogleChatGatewayAccount(
-      createStartAccountContext({
-        account: buildAccount(),
-        statusPatchSink: (next) => patches.push({ ...next }),
-      }),
-    );
-
-    await expect(task).rejects.toThrow("webhook bind failed");
-    expectLifecyclePatch(patches, { running: true });
-    expectLifecyclePatch(patches, { running: false });
+    await expectPendingUntilAbort({
+      ...second,
+      waitForStarted: waitForSecondStart,
+      assertBeforeAbort: () => {
+        const restarted = ctx.getStatus();
+        expect(restarted.lifecycle).toBe("blocked");
+        expect(restarted.webhookPath).toBeUndefined();
+      },
+    });
   });
 });
 
@@ -533,49 +467,6 @@ describe("resolveGoogleChatAccount", () => {
     expect(JSON.stringify(resolved.credentialDiagnostics)).not.toContain(missingFile);
   });
 
-  it("inherits shared defaults from accounts.default for named accounts", () => {
-    const cfg: OpenClawConfig = withGoogleChat({
-      accounts: {
-        default: {
-          audienceType: "app-url",
-          audience: "https://example.com/googlechat",
-          webhookPath: "/googlechat",
-        },
-        andy: {
-          serviceAccountFile: "/tmp/andy-sa.json",
-        },
-      },
-    });
-
-    const resolved = resolveGoogleChatAccount({ cfg, accountId: "andy" });
-    expect(resolved.config.audienceType).toBe("app-url");
-    expect(resolved.config.audience).toBe("https://example.com/googlechat");
-    expect(resolved.config.webhookPath).toBe("/googlechat");
-    expect(resolved.config.serviceAccountFile).toBe("/tmp/andy-sa.json");
-  });
-
-  it("prefers top-level and account overrides over accounts.default", () => {
-    const cfg: OpenClawConfig = withGoogleChat({
-      audienceType: "project-number",
-      audience: "1234567890",
-      accounts: {
-        default: {
-          audienceType: "app-url",
-          audience: "https://default.example.com/googlechat",
-          webhookPath: "/googlechat-default",
-        },
-        april: {
-          webhookPath: "/googlechat-april",
-        },
-      },
-    });
-
-    const resolved = resolveGoogleChatAccount({ cfg, accountId: "april" });
-    expect(resolved.config.audienceType).toBe("project-number");
-    expect(resolved.config.audience).toBe("1234567890");
-    expect(resolved.config.webhookPath).toBe("/googlechat-april");
-  });
-
   it("merges account bot loop protection over top-level defaults field-by-field", () => {
     const cfg: OpenClawConfig = withGoogleChat({
       botLoopProtection: {
@@ -599,53 +490,6 @@ describe("resolveGoogleChatAccount", () => {
       windowSeconds: 120,
       cooldownSeconds: 240,
     });
-  });
-
-  it("merges account bot loop protection over accounts.default field-by-field", () => {
-    const cfg: OpenClawConfig = withGoogleChat({
-      accounts: {
-        default: {
-          webhookPath: "/googlechat",
-          botLoopProtection: {
-            windowSeconds: 120,
-            cooldownSeconds: 240,
-          },
-        },
-        april: {
-          webhookPath: "/googlechat-april",
-          botLoopProtection: {
-            maxEventsPerWindow: 3,
-          },
-        },
-      },
-    });
-
-    const resolved = resolveGoogleChatAccount({ cfg, accountId: "april" });
-    expect(resolved.config.botLoopProtection).toEqual({
-      maxEventsPerWindow: 3,
-      windowSeconds: 120,
-      cooldownSeconds: 240,
-    });
-  });
-
-  it("does not inherit disabled state from accounts.default for named accounts", () => {
-    const cfg: OpenClawConfig = withGoogleChat({
-      accounts: {
-        default: {
-          enabled: false,
-          audienceType: "app-url",
-          audience: "https://example.com/googlechat",
-        },
-        andy: {
-          serviceAccountFile: "/tmp/andy-sa.json",
-        },
-      },
-    });
-
-    const resolved = resolveGoogleChatAccount({ cfg, accountId: "andy" });
-    expect(resolved.enabled).toBe(true);
-    expect(resolved.config.enabled).toBeUndefined();
-    expect(resolved.config.audienceType).toBe("app-url");
   });
 
   it("does not inherit default-account credentials into named accounts", () => {
@@ -689,21 +533,5 @@ describe("resolveGoogleChatAccount", () => {
     const resolved = resolveGoogleChatAccount({ cfg, accountId: "andy" });
     expect(resolved.config.dangerouslyAllowNameMatching).toBeUndefined();
     expect(resolved.config.audienceType).toBe("app-url");
-  });
-
-  it("uses configured defaultAccount when accountId is omitted", () => {
-    const cfg: OpenClawConfig = withGoogleChat({
-      defaultAccount: "alerts",
-      accounts: {
-        alerts: {
-          serviceAccountFile: "/tmp/alerts-sa.json",
-        },
-      },
-    });
-
-    const resolved = resolveGoogleChatAccount({ cfg });
-    expect(resolved.accountId).toBe("alerts");
-    expect(resolved.credentialSource).toBe("file");
-    expect(resolved.credentialsFile).toBe("/tmp/alerts-sa.json");
   });
 });

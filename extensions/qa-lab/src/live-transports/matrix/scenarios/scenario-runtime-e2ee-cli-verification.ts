@@ -1,5 +1,3 @@
-// Qa Matrix plugin module implements self-verification CLI E2EE scenarios.
-import { createMatrixQaClient } from "../substrate/client.js";
 import { createMatrixQaCliSelfVerificationRuntime } from "./scenario-runtime-e2ee-cli-runtime.js";
 import {
   assertMatrixQaCliSasMatches,
@@ -8,6 +6,7 @@ import {
   isMatrixQaCliOwnerSelfVerification,
   parseMatrixQaCliSasText,
   parseMatrixQaCliSummaryField,
+  loginMatrixQaCliDevice,
   registerMatrixQaCliE2eeAccount,
   runMatrixQaSetupCliJson,
   type MatrixQaCliBackupRestoreStatus,
@@ -44,17 +43,12 @@ export async function runMatrixQaE2eeCliSelfVerificationScenario(
     if (!encodedRecoveryKey) {
       throw new Error("Matrix E2EE self-verification scenario did not expose a recovery key");
     }
-    const loginClient = createMatrixQaClient({
-      baseUrl: context.baseUrl,
-    });
-    const cliDevice = await loginClient.loginWithPassword({
-      deviceName: "OpenClaw Matrix QA CLI Self Verification Device",
-      password: account.password,
-      userId: account.userId,
-    });
-    if (!cliDevice.deviceId) {
-      throw new Error("Matrix E2EE CLI verification login did not return a device id");
-    }
+    const cliDevice = await loginMatrixQaCliDevice(
+      context.baseUrl,
+      account,
+      "OpenClaw Matrix QA CLI Self Verification Device",
+      "Matrix E2EE CLI verification",
+    );
 
     const cli = await createMatrixQaCliSelfVerificationRuntime({
       accountId,
@@ -113,19 +107,27 @@ export async function runMatrixQaE2eeCliSelfVerificationScenario(
           context.timeoutMs,
         );
         const cliTransactionId = parseMatrixQaCliSummaryField(requestOutput.text, "Transaction id");
-        const ownerRequested = await waitForMatrixQaVerificationSummary({
-          client: owner,
-          label: "owner received CLI self-verification request",
-          predicate: (summary) =>
-            isMatrixQaCliOwnerSelfVerification({
-              cliDeviceId: cliTransactionId ? undefined : cliDevice.deviceId,
-              ownerUserId: account.userId,
-              requirePending: true,
-              summary,
-              transactionId: cliTransactionId ?? undefined,
-            }),
-          timeoutMs: context.timeoutMs,
-        });
+        const waitForOwnerVerification = (
+          label: string,
+          requirement: "requirePending" | "requireSas" | "requireCompleted",
+        ) =>
+          waitForMatrixQaVerificationSummary({
+            client: owner,
+            label,
+            predicate: (summary) =>
+              isMatrixQaCliOwnerSelfVerification({
+                cliDeviceId: cliTransactionId ? undefined : cliDevice.deviceId,
+                ownerUserId: account.userId,
+                [requirement]: true,
+                summary,
+                transactionId: cliTransactionId ?? undefined,
+              }),
+            timeoutMs: context.timeoutMs,
+          });
+        const ownerRequested = await waitForOwnerVerification(
+          "owner received CLI self-verification request",
+          "requirePending",
+        );
         if (ownerRequested.canAccept) {
           await owner.acceptVerification(ownerRequested.id);
         }
@@ -139,19 +141,10 @@ export async function runMatrixQaE2eeCliSelfVerificationScenario(
           sasOutput.text,
           "interactive openclaw matrix verify self",
         );
-        const ownerSas = await waitForMatrixQaVerificationSummary({
-          client: owner,
-          label: "owner SAS for CLI self-verification",
-          predicate: (summary) =>
-            isMatrixQaCliOwnerSelfVerification({
-              cliDeviceId: cliTransactionId ? undefined : cliDevice.deviceId,
-              ownerUserId: account.userId,
-              requireSas: true,
-              summary,
-              transactionId: cliTransactionId ?? undefined,
-            }),
-          timeoutMs: context.timeoutMs,
-        });
+        const ownerSas = await waitForOwnerVerification(
+          "owner SAS for CLI self-verification",
+          "requireSas",
+        );
         const sasArtifact = assertMatrixQaCliSasMatches({
           cliSas,
           owner: ownerSas,
@@ -176,19 +169,10 @@ export async function runMatrixQaE2eeCliSelfVerificationScenario(
             "Interactive Matrix CLI self-verification did not report full Matrix identity trust",
           );
         }
-        const completedOwner = await waitForMatrixQaVerificationSummary({
-          client: owner,
-          label: "owner completed CLI self-verification",
-          predicate: (summary) =>
-            isMatrixQaCliOwnerSelfVerification({
-              cliDeviceId: cliTransactionId ? undefined : cliDevice.deviceId,
-              ownerUserId: account.userId,
-              requireCompleted: true,
-              summary,
-              transactionId: cliTransactionId ?? undefined,
-            }),
-          timeoutMs: context.timeoutMs,
-        });
+        const completedOwner = await waitForOwnerVerification(
+          "owner completed CLI self-verification",
+          "requireCompleted",
+        );
         const cliVerificationId =
           completedCli.stdout.match(/^Verification id:\s*(\S+)/m)?.[1] ?? "interactive-cli";
         const { artifacts: statusArtifacts, payload: statusPayload } =
@@ -248,6 +232,7 @@ export async function runMatrixQaE2eeCliSelfVerificationScenario(
         };
       } finally {
         session.kill();
+        await session.wait().catch(() => undefined);
       }
     } finally {
       try {

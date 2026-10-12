@@ -1,11 +1,9 @@
-/**
- * Process-local registry that lets Talk protocol methods resolve opaque
- * `sessionId` values to the concrete relay or managed-room backend.
- */
-import { isPromiseLike } from "@openclaw/normalization-core/promise-like";
-import { createDeferredCore } from "../../shared/deferred.js";
+import { formatErrorMessage as formatError } from "../../infra/errors.js";
 import { resolveGlobalMap } from "../../shared/global-singleton.js";
-import { formatError } from "../server-utils.js";
+import {
+  prepareClientVoiceSessionClose,
+  withClientVoiceSessionSettlement,
+} from "../../talk/client-voice-session-lifecycle.js";
 import type { PreparedTalkSessionTarget } from "./session-target.types.js";
 
 type TalkConnectionCleanupKind =
@@ -29,7 +27,6 @@ type UnifiedTalkSessionRecord =
   | {
       kind: "managed-room";
       handoffId: string;
-      token: string;
       roomId: string;
     };
 
@@ -78,9 +75,6 @@ function runTalkConnectionCleanup(
   if (talkConnectionCleanups.get(connId)?.get(kind) !== cleanup) {
     return;
   }
-  // A cleanup callback can reenter shutdown before returning its own promise.
-  const completion = createDeferredCore();
-  cleanup.pending = completion.promise;
   const completed = (): void | Promise<void> => {
     cleanup.pending = undefined;
     cleanup.failed = false;
@@ -105,17 +99,12 @@ function runTalkConnectionCleanup(
   try {
     const run = cleanup.run;
     const result = run();
-    if (isPromiseLike(result)) {
-      completion.resolve(Promise.resolve(result).then(completed, failed));
-      return completion.promise;
+    if (result) {
+      cleanup.pending = Promise.resolve(result).then(completed, failed);
+      return cleanup.pending;
     }
-    const next = completed();
-    completion.resolve(next);
-    return next;
+    return completed();
   } catch (error) {
-    completion.reject(error);
-    // The caller observes the synchronous throw; a reentrant drain may also join this promise.
-    void completion.promise.catch(() => {});
     return failed(error);
   }
 }
@@ -170,7 +159,67 @@ export function cleanupTalkConnection(
   }
 }
 
-/** Associates a public Talk session id with its concrete gateway backend. */
+export function prepareTalkConnectionClose(
+  clients: Iterable<{ connId: string }>,
+  log: { warn: (message: string) => void },
+) {
+  const persistence = prepareClientVoiceSessionClose();
+  let pending: Promise<void> | undefined;
+  const beginClose = () => {
+    if (pending) {
+      return;
+    }
+    // Provider close can emit final speech. Retain this Gateway's cleanup before
+    // fencing admission; sibling Gateways keep their own connections and claims.
+    const connIds = Array.from(clients, (client) => client.connId);
+    const cleanup = () => closeTalkConnections(connIds);
+    pending = withClientVoiceSessionSettlement(cleanup, async (error) => {
+      try {
+        await cleanup();
+      } catch (cleanupError) {
+        throw new AggregateError([error, cleanupError], "Talk cleanup failed", {
+          cause: cleanupError,
+        });
+      }
+      throw error;
+    });
+    void pending.catch((error: unknown) => log.warn(`Talk cleanup failed: ${formatError(error)}`));
+    persistence.beginClose();
+  };
+  return {
+    beginClose,
+    async drain() {
+      try {
+        beginClose();
+        await pending;
+      } finally {
+        await persistence.drain();
+      }
+    },
+  };
+}
+
+async function closeTalkConnections(connIds: Iterable<string>): Promise<void> {
+  const pending: Promise<void>[] = [];
+  for (const connId of connIds) {
+    const cleanups = [...(talkConnectionCleanups.get(connId) ?? [])];
+    for (const [kind, cleanup] of cleanups) {
+      try {
+        pending.push(Promise.resolve(runTalkConnectionCleanup(connId, kind, cleanup)));
+      } catch (error) {
+        pending.push(Promise.reject(error instanceof Error ? error : new Error(String(error))));
+      }
+    }
+  }
+  const results = await Promise.allSettled(pending);
+  const failures = results.flatMap((result) =>
+    result.status === "rejected" ? [result.reason] : [],
+  );
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "Talk provider cleanup did not complete");
+  }
+}
+
 export function rememberUnifiedTalkSession(
   sessionId: string,
   session: UnifiedTalkSessionRecord,
@@ -178,7 +227,6 @@ export function rememberUnifiedTalkSession(
   unifiedTalkSessions.set(sessionId, session);
 }
 
-/** Resolves a Talk session id or throws the protocol-facing unknown-session error. */
 export function getUnifiedTalkSession(sessionId: string): UnifiedTalkSessionRecord {
   const session = unifiedTalkSessions.get(sessionId);
   if (!session) {
@@ -204,12 +252,10 @@ export function resolveUnifiedTalkSessionTarget(sessionId: string, connId: strin
   };
 }
 
-/** Removes a Talk session id after the concrete backend closes. */
 export function forgetUnifiedTalkSession(sessionId: string): void {
   unifiedTalkSessions.delete(sessionId);
 }
 
-/** Enforces that a relay-backed Talk session is controlled by its owner socket. */
 export function requireUnifiedTalkSessionConn(
   session: Extract<UnifiedTalkSessionRecord, { connId: string }>,
   connId: string | undefined,

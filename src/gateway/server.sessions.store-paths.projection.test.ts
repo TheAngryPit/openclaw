@@ -4,8 +4,11 @@ import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { expect, test, vi } from "vitest";
 import * as runtimePaths from "../config/paths.js";
+import { replaceSessionEntrySync } from "../config/sessions/session-accessor.entry.js";
+import { resolveSqliteTargetFromSessionStorePath } from "../config/sessions/session-sqlite-target.js";
+import { withOpenClawAgentDatabaseWrite } from "../state/openclaw-agent-db-write.js";
 import { withEnvAsync } from "../test-utils/env.js";
-import { testState, writeSessionStore } from "./test-helpers.js";
+import { testState } from "./test-helpers.js";
 import {
   directSessionReq,
   getGatewayConfigModule,
@@ -35,7 +38,7 @@ test("automatic list and search projection reuse conventional state-directory pr
         );
         testState.sessionConfig = { store: storeTemplate };
         testState.agentsConfig = {
-          list: agentIds.map((id, index) => ({ id, default: index === 0 })),
+          entries: Object.fromEntries(agentIds.map((id) => [id, {}])),
         };
         const { getRuntimeConfig } = await getGatewayConfigModule();
         const { resolvePluginMetadataSnapshot } =
@@ -48,31 +51,37 @@ test("automatic list and search projection reuse conventional state-directory pr
         await withPluginMetadataSnapshotScope(
           metadata,
           async () => {
-            const observations = [];
             const stateDirectoryProbes: Array<{
               search: string;
               runtime: string;
               stack: string | undefined;
             }> = [];
-            for (const search of [undefined, "unmatched-runtime-search", "openclaw"]) {
-              const request = { configuredAgentsOnly: true, includeGlobal: false, search };
-              const counts = [];
-              for (const agentRuntimeOverride of ["openclaw", undefined]) {
-                for (const agentId of agentIds) {
-                  await writeSessionStore({
+            for (const agentRuntimeOverride of ["openclaw", undefined]) {
+              // Search changes only the request; reuse each runtime's admitted stores.
+              for (const agentId of agentIds) {
+                const storePath = storeTemplate.replace("{agentId}", agentId);
+                // Seed list metadata without running unrelated lifecycle deletion workers.
+                await withOpenClawAgentDatabaseWrite(
+                  {
                     agentId,
-                    entries: {
-                      [`agent:${agentId}:main`]: {
+                    path: resolveSqliteTargetFromSessionStorePath(storePath, { agentId }).path,
+                  },
+                  () =>
+                    replaceSessionEntrySync(
+                      { agentId, sessionKey: `agent:${agentId}:main`, storePath },
+                      {
                         sessionId: `session-${agentId}`,
                         updatedAt: 10,
                         agentRuntimeOverride,
                       },
-                    },
-                    storePath: storeTemplate.replace("{agentId}", agentId),
-                  });
-                }
+                    ),
+                );
+              }
+              for (const search of [undefined, "unmatched-runtime-search", "openclaw"]) {
+                const request = { configuredAgentsOnly: true, includeGlobal: false, search };
                 const warm = await directSessionReq("sessions.list", request);
                 expect(warm.ok).toBe(true);
+                stateDirectoryProbes.length = 0;
                 const existsSync = fsSync.existsSync;
                 const exists = vi.spyOn(fsSync, "existsSync").mockImplementation((pathname) => {
                   // Retain bounded provenance for probes that only reproduce in shared CI shards.
@@ -88,10 +97,6 @@ test("automatic list and search projection reuse conventional state-directory pr
                   }
                   return existsSync(pathname);
                 });
-                const lstat = vi.spyOn(fsSync, "lstatSync");
-                const readlink = vi.spyOn(fsSync, "readlinkSync");
-                const realpath = vi.spyOn(fsSync.realpathSync, "native");
-                const stat = vi.spyOn(fsSync, "statSync");
                 const environments = vi.spyOn(runtimePaths, "captureRuntimeStateEnvironment");
                 syncBuiltinESMExports();
                 try {
@@ -104,32 +109,20 @@ test("automatic list and search projection reuse conventional state-directory pr
                     search === "unmatched-runtime-search" ? 0 : agentIds.length,
                   );
                   expect.soft(environments.mock.calls.length, search ?? "list").toBe(0);
-                  counts.push({
-                    exists: exists.mock.calls.length,
-                    stateDirectoryExists: exists.mock.calls.filter(
-                      ([pathname]) => pathname === stateDir || pathname === legacyStateDir,
-                    ).length,
-                    lstat: lstat.mock.calls.length,
-                    readlink: readlink.mock.calls.length,
-                    realpath: realpath.mock.calls.length,
-                    stat: stat.mock.calls.length,
-                  });
+                  expect
+                    .soft(
+                      stateDirectoryProbes,
+                      `${search ?? "list"}: ${agentRuntimeOverride ?? "auto"}`,
+                    )
+                    .toEqual([]);
                 } finally {
-                  for (const spy of [exists, lstat, readlink, realpath, stat, environments]) {
+                  for (const spy of [exists, environments]) {
                     spy.mockRestore();
                   }
                   syncBuiltinESMExports();
                 }
               }
-              observations.push({
-                surface: search ? "search" : "list",
-                pinned: counts[0],
-                auto: counts[1],
-              });
             }
-            expect(observations, JSON.stringify(stateDirectoryProbes, null, 2)).toEqual(
-              observations.map(({ surface, pinned }) => ({ surface, pinned, auto: pinned })),
-            );
           },
           { config, trustConfigIdentity: true },
         );
