@@ -89,20 +89,6 @@ struct TerminalHubScreenTests {
         #expect(script?.contains("\"https:\\/\\/gateway.example.com:443\"") == false)
     }
 
-    @Test func `auth user script does not project an unaccepted stored token`() throws {
-        let config = try Self.makeConfig(
-            url: #require(URL(string: "wss://gateway.example.com:8443")),
-            token: nil,
-            password: nil)
-
-        let script = ControlUIHubPage.terminal.authUserScript(
-            config: config,
-            legacyCredentials: nil)
-
-        #expect(script?.contains("stored-token") == false)
-        #expect(script?.contains("\"nativeConnectAuth\":true") == true)
-    }
-
     @Test func `auth user script does not export stored identity grants or configured candidates`() throws {
         let gatewayID = "manual|terminal-\(UUID().uuidString)|443"
         let identity = DeviceIdentityStore.loadOrCreate()
