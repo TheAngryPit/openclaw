@@ -318,16 +318,11 @@ suite.define(() => {
             const selfProfileResult = await selfProfileRead.response;
             expect(selfProfileResult).toMatchObject({ profile: { displayName: onboardingName } });
             const custodianPage = editor.locator("openclaw-custodian-page");
-            await expect
-              .poll(() =>
-                custodianPage.evaluate((element) => {
-                  const custodian = element as HTMLElement & {
-                    onboardingNameProfile: { displayName?: string | null } | null;
-                  };
-                  return custodian.onboardingNameProfile?.displayName ?? null;
-                }),
-              )
-              .toBe(onboardingName);
+            await custodianPage.waitFor();
+            await editor.waitForFunction(() => {
+              const ready = window.openclawControlUi?.snapshot();
+              return ready?.routeReady === true && ready.gatewayPhase === "connected";
+            });
             await custodianPage.evaluate(async (element) => {
               await (element as HTMLElement & { updateComplete: Promise<boolean> }).updateComplete;
             });

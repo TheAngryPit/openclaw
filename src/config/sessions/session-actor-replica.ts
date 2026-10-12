@@ -7,14 +7,16 @@ import { readDatabasePathIdentitySync } from "../../infra/sqlite-worker-identity
 import { sessionChanges } from "../../sessions/session-row-changes.js";
 import { sessionChangeAffectsStoredRow } from "../../sessions/session-row-facts.js";
 import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
-import { freezeJsonSnapshot } from "../../shared/immutable-data.js";
+import { freezeJsonSnapshot, isDeeplyFrozenPlainData } from "../../shared/immutable-data.js";
 import type {
   AgentDatabaseExecutionFileIdentity,
   AgentDatabaseIncognitoIdentity,
 } from "../../state/openclaw-agent-execution-contract.js";
+import { readSessionActivitySummary } from "./activity-summary.js";
 import {
   readPreparedSessionEntryChange,
   readPreparedSessionEntryPublicationSource,
+  readPreparedSessionSharingChange,
 } from "./session-accessor.sqlite-entry-cache-publication-state.js";
 import type {
   SessionActorHotState,
@@ -22,7 +24,9 @@ import type {
   SessionActorOutcome,
   SessionActorTarget,
 } from "./session-actor-contract.js";
-import type { SessionEntrySnapshotField } from "./session-entry-snapshots.js";
+import type { SessionEntrySnapshotField } from "./session-entry-snapshot-values.js";
+import { deriveSessionPredicateColumns } from "./session-predicate-columns.js";
+import type { SessionRowDatabaseFacts } from "./session-row-facts.types.js";
 import { collectSessionEntryLookupKeys } from "./store-entry.js";
 
 export type SessionActorEntryFacts = Pick<
@@ -31,6 +35,8 @@ export type SessionActorEntryFacts = Pick<
 > &
   Partial<Pick<SessionActorHotState, "participants" | "members">> & {
     snapshots: "full" | readonly SessionEntrySnapshotField[];
+    projection?: Pick<SessionRowDatabaseFacts, "hasBoard" | "activitySummaryWatermark">;
+    predicateColumns?: ReturnType<typeof deriveSessionPredicateColumns>;
   };
 
 type FileTarget = SessionActorTarget & { database: AgentDatabaseExecutionFileIdentity };
@@ -41,6 +47,7 @@ type ReplicaCell = {
   target: SessionActorTarget;
   snapshot?: SessionActorHotState;
   entry?: SessionActorEntryFacts;
+  predicateColumns?: SessionActorEntryFacts["predicateColumns"];
   generation?: string;
   reservation: number;
   handles: number;
@@ -72,7 +79,7 @@ const pool = resolveGlobalSingleton<ReplicaPool>(
   },
 );
 
-function ensureReplicaSubscription(): void {
+export function ensureReplicaSubscription(): void {
   if (pool.unsubscribe) {
     return;
   }
@@ -80,6 +87,32 @@ function ensureReplicaSubscription(): void {
   pool.unsubscribe = sessionChanges.subscribeFacts((change) => {
     // Receipt installation reorders the LRU map, so visit the original cells once.
     const cellsBeforePublication = [...pool.cells.values()];
+    const publishedKey =
+      !("all" in change) && !change.factsInvalidated ? change.sessionKey : undefined;
+    const created = publishedKey ? readPreparedSessionEntryChange(change, publishedKey) : undefined;
+    if (publishedKey && created?.fullEntry && typeof created.source.identity === "string") {
+      const target: FileTarget = {
+        sessionKey: publishedKey,
+        database: {
+          kind: "file",
+          physicalIdentity: created.source.identity,
+          birthtime: created.source.birthtime,
+          nativeLocation: created.source.canonicalPath ?? created.source.filename,
+        },
+      };
+      if (
+        !pool.cells.has(targetKey(target)) &&
+        created.source.writeToken ===
+          readSqliteDatabaseWriteTokenForPath(target.database.nativeLocation)
+      ) {
+        // Creation already owns the complete entry; its first reader need not fetch it again.
+        retainSessionActorEntryFacts(
+          target,
+          { entry: created.fullEntry, snapshots: "full", projection: created.projection },
+          created.source.incarnation,
+        );
+      }
+    }
     for (const cell of cellsBeforePublication) {
       const { database, sessionKey } = cell.target;
       if (
@@ -107,12 +140,20 @@ function ensureReplicaSubscription(): void {
         !("all" in change) &&
         !change.factsInvalidated &&
         (!change.facts || change.facts.kind === "unchanged");
-      const unchangedEntry = unchangedMarker ? cell.entry : undefined;
+      // Board writes use unchanged-entry markers, so they revoke row projection coverage.
+      const unchangedEntry =
+        unchangedMarker && cell.entry ? { ...cell.entry, projection: undefined } : undefined;
+      const previousPredicateColumns = cell.predicateColumns;
+      const previous = cell.snapshot ?? cell.entry;
+      const previousProjection = cell.snapshot
+        ? { hasBoard: cell.snapshot.hasBoard }
+        : cell.entry?.projection;
       discard(cell);
       if (unchangedEntry) {
         // Transcript/metadata markers do not revoke an installed entry receipt.
         // Its original scoped token still rejects any unaccounted storage write.
         cell.entry = unchangedEntry;
+        cell.predicateColumns = previousPredicateColumns;
         cell.bytes = JSON.stringify(unchangedEntry).length * 2;
         pool.snapshots += 1;
         pool.bytes += cell.bytes;
@@ -122,19 +163,36 @@ function ensureReplicaSubscription(): void {
         source.identity === database.physicalIdentity &&
         prepared.source.writeToken === readSqliteDatabaseWriteTokenForPath(database.nativeLocation)
       ) {
+        if (prepared.actorPostimage) {
+          retainSnapshot(cell, prepared.actorPostimage, prepared.source.incarnation);
+          continue;
+        }
         const dependencySessionIds = [prepared.fullEntry.sessionId];
         const writeToken = readSqliteDatabaseScopedWriteTokenForPath(database.nativeLocation, [
           ...collectSessionEntryLookupKeys(sessionKey),
           ...dependencySessionIds.map(sqliteSessionIdWriteScope),
         ]);
         if (writeToken) {
+          const projection =
+            prepared.projection ??
+            (previous?.entry?.sessionId === prepared.fullEntry.sessionId &&
+            previous.entry.lifecycleRevision === prepared.fullEntry.lifecycleRevision &&
+            previousProjection
+              ? { hasBoard: previousProjection.hasBoard }
+              : undefined);
+          // Metadata receipts retain side-table facts when their writer did not change sharing.
+          const sharingUnchanged = readPreparedSessionSharingChange(change) === "unchanged";
           cell.entry = freezeJsonSnapshot({
             target: cell.target,
             entry: structuredClone(prepared.fullEntry),
             dependencySessionIds,
             writeToken,
             snapshots: "full",
+            projection,
+            members: sharingUnchanged ? previous?.members : undefined,
+            participants: sharingUnchanged ? previous?.participants : undefined,
           });
+          cell.predicateColumns = deriveSessionPredicateColumns(JSON.stringify(prepared.fullEntry));
           cell.bytes = JSON.stringify(cell.entry).length * 2;
           pool.snapshots += 1;
           pool.bytes += cell.bytes;
@@ -166,7 +224,28 @@ function discard(cell: ReplicaCell): void {
   pool.bytes -= cell.bytes;
   cell.snapshot = undefined;
   cell.entry = undefined;
+  cell.predicateColumns = undefined;
   cell.bytes = 0;
+}
+
+function retainSnapshot(
+  cell: ReplicaCell,
+  state: SessionActorHotState,
+  generation: string | undefined,
+): void {
+  const detached = isDeeplyFrozenPlainData(state)
+    ? state
+    : freezeJsonSnapshot(structuredClone(state));
+  discard(cell);
+  cell.snapshot = detached;
+  cell.predicateColumns = detached.entry
+    ? deriveSessionPredicateColumns(JSON.stringify(detached.entry))
+    : undefined;
+  cell.generation = generation;
+  cell.bytes = JSON.stringify(detached).length * 2;
+  pool.snapshots += 1;
+  pool.bytes += cell.bytes;
+  touch(cell);
 }
 
 function forgetUnused(cell: ReplicaCell): void {
@@ -203,10 +282,7 @@ function touch(cell: ReplicaCell): void {
   }
 }
 
-/** Entry projections share actor residency; they never certify transcript or live authority. */
-export function readSessionActorEntryFacts(
-  target: FileTarget,
-): (SessionActorEntryFacts & { incarnation: string }) | undefined {
+function readCurrentEntryCell(target: FileTarget) {
   ensureReplicaSubscription();
   const cell = pool.cells.get(targetKey(target));
   const state = cell?.snapshot ?? cell?.entry;
@@ -235,6 +311,18 @@ export function readSessionActorEntryFacts(
     return undefined;
   }
   touch(cell);
+  return { cell, state, incarnation: cell.generation };
+}
+
+/** Entry projections share actor residency; they never certify live authority. */
+export function readSessionActorEntryFacts(
+  target: FileTarget,
+): (SessionActorEntryFacts & { incarnation: string }) | undefined {
+  const current = readCurrentEntryCell(target);
+  if (!current) {
+    return undefined;
+  }
+  const { cell, state, incarnation } = current;
   const snapshots: SessionActorEntryFacts["snapshots"] = cell.snapshot
     ? "full"
     : (cell.entry?.snapshots ?? "full");
@@ -244,16 +332,72 @@ export function readSessionActorEntryFacts(
     members: state.members,
     participants: state.participants,
     snapshots,
+    projection: cell.snapshot
+      ? {
+          hasBoard: cell.snapshot.hasBoard,
+          activitySummaryWatermark: cell.snapshot.transcript.watermark,
+        }
+      : cell.entry?.projection,
     dependencySessionIds: state.dependencySessionIds,
-    writeToken: token,
-    incarnation: cell.generation,
+    writeToken: state.writeToken,
+    predicateColumns: cell.predicateColumns,
+    incarnation,
   });
+}
+
+/** Reuse complete actor facts before requesting the same row from the history worker. */
+export function readSessionActorRowFacts(params: {
+  path: string;
+  sessionKey: string;
+}): SessionRowDatabaseFacts | undefined {
+  ensureReplicaSubscription();
+  for (const cell of pool.cells.values()) {
+    const { database, sessionKey } = cell.target;
+    if (
+      database.kind !== "file" ||
+      database.nativeLocation !== params.path ||
+      sessionKey !== params.sessionKey
+    ) {
+      continue;
+    }
+    const current = readCurrentEntryCell({ database, sessionKey });
+    const state = current?.state;
+    const projection = current?.cell.snapshot
+      ? {
+          hasBoard: current.cell.snapshot.hasBoard,
+          activitySummaryWatermark: current.cell.snapshot.transcript.watermark,
+        }
+      : current?.cell.entry?.projection;
+    if (!state?.entry || !projection) {
+      return undefined;
+    }
+    const summary = readSessionActivitySummary(state.entry);
+    if (summary && !projection.activitySummaryWatermark) {
+      return undefined;
+    }
+    const {
+      skillsSnapshot: _skills,
+      systemPromptReport: _prompt,
+      sessionDiffBaseline: _baseline,
+      ...entry
+    } = state.entry;
+    return structuredClone({
+      sessionKey,
+      entry,
+      hasBoard: projection.hasBoard,
+      ...(summary ? { activitySummaryWatermark: projection.activitySummaryWatermark } : {}),
+    });
+  }
+  return undefined;
 }
 
 /** A single cold entry batch and actor commands publish into the same bounded MAIN owner. */
 export function retainSessionActorEntryFacts(
   target: FileTarget,
-  facts: Omit<SessionActorEntryFacts, "target" | "writeToken" | "dependencySessionIds">,
+  facts: Omit<
+    SessionActorEntryFacts,
+    "target" | "writeToken" | "dependencySessionIds" | "predicateColumns"
+  >,
   incarnation: string,
 ): void {
   ensureReplicaSubscription();
@@ -290,6 +434,9 @@ export function retainSessionActorEntryFacts(
       writeToken,
     }),
   );
+  cell.predicateColumns = facts.entry
+    ? deriveSessionPredicateColumns(JSON.stringify(facts.entry))
+    : undefined;
   cell.generation = incarnation;
   cell.bytes = JSON.stringify(cell.entry).length * 2;
   pool.snapshots += 1;
@@ -368,18 +515,11 @@ export function createSessionActorReplica(
     state: SessionActorHotState,
     expectedGeneration: string | undefined,
   ): boolean => {
-    const detached = freezeJsonSnapshot(structuredClone(state));
-    if (!accepts(detached, expectedGeneration)) {
+    if (!accepts(state, expectedGeneration)) {
       discard(owned);
       return false;
     }
-    discard(owned);
-    owned.snapshot = detached;
-    owned.generation = expectedGeneration;
-    owned.bytes = JSON.stringify(detached).length * 2;
-    pool.snapshots += 1;
-    pool.bytes += owned.bytes;
-    touch(owned);
+    retainSnapshot(owned, state, expectedGeneration);
     return owned.snapshot !== undefined;
   };
   const begin = () => {
@@ -388,7 +528,7 @@ export function createSessionActorReplica(
       throw new Error("Session actor replica is closed");
     }
     owned.pending += 1;
-    invalidate();
+    owned.reservation += 1;
     const selected = owned.reservation;
     const expectedGeneration = generation();
     let settled = false;
@@ -407,7 +547,7 @@ export function createSessionActorReplica(
   };
 
   return {
-    /** Each borrower validates its current physical generation before disclosure. */
+    /** Borrow the immutable revision only after validating its current physical generation. */
     read(): SessionActorHotState | undefined {
       params.lifetime.assertReadable();
       if (closed || !owned.snapshot) {
@@ -420,11 +560,12 @@ export function createSessionActorReplica(
         return undefined;
       }
       if (!accepts(owned.snapshot, owned.generation, token)) {
-        invalidate();
+        discard(owned);
+        forgetUnused(owned);
         return undefined;
       }
       touch(owned);
-      return structuredClone(owned.snapshot);
+      return owned.snapshot;
     },
     beginRead() {
       const settle = begin();
@@ -439,12 +580,13 @@ export function createSessionActorReplica(
     },
     beginCommand() {
       const previous = owned.snapshot;
+      const previousGeneration = owned.generation;
       const settle = begin();
       return {
         settle<Value>(outcome: SessionActorOutcome<Value>): boolean {
           return settle((expectedGeneration) => {
             if (outcome.kind === "rolled-back") {
-              return previous !== undefined && install(previous, expectedGeneration);
+              return previous !== undefined && install(previous, previousGeneration);
             }
             if (outcome.kind === "unknown") {
               discard(owned);

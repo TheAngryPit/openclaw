@@ -21,17 +21,23 @@ import {
   readSessionTranscriptAnchorsAsync,
   readSessionTranscriptAnchorsFromSource,
 } from "./session-transcript-anchor-read.js";
-import { retainSessionTranscriptContextGeneration } from "./session-transcript-authority.js";
+import type { SessionTranscriptAnchorFacts } from "./session-transcript-anchor-read.types.js";
 import type { SessionTranscriptContextVersion } from "./session-transcript-context-version.types.js";
 import {
   resolveSessionTranscriptReadFence,
   withSessionContextAdmission,
   SessionTranscriptReadFenceError,
 } from "./session-transcript-read-fence.js";
-import { withSessionTranscriptReadSource } from "./session-transcript-read-source.js";
+import {
+  withSessionTranscriptReadSource,
+  type SessionTranscriptWorkerReadSource,
+} from "./session-transcript-read-source.js";
 import { readSessionTranscriptModelContextInWorker } from "./session-transcript-read-worker-runtime.js";
 import { targetDiscoveryLane } from "./session-transcript-worker-resources.js";
-import type { TranscriptEntryAnchor } from "./transcript-entry-anchor.js";
+import {
+  sameTranscriptEntryAnchor,
+  type TranscriptEntryAnchor,
+} from "./transcript-entry-anchor.js";
 import { getOwnedSessionTranscriptReader } from "./transcript-write-context.js";
 
 export type SessionTranscriptContextProjectionSource = {
@@ -45,6 +51,15 @@ export type PreparedSessionTranscriptModelContext = {
   context: SessionTranscriptModelContext;
   writeToken: string;
 };
+
+function assertCurrentInputAnchor(
+  admission: UserTurnTranscriptAdmissionReceipt,
+  current: TranscriptEntryAnchor | undefined,
+): void {
+  if (!sameTranscriptEntryAnchor(admission, current)) {
+    throw new SessionTranscriptReadFenceError("Current-turn transcript admission changed");
+  }
+}
 
 /** Keep a worker's bounded projection attached to its physical source until final acceptance. */
 export async function readSessionTranscriptContextProjectionAsync<T>(
@@ -93,12 +108,15 @@ export async function readSessionTranscriptContextProjectionAsync<T>(
       await readSessionTranscriptAnchorsFromSource(
         { ...source, scope },
         {
-          entryIds: [],
+          entryIds: capturedAdmission ? [capturedAdmission.entryId] : [],
           contextValidation: { version: result.version, admission: capturedAdmission },
         },
         signal,
         (facts) => {
           source.assertCurrent();
+          if (capturedAdmission) {
+            assertCurrentInputAnchor(capturedAdmission, facts.anchors[0]);
+          }
           accepted = facts.contextValidated === true || (!result.version && !capturedAdmission);
         },
       );
@@ -134,68 +152,67 @@ export function readSessionTranscriptModelContextAsync<T>(
     assertCurrent: () => void,
     binding?: IncognitoSessionHistoryBinding,
     contextAdmission = capturedAdmission,
-    databaseIdentity?: string,
+    source?: SessionTranscriptWorkerReadSource,
   ): Promise<T> => {
-    const generation = retainSessionTranscriptContextGeneration(
-      scope,
-      context.version,
-      databaseIdentity,
-    );
     const contextValidation = structuredClone({
       version: context.version,
       admission: contextAdmission,
       through: capturedThrough,
     });
-    const validate = async <Value>(publish: () => Value): Promise<{ value: Value }> => {
-      let accepted: { value: Value } | undefined;
-      await readSessionTranscriptAnchorsAsync(
-        scope,
-        { entryIds: [], contextValidation },
-        signal,
-        (facts) => {
-          assertCurrent();
-          generation.assertCurrent();
-          if (
-            !facts.contextValidated &&
-            (contextValidation.version || contextAdmission || capturedThrough)
-          ) {
-            throw new SessionTranscriptReadFenceError(
-              "Session transcript changed during context read",
-            );
-          }
-          accepted = { value: publish() };
-        },
-        binding,
-      );
-      if (!accepted) {
-        throw new SessionTranscriptReadFenceError("Session transcript changed during context read");
-      }
-      return accepted;
-    };
-    let consumerSettlement: Promise<Awaited<T>> | undefined;
-    let joined = false;
-    try {
-      const accepted = await validate(() => {
-        const value = consume(context);
-        if (isPromiseLike(value)) {
-          consumerSettlement = Promise.resolve(value);
-          void consumerSettlement.catch(() => undefined);
-        }
-        return value;
-      });
-      if (!consumerSettlement) {
-        return accepted.value;
-      }
-      const value = await consumerSettlement;
-      joined = true;
-      return (await validate(() => value)).value;
-    } finally {
-      generation.release();
-      // Initial acceptance can fail after starting a consumer; its owner still joins that work.
-      if (consumerSettlement && !joined) {
-        await consumerSettlement.catch(() => undefined);
-      }
+    const admissionAnchor = source ? contextAdmission : undefined;
+    const sharesThroughAnchor =
+      admissionAnchor && capturedThrough?.entryId === admissionAnchor.entryId;
+    if (sharesThroughAnchor) {
+      assertCurrentInputAnchor(admissionAnchor, capturedThrough);
     }
+    const selection = {
+      entryIds: admissionAnchor && !sharesThroughAnchor ? [admissionAnchor.entryId] : [],
+      contextValidation,
+    };
+    let consumed: { value: Promise<Awaited<T>> } | undefined;
+    try {
+      const onRead = (facts: SessionTranscriptAnchorFacts) => {
+        assertCurrent();
+        if (
+          !facts.contextValidated &&
+          (contextValidation.version || contextAdmission || capturedThrough)
+        ) {
+          throw new SessionTranscriptReadFenceError(
+            "Session transcript changed during context read",
+          );
+        }
+        if (admissionAnchor && !sharesThroughAnchor) {
+          assertCurrentInputAnchor(
+            admissionAnchor,
+            facts.anchors.find((anchor) => anchor.entryId === admissionAnchor.entryId),
+          );
+        }
+        const value = Promise.resolve(consume(context));
+        void value.catch(() => undefined);
+        consumed = { value };
+      };
+      if (source) {
+        await readSessionTranscriptAnchorsFromSource(
+          { ...source, scope: { ...source.scope, sessionKey: scope.sessionKey } },
+          selection,
+          signal,
+          onRead,
+        );
+      } else {
+        await readSessionTranscriptAnchorsAsync(scope, selection, signal, onRead, binding);
+      }
+    } catch (error) {
+      // Reader cleanup still joins any write-capable consumer it already started.
+      if (consumed) {
+        await consumed.value.catch(() => undefined);
+      }
+      throw error;
+    }
+    if (!consumed) {
+      throw new SessionTranscriptReadFenceError("Session transcript changed during context read");
+    }
+    // The consumer owns its effects. Transcript changes after this snapshot are best effort.
+    return await consumed.value;
   };
   const source = suppliedIncognito ? undefined : captureIncognitoSessionSource(target);
   if (source && "kind" in source) {
@@ -240,6 +257,11 @@ export function readSessionTranscriptModelContextAsync<T>(
       })
       .then((result) => {
         prepared.authority.assertCurrent();
+        if (prepared.actor.sessions.readSharing(prepared.target.sessionKey)?.entry) {
+          prepared.actor.sessions
+            .captureCurrent(prepared.target.sessionKey)
+            .authorize(prepared.authority, "commit");
+        }
         return result;
       });
   }
@@ -254,10 +276,14 @@ export function readSessionTranscriptModelContextAsync<T>(
       );
       return accept(capturedTarget, context, () => signal?.throwIfAborted());
     },
-    async ({ scope, expectedIdentity, assertCurrent }) => {
+    async (readSource) => {
+      const { scope, expectedIdentity, assertCurrent } = readSource;
       const captured = { ...scope, sessionKey: capturedTarget.sessionKey };
       const selected =
-        consumeSynchronously && capturedLimits && getOwnedSessionTranscriptReader(captured);
+        !capturedAdmission &&
+        consumeSynchronously &&
+        capturedLimits &&
+        getOwnedSessionTranscriptReader(captured);
       if (selected) {
         const { captureSessionEntryNativeMutationWitness } =
           await import("./session-entry-read-ordered.js");
@@ -316,7 +342,7 @@ export function readSessionTranscriptModelContextAsync<T>(
         assertCurrent,
         undefined,
         capturedAdmission,
-        expectedIdentity?.key.startsWith("file:") ? expectedIdentity.key.slice(5) : undefined,
+        capturedAdmission ? readSource : undefined,
       );
     },
     signal,
