@@ -1,0 +1,339 @@
+name: QA PR 163765 native Gateway RPC cancellation
+
+on:
+  push:
+    branches:
+      - qa/pr163765-native-gateway-rpc-reconnect-proof-20261012
+    paths:
+      - .github/workflows/qa-pr163765-native-gateway-rpc-proof.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qa-pr163765-native-gateway-rpc-proof-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BASELINE_SHA: ee3d9627ee2cea340e767badbcc56249a24af40c
+  CANDIDATE_SHA: 607c2865576744873bd7ce0ba2f81a0107aa9a48
+  WORKFLOW_PATH: .github/workflows/qa-pr163765-native-gateway-rpc-proof.yml
+  REGRESSION_TEST: apps/shared/OpenClawKit/Tests/OpenClawKitTests/NativeGatewayWebSocketFixtureTests.swift
+  REGRESSION_NAME: RPC wait after fixture stop throws cancellation
+  COMPILE_BASE_SHA: ab143534cc1c1a494bd6755acf09c255c37d8de9
+  COMPILE_TEST: apps/shared/OpenClawKit/Tests/OpenClawKitTests/GatewayNativeTransportDeviceAuthTests.swift
+  COMPILE_BASE_BLOB: 524506bc1d2be48231b2609b9ffd004c66979147
+  COMPILE_CANDIDATE_BLOB: 2b57894a9c3b92b9bdd6eaf6a4c012d13c3da58b
+  REGRESSION_BLOB: f4e389d12b577221cc44407f1e727c7d2edabecc
+  BASELINE_FIXTURE: apps/shared/OpenClawKit/Tests/OpenClawKitTests/NativeGatewayWebSocketFixture.swift
+  BASELINE_FIXTURE_BLOB: e448144ccd4b3922fc98b6c0bc22a8cbc0fe9127
+
+jobs:
+  fixture-regression:
+    if: github.repository == 'TheAngryPit/openclaw' && github.ref == 'refs/heads/qa/pr163765-native-gateway-rpc-reconnect-proof-20261012'
+    runs-on: xcode-27
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        source: [baseline, candidate]
+    steps:
+      - name: Checkout the QA workflow commit for provenance verification
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Verify the isolated workflow overlay
+        env:
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EVENT_SHA"
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD^)" = "$CANDIDATE_SHA"
+          parent_count="$(git rev-list --parents -n 1 "$EVENT_SHA" | awk '{ print NF - 1 }')"
+          test "$parent_count" = "1"
+          git diff-tree --no-commit-id --name-only -r "$EVENT_SHA" > "$RUNNER_TEMP/qa-overlay-paths.txt"
+          test "$(wc -l < "$RUNNER_TEMP/qa-overlay-paths.txt" | tr -d ' ')" = "1"
+          test "$(<"$RUNNER_TEMP/qa-overlay-paths.txt")" = "$WORKFLOW_PATH"
+          {
+            echo "QA overlay commit: $EVENT_SHA"
+            echo "Candidate source parent: $CANDIDATE_SHA"
+            echo "Overlay paths:"
+            cat "$RUNNER_TEMP/qa-overlay-paths.txt"
+          } | tee "$RUNNER_TEMP/qa-overlay-provenance.txt" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Checkout candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          path: candidate
+          persist-credentials: false
+          fetch-depth: 2
+
+      - name: Checkout original baseline
+        if: matrix.source == 'baseline'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.BASELINE_SHA }}
+          path: baseline
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Apply only the verified compile precondition and cancellation regression
+        if: matrix.source == 'baseline'
+        run: |
+          set -euo pipefail
+          test "$(git -C baseline rev-parse HEAD)" = "$BASELINE_SHA"
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test "$(git -C candidate rev-parse HEAD^)" = "$COMPILE_BASE_SHA"
+          test "$(git -C baseline rev-parse "HEAD:$COMPILE_TEST")" = "$COMPILE_BASE_BLOB"
+          test "$(git -C candidate rev-parse "$COMPILE_BASE_SHA:$COMPILE_TEST")" = "$COMPILE_BASE_BLOB"
+          test "$(git -C candidate rev-parse "HEAD:$COMPILE_TEST")" = "$COMPILE_CANDIDATE_BLOB"
+          test "$(git -C candidate rev-parse "HEAD:$REGRESSION_TEST")" = "$REGRESSION_BLOB"
+          test "$(git -C baseline rev-parse "HEAD:$BASELINE_FIXTURE")" = "$BASELINE_FIXTURE_BLOB"
+          test -z "$(git -C baseline status --porcelain)"
+          test -z "$(git -C baseline ls-files -- "$REGRESSION_TEST")"
+          shasum -a 256 "baseline/$COMPILE_TEST" "baseline/$BASELINE_FIXTURE" \
+            > "$RUNNER_TEMP/baseline-source-before.sha256"
+          patch="$RUNNER_TEMP/baseline-compile-precondition.patch"
+          git -C candidate diff --no-ext-diff --no-textconv --no-color --full-index --binary \
+            "$COMPILE_BASE_SHA" "$CANDIDATE_SHA" -- "$COMPILE_TEST" > "$patch"
+          test "$(git -C candidate diff --name-only "$COMPILE_BASE_SHA" "$CANDIDATE_SHA")" = "$COMPILE_TEST"
+          test -s "$patch"
+          git -C baseline apply --check "$patch"
+          git -C baseline apply "$patch"
+          test "$(git -C baseline hash-object --no-filters "$COMPILE_TEST")" = "$COMPILE_CANDIDATE_BLOB"
+          cmp "candidate/$COMPILE_TEST" "baseline/$COMPILE_TEST"
+          mkdir -p "baseline/$(dirname "$REGRESSION_TEST")"
+          cp "candidate/$REGRESSION_TEST" "baseline/$REGRESSION_TEST"
+          test "$(git -C baseline hash-object --no-filters "$REGRESSION_TEST")" = "$REGRESSION_BLOB"
+          test "$(git -C baseline hash-object --no-filters "$BASELINE_FIXTURE")" = "$BASELINE_FIXTURE_BLOB"
+          test "$(git -C baseline diff --name-only)" = "$COMPILE_TEST"
+          test "$(git -C baseline ls-files --others --exclude-standard)" = "$REGRESSION_TEST"
+          git -C baseline diff --cached --exit-code
+          shasum -a 256 "baseline/$COMPILE_TEST" "baseline/$REGRESSION_TEST" "baseline/$BASELINE_FIXTURE" \
+            > "$RUNNER_TEMP/baseline-overlay-applied.sha256"
+          {
+            echo "Baseline: $BASELINE_SHA"
+            echo "Compile precondition: exact $COMPILE_BASE_SHA to $CANDIDATE_SHA single-path patch"
+            echo "Modified tracked overlay: $COMPILE_TEST"
+            echo "Untracked regression overlay: $REGRESSION_TEST"
+            echo "Preserved original polling fixture: $BASELINE_FIXTURE_BLOB"
+            shasum -a 256 "$patch"
+          } | tee "$RUNNER_TEMP/baseline-overlay.txt" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up the pinned Node toolchain for native build plugins
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+
+      - name: Prepare native protocol and Mermaid resources
+        working-directory: ${{ matrix.source }}
+        run: |
+          set -euo pipefail
+          corepack enable
+          corepack prepare pnpm@12.9.0 --activate
+          test "$(pnpm --version)" = "12.9.0"
+          pnpm install --frozen-lockfile --prefer-offline --ignore-scripts
+          CI=true pnpm install --frozen-lockfile --prefer-offline --optional \
+            --filter '@openclaw/mermaid-renderer...' \
+            --filter '@openclaw/gateway-protocol...' \
+            --config.ignore-scripts=false \
+            --config.engine-strict=false \
+            --config.enable-pre-post-scripts=true \
+            --config.side-effects-cache=true
+          node scripts/prepare-apple-mermaid.mjs
+          node scripts/prepare-native-protocol.mjs --language swift
+
+      - name: Record hosted Apple toolchain
+        working-directory: ${{ matrix.source }}
+        run: |
+          set -euo pipefail
+          test "$(xcodebuild -version | awk 'NR == 1 { print $2 }')" = "27.0"
+          {
+            xcodebuild -version
+            swift --version
+            sw_vers
+            git rev-parse HEAD
+          } | tee "$RUNNER_TEMP/${{ matrix.source }}-toolchain.txt" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify the hosted Swift test capability inventory
+        working-directory: ${{ matrix.source }}
+        run: |
+          set -euo pipefail
+          swift test --help > "$RUNNER_TEMP/${{ matrix.source }}-swift-test-help.txt"
+          swift test --help-hidden > "$RUNNER_TEMP/${{ matrix.source }}-swift-test-hidden-help.txt"
+          for flag in --test-product --disable-xctest --enable-swift-testing --event-stream-output-path --event-stream-version --xunit-output; do
+            grep -F -- "$flag" "$RUNNER_TEMP/${{ matrix.source }}-swift-test-hidden-help.txt"
+          done
+
+      - name: Run baseline regression and require the original timeout
+        if: matrix.source == 'baseline'
+        working-directory: baseline
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/native-gateway-rpc-baseline.log"
+          scratch="$RUNNER_TEMP/native-gateway-rpc-baseline-build"
+          set +e
+          swift test \
+            --package-path apps/shared/OpenClawKit \
+            --scratch-path "$scratch" \
+            --disable-index-store \
+            --no-parallel \
+            --test-product OpenClawKitTests \
+            --disable-xctest \
+            --enable-swift-testing \
+            --filter "NativeGatewayWebSocketFixtureTests/$REGRESSION_NAME" 2>&1 | tee "$log"
+          test_status=${PIPESTATUS[0]}
+          set -e
+          if [[ "$test_status" -eq 0 ]]; then
+            echo "The original baseline unexpectedly passed the cancellation regression." >&2
+            exit 1
+          fi
+          grep -F "$REGRESSION_NAME" "$log"
+          grep -E 'Test run with 1 test( in [0-9]+ suites?)? failed' "$log"
+          if ! grep -E 'NSURLErrorDomain Code=-1001|timedOut|timed out' "$log"; then
+            echo "Baseline failed, but not with the expected RPC wait timeout." >&2
+            exit 1
+          fi
+          echo "Baseline reproduced the five-second RPC wait timeout; exit=$test_status; focused test receipt: passed=0 failed=1 skipped=0 (expected)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run candidate regression and require one passing test
+        if: matrix.source == 'candidate'
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/native-gateway-rpc-candidate.log"
+          scratch="$RUNNER_TEMP/native-gateway-rpc-candidate-build"
+          swift test \
+            --package-path apps/shared/OpenClawKit \
+            --scratch-path "$scratch" \
+            --disable-index-store \
+            --no-parallel \
+            --test-product OpenClawKitTests \
+            --disable-xctest \
+            --enable-swift-testing \
+            --filter "NativeGatewayWebSocketFixtureTests/$REGRESSION_NAME" 2>&1 | tee "$log"
+          grep -F "$REGRESSION_NAME" "$log"
+          grep -E 'Test run with 1 test( in [0-9]+ suites?)? passed' "$log"
+          echo "Candidate $CANDIDATE_SHA focused test receipt: passed=1 failed=0 skipped=0." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Qualify seven unique macOS personal and shared native cases
+        if: matrix.source == 'candidate'
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          scratch="$RUNNER_TEMP/native-gateway-rpc-candidate-build"
+          report="$RUNNER_TEMP/personal-native-macos.xml"
+          log="$RUNNER_TEMP/personal-native-macos.log"
+          inventory="$RUNNER_TEMP/personal-native-macos-product-list.txt"
+          swift test \
+            --package-path apps/shared/OpenClawKit \
+            --scratch-path "$scratch" \
+            --disable-index-store \
+            --skip-build \
+            --test-product OpenClawKitTests \
+            --disable-xctest \
+            --enable-swift-testing \
+            --list-tests > "$inventory" 2>&1
+          grep -F 'OpenClawKitTests.GatewayNativeTransportDeviceAuthTests/' "$inventory" \
+            | sort -u > "$RUNNER_TEMP/personal-native-macos-selected-inventory.txt"
+          test "$(wc -l < "$RUNNER_TEMP/personal-native-macos-selected-inventory.txt" | tr -d ' ')" = "7"
+          node --import ./scripts/tsx.mjs scripts/test-macos-native.mts default \
+            --package-path apps/shared/OpenClawKit \
+            --scratch-path "$scratch" \
+            --disable-index-store \
+            --skip-build \
+            --no-parallel \
+            --test-product OpenClawKitTests \
+            --disable-xctest \
+            --enable-swift-testing \
+            --filter GatewayNativeTransportDeviceAuthTests \
+            --xunit-output "$report" > "$log" 2>&1
+          tail -c 8192 "$log"
+          python3 - "$report" "$RUNNER_TEMP/personal-native-macos-receipt.json" <<'PY'
+          import json
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = ET.parse(sys.argv[1]).getroot()
+          cases = list(root.iter("testcase"))
+          selected = [case for case in cases if "GatewayNativeTransportDeviceAuthTests" in case.get("classname", "")]
+          identities = {(case.get("classname"), case.get("name")) for case in selected}
+          failed = sum(case.find("failure") is not None or case.find("error") is not None for case in cases)
+          skipped = sum(case.find("skipped") is not None for case in cases)
+          receipt = {"selectedUnique": len(identities), "reportedCases": len(cases),
+                     "failed": failed, "skipped": skipped,
+                     "identities": sorted([list(identity) for identity in identities])}
+          with open(sys.argv[2], "w", encoding="utf-8") as output:
+              json.dump(receipt, output, indent=2)
+          print(json.dumps(receipt))
+          if len(identities) != 7 or len(cases) != 7 or failed != 0 or skipped != 0:
+              raise SystemExit("Require seven distinct selected macOS tests, zero failures and skips.")
+          PY
+
+      - name: Audit exact baseline overlays and restore source hashes
+        if: always()
+        working-directory: ${{ matrix.source }}
+        env:
+          SOURCE_KIND: ${{ matrix.source }}
+        run: |
+          set -euo pipefail
+          git diff --cached --exit-code
+          if [[ "$SOURCE_KIND" == "baseline" ]]; then
+            test "$(git rev-parse HEAD)" = "$BASELINE_SHA"
+            test "$(git diff --name-only)" = "$COMPILE_TEST"
+            test "$(git ls-files --others --exclude-standard)" = "$REGRESSION_TEST"
+            test "$(git hash-object --no-filters "$COMPILE_TEST")" = "$COMPILE_CANDIDATE_BLOB"
+            test "$(git hash-object --no-filters "$REGRESSION_TEST")" = "$REGRESSION_BLOB"
+            test "$(git hash-object --no-filters "$BASELINE_FIXTURE")" = "$BASELINE_FIXTURE_BLOB"
+            git diff --no-ext-diff --no-textconv --no-color --full-index --binary -- "$COMPILE_TEST" \
+              > "$RUNNER_TEMP/baseline-compile-precondition-final.patch"
+            cmp "$RUNNER_TEMP/baseline-compile-precondition.patch" "$RUNNER_TEMP/baseline-compile-precondition-final.patch"
+            git restore --source="$BASELINE_SHA" --worktree -- "$COMPILE_TEST"
+            test "$(git hash-object --no-filters "$COMPILE_TEST")" = "$COMPILE_BASE_BLOB"
+            test ! -e "$RUNNER_TEMP/baseline-rpc-regression-overlay.swift"
+            mv "$REGRESSION_TEST" "$RUNNER_TEMP/baseline-rpc-regression-overlay.swift"
+            test "$(git hash-object --no-filters "$RUNNER_TEMP/baseline-rpc-regression-overlay.swift")" = "$REGRESSION_BLOB"
+            cd ..
+            shasum -a 256 "baseline/$COMPILE_TEST" "baseline/$BASELINE_FIXTURE" \
+              > "$RUNNER_TEMP/baseline-source-restored.sha256"
+            cmp "$RUNNER_TEMP/baseline-source-before.sha256" "$RUNNER_TEMP/baseline-source-restored.sha256"
+            cd baseline
+          else
+            test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          fi
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+
+      - name: Preserve synthetic fixture proof receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pr163765-native-gateway-rpc-${{ matrix.source }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/qa-overlay-provenance.txt
+            ${{ runner.temp }}/qa-overlay-paths.txt
+            ${{ runner.temp }}/${{ matrix.source }}-toolchain.txt
+            ${{ runner.temp }}/baseline-overlay.txt
+            ${{ runner.temp }}/baseline-compile-precondition.patch
+            ${{ runner.temp }}/baseline-compile-precondition-final.patch
+            ${{ runner.temp }}/baseline-source-before.sha256
+            ${{ runner.temp }}/baseline-overlay-applied.sha256
+            ${{ runner.temp }}/baseline-source-restored.sha256
+            ${{ runner.temp }}/baseline-rpc-regression-overlay.swift
+            ${{ runner.temp }}/native-gateway-rpc-${{ matrix.source }}.log
+            ${{ runner.temp }}/personal-native-macos.xml
+            ${{ runner.temp }}/personal-native-macos.log
+            ${{ runner.temp }}/personal-native-macos-receipt.json
+            ${{ runner.temp }}/personal-native-macos-product-list.txt
+            ${{ runner.temp }}/personal-native-macos-selected-inventory.txt
+            ${{ runner.temp }}/${{ matrix.source }}-swift-test-help.txt
+            ${{ runner.temp }}/${{ matrix.source }}-swift-test-hidden-help.txt
+          if-no-files-found: warn
+          retention-days: 7
