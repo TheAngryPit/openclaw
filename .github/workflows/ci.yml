@@ -30,6 +30,7 @@ on:
           - tailscale-recovery
           - tailscale-runtime
           - tailscale-tracked-regression
+          - mac-main-package
       live_proof_mode:
         description: Real unauthenticated parking proof, or authorized test-tailnet recovery
         required: false
@@ -49,6 +50,96 @@ permissions:
   contents: read
 
 jobs:
+  mac-main-package:
+    name: Complete arm64 macOS app build for local signing
+    if: ${{ github.repository == 'TheAngryPit/openclaw' && github.event_name == 'workflow_dispatch' && inputs.proof_kind == 'mac-main-package' && inputs.candidate_sha == '7ae69497bec4d9c37f170f046a3cbbf954ff19a7' }}
+    runs-on: xcode-27
+    timeout-minutes: 120
+    concurrency:
+      group: mac-main-package-20261013
+      cancel-in-progress: false
+    env:
+      PRODUCT_SHA: 7ae69497bec4d9c37f170f046a3cbbf954ff19a7
+      BUILD_CONFIG: release
+      BUILD_ARCHS: arm64
+      BUNDLE_ID: ai.openclaw.mac
+      # Temporary transport signature only. Personal Developer ID stays on Mac.
+      SIGN_IDENTITY: '-'
+      ALLOW_ADHOC_SIGNING: '1'
+      SKIP_TEAM_ID_CHECK: '1'
+      CODESIGN_TIMESTAMP: 'off'
+      GOMAXPROCS: '2'
+      GOGC: '30'
+      GOMEMLIMIT: 3GiB
+      OPENCLAW_TSDOWN_MAX_OLD_SPACE_MB: '6144'
+      NODE_OPTIONS: --max-old-space-size=6144
+    steps:
+      - name: Checkout immutable public product without persistent credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: openclaw/openclaw
+          ref: 7ae69497bec4d9c37f170f046a3cbbf954ff19a7
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.21.0'
+      - name: Admit hosted macOS and exact toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = macOS
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+          printf 'DEVELOPER_DIR=%s\n' "$DEVELOPER_DIR" >> "$GITHUB_ENV"
+          source scripts/lib/swift-toolchain.sh
+          require_swift_toolchain
+          node scripts/check-native-state-schema-version.mjs
+          corepack enable
+          corepack prepare "$(node -p 'require("./package.json").packageManager')" --activate
+          mkdir -p "$RUNNER_TEMP/mac-package"
+          shasum -a 256 package.json pnpm-lock.yaml apps/macos/Package.resolved > "$RUNNER_TEMP/mac-package/source-sha256.txt"
+          xcodebuild -version > "$RUNNER_TEMP/mac-package/toolchain.txt"
+          swift --version >> "$RUNNER_TEMP/mac-package/toolchain.txt"
+      - name: Build complete package through upstream owner
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/package-mac-app.sh > "$RUNNER_TEMP/mac-package/build.log" 2>&1 &
+          build_pid=$!
+          tail -f "$RUNNER_TEMP/mac-package/build.log" &
+          tail_pid=$!
+          result=0
+          wait "$build_pid" || result=$?
+          kill "$tail_pid" 2>/dev/null || true
+          wait "$tail_pid" 2>/dev/null || true
+          printf '%s\n' "$result" > "$RUNNER_TEMP/mac-package/build.exit"
+          exit "$result"
+      - name: Verify package and archive for local Developer ID signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=dist/OpenClaw.app
+          test "$(/usr/libexec/PlistBuddy -c 'Print :OpenClawGitCommit' "$app/Contents/Info.plist")" = "$PRODUCT_SHA"
+          test "$(lipo -archs "$app/Contents/MacOS/OpenClaw")" = arm64
+          test -x "$app/Contents/MacOS/openclaw-mlx-tts"
+          test -x "$app/Contents/MacOS/openclaw-mac"
+          codesign --verify --deep --strict "$app"
+          node -e 'const fs=require("node:fs"),a=JSON.parse(fs.readFileSync("dist/build-info.json")),b=JSON.parse(fs.readFileSync("dist/OpenClaw.app/Contents/Resources/runtime/lib/node_modules/openclaw/dist/build-info.json"));if(a.commit!==process.env.PRODUCT_SHA||b.commit!==a.commit||a.buildId!==b.buildId)throw Error("runtime mismatch");fs.writeFileSync(process.env.RUNNER_TEMP+"/mac-package/artifact.json",JSON.stringify({commit:a.commit,buildId:a.buildId,version:a.version,signature:"transport-adhoc-not-for-personal-adoption",architecture:"arm64"},null,2));'
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$RUNNER_TEMP/mac-package/OpenClaw-arm64.zip"
+          shasum -a 256 "$RUNNER_TEMP/mac-package/OpenClaw-arm64.zip" > "$RUNNER_TEMP/mac-package/archive.sha256"
+          git diff --exit-code
+          git diff --cached --exit-code
+      - name: Upload package and public build receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mac-main-package-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mac-package/
+          if-no-files-found: error
+          retention-days: 7
   pr167880-tracked-regression:
     name: Tracked startup failure baseline and candidate regression
     if: ${{ github.repository == 'TheAngryPit/openclaw' && github.event_name == 'workflow_dispatch' && inputs.proof_kind == 'tailscale-tracked-regression' && inputs.candidate_sha == '59d29a7c1683dbb33f25e35c5196475e3a8b7b8d' }}
