@@ -5,7 +5,10 @@ import type {
   SessionCatalogHost,
 } from "../../../packages/gateway-protocol/src/index.ts";
 import type { GatewayBrowserClient } from "../api/gateway.ts";
-import { SessionCatalogLiveState } from "./app-sidebar-session-catalog-live.ts";
+import {
+  refreshSessionCatalogsLive,
+  SessionCatalogLiveState,
+} from "./app-sidebar-session-catalog-live.ts";
 import { refetchExpandedSessionCatalogPages } from "./app-sidebar-session-catalog-state.ts";
 import { sessionCatalogHostKey } from "./app-sidebar-session-types.ts";
 
@@ -34,6 +37,65 @@ function catalog(id: string, hostCount: number): SessionCatalog {
 }
 
 describe("SessionCatalogLiveState", () => {
+  it.each(["claude", "codex"])(
+    "recovers an unavailable %s node without a catalog event or page reload",
+    async (id) => {
+      vi.useFakeTimers();
+      vi.stubGlobal("document", { visibilityState: "visible" });
+      const live = new SessionCatalogLiveState();
+      try {
+        const recovered = catalog(id, 1);
+        const unavailable = {
+          ...recovered,
+          hosts: [
+            {
+              ...recovered.hosts[0]!,
+              sessions: [],
+              error: { code: "NODE_INVOKE_FAILED", message: "Paired node temporarily unavailable" },
+            },
+          ],
+        };
+        const request = vi
+          .fn()
+          .mockResolvedValueOnce({ catalogs: [unavailable] })
+          .mockResolvedValue({ catalogs: [recovered] });
+        const client = { request } as unknown as GatewayBrowserClient;
+        let displayed: SessionCatalog[] = [];
+        const refresh = (): Promise<void> =>
+          refreshSessionCatalogsLive({
+            live,
+            client,
+            agentId: "main",
+            generation: 1,
+            currentGeneration: () => 1,
+            currentClient: () => client,
+            catalogs: () => displayed,
+            pageDepths: new Map(),
+            connected: () => true,
+            catalogChangedEvents: true,
+            applyFinal: (rows) => {
+              displayed = rows;
+            },
+            continueRefresh: async () => {},
+            applyError: (error) => {
+              throw error;
+            },
+            refresh,
+          });
+        await refresh();
+        expect(displayed[0]?.hosts[0]?.error?.code).toBe("NODE_INVOKE_FAILED");
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(displayed[0]?.hosts[0]?.sessions.map((row) => row.name)).toEqual(["Session 0"]);
+        expect(displayed[0]?.hosts[0]?.error).toBeUndefined();
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(request).toHaveBeenCalledTimes(2);
+      } finally {
+        live.clear();
+        vi.unstubAllGlobals();
+        vi.useRealTimers();
+      }
+    },
+  );
   it.each(["final", "incremental"] as const)(
     "retains rows and cursors for a pending host in %s publications",
     async (publication) => {

@@ -418,9 +418,12 @@ export async function refreshSessionCatalogsLive(params: {
     if (requestIsCurrent() && params.connected()) {
       const pending = live.refreshPending;
       live.refreshPending = false;
+      const unavailableNode = params
+        .catalogs()
+        .some((catalog) => catalog.hosts.some((host) => host.error?.code === "NODE_INVOKE_FAILED"));
       const interval =
         retryDelayMs ??
-        (params.catalogChangedEvents
+        (params.catalogChangedEvents && !unavailableNode
           ? SESSION_CATALOG_SAFETY_REFRESH_MS
           : SESSION_CATALOG_STABLE_REFRESH_MS);
       live.schedule(interval, params.connected(), () => {
