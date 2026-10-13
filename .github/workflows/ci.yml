@@ -69,8 +69,7 @@ jobs:
       SKIP_TEAM_ID_CHECK: '1'
       CODESIGN_TIMESTAMP: 'off'
       GOMAXPROCS: '2'
-      GOGC: '30'
-      GOMEMLIMIT: 3GiB
+      GOMEMLIMIT: 6GiB
       OPENCLAW_TSDOWN_MAX_OLD_SPACE_MB: '6144'
       NODE_OPTIONS: --max-old-space-size=6144
     steps:
