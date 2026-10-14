@@ -455,7 +455,7 @@ struct MacNodeHostWorkerTests {
             caps: [
                 "system",
                 MacNodeCodexThreadCatalogContract.capability,
-                MacNodeClaudeSessionCatalogContract.capability,
+                "claude-sessions",
             ],
             commands: [
                 "system.run",

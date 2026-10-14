@@ -1298,7 +1298,7 @@ extension MacNodeModeCoordinator {
         if connectionMode == .local {
             omittedCaps = Set([
                 MacNodeCodexThreadCatalogContract.capability,
-                MacNodeClaudeSessionCatalogContract.capability,
+                "claude-sessions",
             ])
             omittedCommands = Set(
                 MacNodeCodexThreadCatalogContract.commands +
