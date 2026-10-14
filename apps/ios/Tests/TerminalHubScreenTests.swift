@@ -11,9 +11,7 @@ struct TerminalHubScreenTests {
         url: URL,
         token: String? = nil,
         password: String? = nil,
-        tls: GatewayTLSParams? = nil,
-        allowStoredDeviceAuth: Bool = true,
-        deviceAuthGatewayID: String? = nil) -> GatewayConnectConfig
+        tls: GatewayTLSParams? = nil) -> GatewayConnectConfig
     {
         GatewayConnectConfig(
             url: url,
@@ -30,9 +28,7 @@ struct TerminalHubScreenTests {
                 permissions: [:],
                 clientId: "ios",
                 clientMode: "node",
-                clientDisplayName: "Phone",
-                allowStoredDeviceAuth: allowStoredDeviceAuth,
-                deviceAuthGatewayID: deviceAuthGatewayID))
+                clientDisplayName: "Phone"))
     }
 
     @Test func `terminal URL flips scheme and preserves the Control UI base path`() throws {
@@ -89,97 +85,22 @@ struct TerminalHubScreenTests {
         #expect(script?.contains("\"https:\\/\\/gateway.example.com:443\"") == false)
     }
 
-    @Test func `auth user script does not export stored identity grants or configured candidates`() throws {
-        let gatewayID = "manual|terminal-\(UUID().uuidString)|443"
-        let identity = DeviceIdentityStore.loadOrCreate()
-        defer {
-            DeviceAuthStore.clearToken(
-                deviceId: identity.deviceId,
-                role: "operator",
-                gatewayID: gatewayID)
-        }
-        #expect(DeviceAuthStore.storeToken(
-            deviceId: identity.deviceId,
-            role: "operator",
-            token: "scoped-terminal-token",
-            scopes: ["operator.read", "operator.write"],
-            gatewayID: gatewayID).token == "scoped-terminal-token")
+    @Test func `auth user script does not project configured credentials without acceptance`() throws {
         let config = try Self.makeConfig(
             url: #require(URL(string: "wss://gateway.example.com:8443")),
             token: "configured-token",
-            password: "configured-password",
-            deviceAuthGatewayID: gatewayID)
+            password: "configured-password")
 
-        let script = ControlUIHubPage.terminal.authUserScript(
+        let script = try #require(ControlUIHubPage.terminal.authUserScript(
             config: config,
-            legacyCredentials: nil)
+            legacyCredentials: nil))
 
-        #expect(script?.contains("localStorage") == false)
-        #expect(script?.contains("privateKey") == false)
-        #expect(script?.contains(identity.deviceId) == false)
-        #expect(script?.contains("scoped-terminal-token") == false)
-        #expect(script?.contains("configured-token") == false)
-        #expect(script?.contains("configured-password") == false)
-    }
-
-    @Test func `auth user script omits an empty-scope stored grant and candidates`() throws {
-        let gatewayID = "manual|terminal-empty-scope-\(UUID().uuidString)|443"
-        let identity = DeviceIdentityStore.loadOrCreate()
-        defer {
-            DeviceAuthStore.clearToken(
-                deviceId: identity.deviceId,
-                role: "operator",
-                gatewayID: gatewayID)
-        }
-        #expect(DeviceAuthStore.storeToken(
-            deviceId: identity.deviceId,
-            role: "operator",
-            token: "empty-scope-token",
-            scopes: [],
-            gatewayID: gatewayID).token == "empty-scope-token")
-        let config = try Self.makeConfig(
-            url: #require(URL(string: "wss://gateway.example.com:8443")),
-            token: "configured-token",
-            password: "configured-password",
-            deviceAuthGatewayID: gatewayID)
-
-        let script = ControlUIHubPage.terminal.authUserScript(
-            config: config,
-            legacyCredentials: nil)
-
-        #expect(script?.contains("empty-scope-token") == false)
-        #expect(script?.contains("configured-token") == false)
-        #expect(script?.contains("configured-password") == false)
-    }
-
-    @Test func `auth user script omits stored device auth and configured password`() throws {
-        let gatewayID = "manual|terminal-suppressed-\(UUID().uuidString)|443"
-        let identity = DeviceIdentityStore.loadOrCreate()
-        defer {
-            DeviceAuthStore.clearToken(
-                deviceId: identity.deviceId,
-                role: "operator",
-                gatewayID: gatewayID)
-        }
-        #expect(DeviceAuthStore.storeToken(
-            deviceId: identity.deviceId,
-            role: "operator",
-            token: "stale-terminal-token",
-            gatewayID: gatewayID).token == "stale-terminal-token")
-        let config = try Self.makeConfig(
-            url: #require(URL(string: "wss://gateway.example.com:8443")),
-            password: "replacement-password",
-            allowStoredDeviceAuth: false,
-            deviceAuthGatewayID: gatewayID)
-
-        let script = ControlUIHubPage.terminal.authUserScript(
-            config: config,
-            legacyCredentials: nil)
-
-        #expect(script?.contains("stale-terminal-token") == false)
-        #expect(script?.contains("deviceAuthSeed") == false)
-        #expect(script?.contains("localStorage") == false)
-        #expect(script?.contains("replacement-password") == false)
+        #expect(script.contains("\"nativeConnectAuth\":true"))
+        #expect(!script.contains("configured-token"))
+        #expect(!script.contains("configured-password"))
+        #expect(!script.contains("localStorage"))
+        #expect(!script.contains("privateKey"))
+        #expect(!script.contains("deviceAuthSeed"))
     }
 
     @Test func `web content identity changes with stored operator token`() throws {
