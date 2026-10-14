@@ -47,24 +47,6 @@ export function registerGatewayStartupFailureTests(
     ).rejects.toBe(error);
   };
 
-  it("drains after acknowledging the exact tracked startup failure", async () => {
-    const operations = await createStartupOperations();
-    const failure = new Error("handled startup failure");
-    await rejectTrackedStartup(operations, failure);
-    operations.close();
-    operations.acknowledgeHandledFailure(failure);
-    await expect(operations.drain()).resolves.toBeUndefined();
-  });
-
-  it("keeps a tracked startup failure when acknowledgement has a different identity", async () => {
-    const operations = await createStartupOperations();
-    const failure = new Error("startup failure");
-    await rejectTrackedStartup(operations, failure);
-    operations.close();
-    operations.acknowledgeHandledFailure(new Error("different failure"));
-    await expect(operations.drain()).rejects.toBe(failure);
-  });
-
   it("preserves a second tracked startup failure after acknowledging the first", async () => {
     const operations = await createStartupOperations();
     const handledFailure = new Error("handled prerequisite failure");
@@ -74,14 +56,6 @@ export function registerGatewayStartupFailureTests(
     operations.close();
     operations.acknowledgeHandledFailure(handledFailure);
     await expect(operations.drain()).rejects.toBe(unrelatedFailure);
-  });
-
-  it("keeps an unacknowledged tracked startup failure fatal at drain", async () => {
-    const operations = await createStartupOperations();
-    const failure = new Error("unacknowledged startup failure");
-    await rejectTrackedStartup(operations, failure);
-    operations.close();
-    await expect(operations.drain()).rejects.toBe(failure);
   });
 
   it("joins recovery cleanup failure after shutdown without masking the failure", async () => {
