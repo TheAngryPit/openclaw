@@ -172,6 +172,7 @@ describe("browser sign-in recovery", () => {
     "verifies renewed website access using the current %s credential",
     async (acceptedCredential) => {
       stop();
+      vi.spyOn(window, "open").mockReturnValue(null);
       stop = startBrowserAuthRecovery("/nested", () => ({
         hello: { auth: { deviceToken: "expired-device-token" } },
         settings: { token: "stored-token" },
@@ -203,6 +204,8 @@ describe("browser sign-in recovery", () => {
       ).rejects.toThrow();
       await finishRenewal();
       await getRenderedModalDialog(document.body);
+      button("Sign in").click();
+      await waitForSolid(() => expect(button("Check again").disabled).toBe(false));
       signedIn = true;
       window.dispatchEvent(new Event("focus"));
       await expect.poll(() => restored.mock.calls.length).toBe(1);
