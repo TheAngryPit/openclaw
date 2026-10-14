@@ -1,11 +1,15 @@
+import { availableParallelism } from "node:os";
 import type { Locator, Page } from "playwright";
 import type { ControlUiReadiness } from "../app/control-ui-readiness.ts";
 import type { MockGatewayWindow } from "./control-ui-e2e-contract.ts";
-// Loaded CI runners regularly stall real Chromium renders past 10s; the larger
-// CI budget trades failure latency, not coverage (mirrors the ui-e2e vitest
-// config's expect.poll budget). Local runs keep the snappy 10s deadline.
+// Loaded CI runners and small (<=4 CPU) hosts regularly stall real Chromium
+// renders past 10s; the larger budget trades failure latency, not coverage
+// (mirrors the ui-e2e vitest config's expect.poll budget). Roomier local hosts
+// keep the snappy 10s deadline.
 export const controlUiE2eWaitTimeoutMs =
-  process.env.CI === "true" || process.env.GITHUB_ACTIONS === "true" ? 30_000 : 10_000;
+  process.env.CI === "true" || process.env.GITHUB_ACTIONS === "true" || availableParallelism() <= 4
+    ? 30_000
+    : 10_000;
 
 /** Selected descriptors and cached rows can render before the authoritative roster. */
 export async function waitForControlUiInitialRoster(page: Page): Promise<void> {
@@ -39,10 +43,12 @@ export async function waitForControlUiInitialRoster(page: Page): Promise<void> {
 }
 
 /** A sent connect request is not the delivered Gateway handshake. */
-export async function waitForControlUiGatewayReady(page: Page): Promise<void> {
-  await page.waitForFunction(() => {
-    return window.openclawControlUi?.snapshot().gatewayPhase === "connected";
-  });
+export async function waitForControlUiGatewayReady(page: Page, timeout?: number): Promise<void> {
+  await page.waitForFunction(
+    () => window.openclawControlUi?.snapshot().gatewayPhase === "connected",
+    undefined,
+    { timeout },
+  );
 }
 
 /** Wait for both the Gateway lifecycle and its dedicated visible reconnect status. */

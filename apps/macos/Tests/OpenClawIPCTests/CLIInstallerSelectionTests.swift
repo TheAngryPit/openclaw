@@ -68,6 +68,66 @@ struct CLIInstallerSelectionTests {
         }
     }
 
+    @Test(arguments: ["older", "missing", "revoked"])
+    func `service update preserves selection when canonical verification cannot select its CLI`(
+        _ scenario: String) async throws
+    {
+        try await self.withCLIInstallations { external, managed, homeDirectory in
+            let probed = homeDirectory.appendingPathComponent("canonical-probed")
+            if scenario != "missing" {
+                let version = scenario == "revoked" ? self.fixtureVersion : "2026.1.1"
+                try """
+                #!/bin/sh
+                touch '\(probed.path)'
+                printf 'OpenClaw \(version)\\n'
+
+                """.write(to: managed, atomically: false, encoding: .utf8)
+            } else {
+                try FileManager.default.removeItem(at: managed)
+            }
+            let service = homeDirectory.appendingPathComponent("service-cli.sh")
+            try """
+            #!/bin/sh
+            if [ "$1" = "--version" ]; then
+              printf 'OpenClaw \(self.fixtureVersion)\\n'
+            else
+              printf '{"status":"ok","before":{"version":"2026.8.1"}}\\n'
+            fi
+
+            """.write(to: service, atomically: false, encoding: .utf8)
+            let authority = try GatewayLaunchAgentManager.gatewayServiceAuthority(
+                stateDirectory: homeDirectory,
+                homeDirectory: homeDirectory)
+            let outcome = await CLIInstaller.updateManaged(
+                targetVersion: self.fixtureVersion,
+                restartGateway: false,
+                homeDirectory: homeDirectory,
+                installedCLI: GatewayLaunchAgentManager.InstalledServiceCLI(
+                    prefix: ["/bin/sh", service.path],
+                    sqliteLibrary: nil,
+                    serviceAuthority: authority),
+                checkCurrent: {
+                    if scenario == "revoked", FileManager.default.fileExists(atPath: probed.path) {
+                        throw GatewayHostingError(message: "Synthetic caller was revoked")
+                    }
+                },
+                statusHandler: { _ in })
+
+            if scenario == "revoked" {
+                #expect(outcome == .failure(
+                    message: String(localized: "Gateway update failed."),
+                    details: "Synthetic caller was revoked"))
+                #expect(AppDefaults.standard.string(forKey: cliInstallPolicyKey) == nil)
+            } else {
+                #expect(outcome == .success(fromVersion: "2026.8.1", toVersion: self.fixtureVersion))
+            }
+            #expect(FileManager.default.fileExists(atPath: probed.path) == (scenario != "missing"))
+            #expect(AppDefaults.standard.string(forKey: cliValidatedExecutableKey) == external.path)
+            #expect(AppDefaults.standard.string(forKey: cliValidatedVersionKey) == self.fixtureVersion)
+            #expect(CommandResolver.openclawExecutable() == external.path)
+        }
+    }
+
     private func withCLIInstallations(
         _ body: (URL, URL, URL) async throws -> Void) async throws
     {
