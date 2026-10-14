@@ -178,7 +178,7 @@ it("caps pending provider keys and refuses late pages from evicted operations", 
     await vi.advanceTimersByTimeAsync(1_000);
     await Promise.all(lists);
     expect(operations.pages.has("query-0")).toBe(false);
-    expect(operations.pages.get("query-1")).toEqual(page);
+    expect(operations.pages.get("query-1")).toEqual({ page });
     await vi.advanceTimersByTimeAsync(59_000);
     expect(operations.providers.size).toBe(0);
     releases[2]!.resolve(page);
