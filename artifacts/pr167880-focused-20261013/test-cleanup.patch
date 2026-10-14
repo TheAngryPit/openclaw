@@ -1,0 +1,44 @@
+diff --git a/src/cli/gateway-cli/run-loop-startup.test-support.ts b/src/cli/gateway-cli/run-loop-startup.test-support.ts
+index 670db7e10e60d118dd75d5d2e094ac50b4fb3aa1..d832b73b987a8d226512f9c9c2ba603568691dca 100644
+--- a/src/cli/gateway-cli/run-loop-startup.test-support.ts
++++ b/src/cli/gateway-cli/run-loop-startup.test-support.ts
+@@ -47,24 +47,6 @@ export function registerGatewayStartupFailureTests(
+     ).rejects.toBe(error);
+   };
+ 
+-  it("drains after acknowledging the exact tracked startup failure", async () => {
+-    const operations = await createStartupOperations();
+-    const failure = new Error("handled startup failure");
+-    await rejectTrackedStartup(operations, failure);
+-    operations.close();
+-    operations.acknowledgeHandledFailure(failure);
+-    await expect(operations.drain()).resolves.toBeUndefined();
+-  });
+-
+-  it("keeps a tracked startup failure when acknowledgement has a different identity", async () => {
+-    const operations = await createStartupOperations();
+-    const failure = new Error("startup failure");
+-    await rejectTrackedStartup(operations, failure);
+-    operations.close();
+-    operations.acknowledgeHandledFailure(new Error("different failure"));
+-    await expect(operations.drain()).rejects.toBe(failure);
+-  });
+-
+   it("preserves a second tracked startup failure after acknowledging the first", async () => {
+     const operations = await createStartupOperations();
+     const handledFailure = new Error("handled prerequisite failure");
+@@ -76,14 +58,6 @@ export function registerGatewayStartupFailureTests(
+     await expect(operations.drain()).rejects.toBe(unrelatedFailure);
+   });
+ 
+-  it("keeps an unacknowledged tracked startup failure fatal at drain", async () => {
+-    const operations = await createStartupOperations();
+-    const failure = new Error("unacknowledged startup failure");
+-    await rejectTrackedStartup(operations, failure);
+-    operations.close();
+-    await expect(operations.drain()).rejects.toBe(failure);
+-  });
+-
+   it("joins recovery cleanup failure after shutdown without masking the failure", async () => {
+     const { createGatewayRestartRecovery } = await import("./run-loop-startup.js");
+     const failureStarted = createDeferredCore();

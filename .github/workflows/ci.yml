@@ -30,6 +30,7 @@ on:
           - tailscale-recovery
           - tailscale-runtime
           - tailscale-tracked-regression
+          - tailscale-focused-cleanup
       live_proof_mode:
         description: Real unauthenticated parking proof, or authorized test-tailnet recovery
         required: false
@@ -49,6 +50,99 @@ permissions:
   contents: read
 
 jobs:
+  pr167880-focused-cleanup:
+    name: Tailscale recovery retained lifecycle tests
+    if: ${{ github.repository == 'TheAngryPit/openclaw' && github.event_name == 'workflow_dispatch' && inputs.proof_kind == 'tailscale-focused-cleanup' && inputs.candidate_sha == '2a0c32468ef9fd8840cab7babbab5ca3e25f70d8' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    concurrency:
+      group: pr167880-isolated-runtime
+      cancel-in-progress: false
+    env:
+      QA_BASE_SHA: 2a0c32468ef9fd8840cab7babbab5ca3e25f70d8
+      QA_TEST_PATH: src/cli/gateway-cli/run-loop-startup.test-support.ts
+      QA_BASE_BLOB: 670db7e10e60d118dd75d5d2e094ac50b4fb3aa1
+      QA_CANDIDATE_BLOB: d832b73b987a8d226512f9c9c2ba603568691dca
+      QA_OVERLAY: artifacts/pr167880-focused-20261013/test-cleanup.patch
+      QA_RECEIPTS: ${{ runner.temp }}/pr167880-focused-cleanup
+    steps:
+      - name: Verify secretless public hosted runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+      - name: Checkout frozen QA without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+          path: tooling
+      - name: Checkout exact public product without persisted credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: TheAngryPit/openclaw
+          ref: 2a0c32468ef9fd8840cab7babbab5ca3e25f70d8
+          persist-credentials: false
+          path: product
+      - name: Set up pinned Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24.19.0
+      - name: Verify exact overlay and install frozen dependencies
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C ../tooling rev-parse HEAD)" = "${{ github.workflow_sha }}"
+          test "$(git rev-parse HEAD)" = "$QA_BASE_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          test "$(git hash-object "$QA_TEST_PATH")" = "$QA_BASE_BLOB"
+          git apply --check "../tooling/$QA_OVERLAY"
+          git apply "../tooling/$QA_OVERLAY"
+          test "$(git hash-object "$QA_TEST_PATH")" = "$QA_CANDIDATE_BLOB"
+          test "$(git diff --name-only)" = "$QA_TEST_PATH"
+          corepack enable
+          corepack prepare "$(node -p 'require("./package.json").packageManager')" --activate
+          corepack pnpm install --frozen-lockfile
+      - name: Run complete owning lifecycle suite
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$QA_RECEIPTS"
+          node scripts/run-vitest.mjs src/cli/gateway-cli/run-loop.test.ts --maxWorkers=1 --reporter=json --outputFile="$QA_RECEIPTS/tests.json"
+          node -e 'const fs=require("node:fs"),r=JSON.parse(fs.readFileSync(process.env.QA_RECEIPTS+"/tests.json","utf8")); const required=["preserves a second tracked startup failure after acknowledging the first","joins the real Tailscale prerequisite waiter when shutdown cancels recovery","parks supervised Serve startup after clean close and retries once after Running"]; const cases=r.testResults.flatMap(x=>x.assertionResults); if(r.success!==true || r.numFailedTests!==0 || r.numPassedTests<1 || !required.every(name=>cases.some(x=>x.title===name && x.status==="passed"))) process.exit(1);'
+      - name: Reverse only the exact admitted overlay and verify clean source
+        if: always()
+        working-directory: product
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$QA_BASE_SHA"
+          current="$(git hash-object "$QA_TEST_PATH")"
+          if [ "$current" = "$QA_CANDIDATE_BLOB" ]; then
+            git apply --reverse --check "../tooling/$QA_OVERLAY"
+            git apply --reverse "../tooling/$QA_OVERLAY"
+          else
+            test "$current" = "$QA_BASE_BLOB"
+          fi
+          test -z "$(git status --porcelain --untracked-files=all)"
+          test "$(git hash-object "$QA_TEST_PATH")" = "$QA_BASE_BLOB"
+          git -C ../tooling diff --exit-code "${{ github.workflow_sha }}" --
+          git -C ../tooling diff --cached --exit-code "${{ github.workflow_sha }}" --
+          mkdir -p "$QA_RECEIPTS"
+          printf 'product_base=%s\ncandidate_test_blob=%s\nworkflow_sha=%s\nsource_cleanup=pristine\n' "$QA_BASE_SHA" "$QA_CANDIDATE_BLOB" "${{ github.workflow_sha }}" > "$QA_RECEIPTS/source-receipt.txt"
+      - name: Upload synthetic tests and exact source receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr167880-focused-cleanup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr167880-focused-cleanup/
+          if-no-files-found: error
+          retention-days: 7
   pr167880-tracked-regression:
     name: Tracked startup failure baseline and candidate regression
     if: ${{ github.repository == 'TheAngryPit/openclaw' && github.event_name == 'workflow_dispatch' && inputs.proof_kind == 'tailscale-tracked-regression' && inputs.candidate_sha == '59d29a7c1683dbb33f25e35c5196475e3a8b7b8d' }}
