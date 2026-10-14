@@ -11,7 +11,6 @@ import {
   resolveSessionFilePathCore,
   resolveSessionFilePathOptions,
 } from "../../config/sessions/paths.js";
-import { loadSessionEntry } from "../../config/sessions/session-accessor.js";
 import { composeSessionSourceAssertion } from "../../config/sessions/session-source-authority.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
 import { logVerbose } from "../../globals.js";
@@ -54,6 +53,7 @@ import {
   resolveActiveReplyRunSessionId,
   waitForReplyRunEndBySessionId,
 } from "./reply-run-registry.js";
+import { getReplyOperationSessionReader } from "./reply-run-registry.state.js";
 import { admitReplyTurn } from "./reply-turn-admission.js";
 import {
   isSlackDirectRoutedThreadTurn,
@@ -96,6 +96,17 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
     sessionEntryHandle,
     sessionStore,
   } = params;
+  const assertPreparationActive = composeSessionSourceAssertion(
+    [opts?.operatorAuthority?.assertCurrent, opts?.internalEventExecution?.assertCurrent],
+    (assertSourceCurrent) => {
+      opts?.abortSignal?.throwIfAborted();
+      opts?.replyOperation?.abortSignal.throwIfAborted();
+      assertSourceCurrent();
+      if (opts?.replyOperation?.result) {
+        throw new Error("Reply operation ended during preparation");
+      }
+    },
+  );
   let { sessionEntry, prefixedBodyBase } = context;
   let { resolvedThinkLevel } = params;
   let thinkLevelOverride =
@@ -153,15 +164,18 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
         continue;
       }
       const isCurrentSession = systemEventSessionKey === sessionKey;
+      assertPreparationActive();
       const eventsBlock = await drainFormattedSystemEvents({
         cfg,
         agentId,
         sessionKey: systemEventSessionKey,
         isMainSession: isCurrentSession && isMainSession,
         isNewSession: isCurrentSession && isNewSession,
-        // A heartbeat may consume only its prepared generic selection, never
-        // dedicated reminders or arrivals that were not part of this turn.
-        events: context.isHeartbeat ? (eventContext?.events ?? []) : undefined,
+        // Producer-owned turns consume only their captured occurrence selection.
+        events:
+          context.isHeartbeat || opts?.internalEventExecution
+            ? (eventContext?.events ?? [])
+            : undefined,
         deferredEventIds: context.isHeartbeat ? eventContext?.deferredEventIds : undefined,
         onEventsAdmitted: context.isHeartbeat ? eventContext?.onEventsAdmitted : undefined,
       });
@@ -188,6 +202,11 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
         const { ensureSkillSnapshot } = await loadSessionUpdatesRuntime();
         return await ensureSkillSnapshot({
           agentId,
+          // Command continuations prepare the target before adopting its run slot below.
+          reader:
+            opts?.replyOperation && opts.replyOperation.key === sessionKey
+              ? getReplyOperationSessionReader(opts.replyOperation)
+              : undefined,
           sessionEntry,
           sessionEntryHandle,
           sessionStore,
@@ -201,17 +220,7 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
           execOverrides: params.execOverrides,
           skillFilter: opts?.skillFilter,
           skillOverrides: opts?.skillOverrides,
-          assertCurrent: composeSessionSourceAssertion(
-            [opts?.operatorAuthority?.assertCurrent],
-            (assertOperatorCurrent) => {
-              opts?.abortSignal?.throwIfAborted();
-              opts?.replyOperation?.abortSignal.throwIfAborted();
-              assertOperatorCurrent();
-              if (opts?.replyOperation?.result) {
-                throw new Error("Reply operation ended while preparing skills");
-              }
-            },
-          ),
+          assertCurrent: assertPreparationActive,
         });
       });
   sessionEntry = skillResult.sessionEntry;
@@ -260,9 +269,6 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
         text: `Thinking level "${resolvedThinkLevel}" is not supported for ${provider}/${model}. Use one of: ${formatThinkingLevels(provider, model, ", ", thinkingCatalog, thinkingRuntime)}.`,
       }));
     }
-    // Execution fallbacks are turn-local; directive/model persistence owns
-    // durable thinking remaps so explicit session overrides survive replies.
-    resolvedThinkLevel = thinkingSelection.level;
   }
 
   const providedReplyOperation = opts?.replyOperation;
@@ -306,16 +312,9 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
     sessionId: string;
     sessionFile: string;
   } => {
-    // Working-set exact key first; disk alias resolve only when storePath known.
-    // No whole-map scan — that encodes the store layout the accessor hides.
+    // Admission and in-process publications own this turn’s working entry.
     const latestSessionEntry =
-      sessionStore && sessionKey
-        ? (sessionStore[sessionKey] ??
-          (storePath
-            ? loadSessionEntry({ storePath, sessionKey, readConsistency: "latest" })
-            : undefined) ??
-          sessionEntry)
-        : sessionEntry;
+      sessionStore && sessionKey ? (sessionStore[sessionKey] ?? sessionEntry) : sessionEntry;
     const latestSessionId = latestSessionEntry?.sessionId ?? sessionIdFinal;
     rebindProvidedReplyOperation(latestSessionId);
     opts?.onSessionPrepared?.({
@@ -365,6 +364,7 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
     : rawActiveSessionIdForInterrupt;
   const shouldPreemptHeartbeat =
     !isRoomEvent && !context.isHeartbeat && rawActiveSessionIdForInterrupt !== undefined;
+  assertPreparationActive();
   const heartbeatPreemption =
     shouldPreemptHeartbeat && embeddedAgentRuntime
       ? await embeddedAgentRuntime.preemptAndDrainEmbeddedHeartbeatRun(
@@ -382,13 +382,14 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
     sessionLaneKey &&
     (laneSize > 0 || activeSessionIdForInterrupt)
   ) {
+    assertPreparationActive();
     // Keyless runs use an incarnation-unique sessionId lane; session-key lanes can be shared.
     const cleared = sessionKey
       ? (await import("./queue/cleanup.js")).clearSessionLifecycleLanes({
           keys: [sessionKey],
           agentId,
           sessionKey,
-          assertCurrent: () => {},
+          assertCurrent: assertPreparationActive,
         })
       : clearCommandLane(sessionLaneKey);
     logVerbose(`Cleared ${cleared} queued command(s) before interrupting ${sessionLaneKey}`);
@@ -435,11 +436,16 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
       configuredProfileId: params.configuredProfileId,
       ...(agentHarnessPolicy ? { harnessRuntime: agentHarnessPolicy.runtime } : {}),
       agentDir,
+      reader:
+        providedReplyOperation?.key === authSessionKey
+          ? getReplyOperationSessionReader(providedReplyOperation)
+          : undefined,
       sessionEntry: authSessionEntry,
       sessionStore: authSessionStore,
       sessionKey: authSessionKey,
       storePath: shouldUseEphemeralSession ? undefined : storePath,
       isNewSession,
+      assertCommitAllowed: assertPreparationActive,
       // Only an authenticated Gateway profile establishes a person-linked pin;
       // channel senders read as observations and resolve to undefined here.
       requesterProfileId: readSessionInputProfileId(ctx),
@@ -502,6 +508,7 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
   };
   if (commandTurnContinuationTargetKey && providedReplyOperation) {
     const adoption = await admitReplyTurn({
+      onDatabaseRegistration: opts?.onDatabaseRegistration,
       providerReviewAcknowledgment: opts?.providerReviewAcknowledgment,
       agentId,
       sessionKey: commandTurnContinuationTargetKey,
@@ -569,6 +576,7 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
       activeSessionId: activeSessionId ?? resolveActiveQueueSessionId(),
       queueMode: activeRunQueueMode,
       interruptActiveRun: async () => {
+        assertPreparationActive();
         if (activeRunInterruptTarget) {
           return (
             await interruptReplyRunTarget(
@@ -595,7 +603,7 @@ export async function prepareReplyRunAdmission(context: PreparedReplyRunContext)
         ({ authProfileId, authProfileIdSource } = await resolveRuntimeAuthProfile());
         preparedSessionState = resolvePreparedSessionState();
         // The interrupted run may have changed goal or suggestion state while admission waited.
-        await refreshInboundContextAfterAdmissionWait();
+        refreshInboundContextAfterAdmissionWait();
         promptBodies = await rebuildPromptBodies();
       },
       resolveBusyState: resolveQueueBusyState,

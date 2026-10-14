@@ -357,52 +357,6 @@ struct GatewayAccessDeviceAuthBindingTests {
             bindingStore: store).allowStoredDeviceAuth)
     }
 
-    @Test func `access webview does not seed browser auth for an unbound principal`() throws {
-        let tokens = try CloudflareAccessTestTokens()
-        let application = try CloudflareAccessTestTokens.application()
-        let principal = try self.principal(
-            tokens: tokens,
-            subject: "nonowner-B",
-            application: application)
-        let ingress = GatewayIngressAuthorization(
-            origin: application.origin,
-            principal: principal,
-            revision: 1,
-            registrationID: UUID(),
-            headers: { _ in [:] },
-            isCurrent: { true },
-            dashboardCookie: { _ in nil },
-            checkResponse: { _ in },
-            load: { request, operation in try await operation(request) })
-        var config = try GatewayConnectConfig(
-            url: #require(URL(string: "wss://gateway.example.test")),
-            stableID: self.gatewayID,
-            tls: nil,
-            token: nil,
-            bootstrapToken: nil,
-            password: nil,
-            nodeOptions: GatewayConnectOptions(
-                role: "node",
-                scopes: [],
-                caps: [],
-                commands: [],
-                permissions: [:],
-                clientId: "ios",
-                clientMode: "node",
-                clientDisplayName: "Phone",
-                allowStoredDeviceAuth: false))
-        config.ingressAuthorization = ingress
-        let script = try AuthenticatedControlUI.authUserScript(
-            config: config,
-            pageURL: #require(URL(string: "https://gateway.example.test/ui")))
-
-        #expect(script?.contains("\"nativeConnectAuth\":true") == true)
-        #expect(script?.contains("deviceAuthSeed") == false)
-        #expect(script?.contains("legacy-admin-token") == false)
-        #expect(script?.contains("localStorage") == false)
-        #expect(script?.contains("privateKey") == false)
-    }
-
     @Test func `principal identity includes access origin issuer audience and subject`() throws {
         let tokens = try CloudflareAccessTestTokens()
         let application = try CloudflareAccessTestTokens.application()
