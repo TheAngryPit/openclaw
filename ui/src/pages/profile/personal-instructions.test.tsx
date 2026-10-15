@@ -2,11 +2,13 @@
 
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
-import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import { createAgentSelectionCapability } from "../../app/agent-selection.ts";
 import type { ApplicationContext, ApplicationGatewaySnapshot } from "../../app/context.ts";
 import { i18n } from "../../i18n/index.ts";
-import { createTestGatewayClient } from "../../test-helpers/gateway-client.ts";
+import {
+  createTestGatewayClient,
+  type GatewayRequestHandler,
+} from "../../test-helpers/gateway-client.ts";
 import { mountSolid } from "../../test-helpers/mount-solid.ts";
 import { createSolidApplicationContextProvider } from "../../test-helpers/solid-application-context.tsx";
 import { flush, waitForSolid } from "../../test-helpers/solid-settle.ts";
@@ -40,11 +42,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function createContext(
-  request: GatewayBrowserClient["request"],
-  signedIn = true,
-  multipleProfiles = true,
-) {
+function createContext(request: GatewayRequestHandler, signedIn = true, multipleProfiles = true) {
   const base = createConnectedContext(
     request,
     signedIn ? { id: "profile-1", name: "Ada" } : null,
@@ -100,7 +98,7 @@ function createContext(
     },
   };
 }
-function mount(request: GatewayBrowserClient["request"], signedIn = true, multipleProfiles = true) {
+function mount(request: GatewayRequestHandler, signedIn = true, multipleProfiles = true) {
   const harness = createContext(request, signedIn, multipleProfiles);
   const provider = createSolidApplicationContextProvider(harness.context);
   const { container: element } = mountSolid(() => <PersonalInstructions />, {

@@ -42,9 +42,9 @@ import { processProfileAvatar, ProfileAvatarError } from "./avatar-processing.ts
 import { IdentitySection } from "./identity-section.tsx";
 import { ModelAccounts } from "./model-accounts.tsx";
 import { PersonalInstructions } from "./personal-instructions.tsx";
+import { userProfileAvatarUrl } from "./profile-avatar-url.ts";
 import type { ProfileChannelIdentityBusyState } from "./profile-channel-identities-controller.ts";
 import { ProfileChannelIdentities } from "./profile-channel-identities.tsx";
-import { userProfileAvatarUrl } from "./profile-avatar-url.ts";
 import { ProfileHero } from "./profile-hero.tsx";
 
 registerEnglishCatalog(registerModelAccountsEnglish);
@@ -489,9 +489,7 @@ export function ProfilePage() {
                     <button
                       type="button"
                       class="btn"
-                      disabled={
-                        view().identityBusy !== null || view().channelIdentityBusy.mutation
-                      }
+                      disabled={view().identityBusy !== null || view().channelIdentityBusy.mutation}
                       onClick={() => context.gateway.connect()}
                     >
                       {t("profilePage.access.reconnect")}
