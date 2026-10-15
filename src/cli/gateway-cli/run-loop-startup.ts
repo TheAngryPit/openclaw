@@ -131,7 +131,6 @@ export function createGatewayRestartRecovery(
           logger.info("Automatic startup recovery did not complete; awaiting manual recovery.");
           return false;
         }
-        // Recovery completion only admits one retry; startup owns the health proof.
         logger.info("Automatic startup recovery completed; retrying Gateway startup once.");
         return true;
       } catch (recoveryError) {

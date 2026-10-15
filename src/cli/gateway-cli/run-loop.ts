@@ -1241,8 +1241,7 @@ export async function runGatewayLoop(params: {
           break;
         }
         // Keep TCC recovery after clean restart failures (#35862), but never reuse a
-        // generation whose startup cleanup failed. The outer CLI exits nonzero except
-        // for a supervised Serve prerequisite wait, which only starts after clean cleanup.
+        // generation whose startup cleanup failed. The outer CLI exits nonzero.
         if (
           terminalExitCode !== undefined ||
           maintenanceRequired ||
@@ -1273,8 +1272,6 @@ export async function runGatewayLoop(params: {
         startupFailedBeforeServerHandle = true;
         if (!pendingStartupRequest) {
           // A failed listener must release its lock for daemon restart/stop (#35862).
-          // A supervised Tailscale Serve prerequisite wait keeps process custody; releasing
-          // it here would admit a second Gateway while this one is parked without a listener.
           if (!canWaitForTailscaleServe) {
             await releaseLockIfHeld();
           }
@@ -1292,7 +1289,6 @@ export async function runGatewayLoop(params: {
             try {
               await iterationStartupOperations.drain();
             } catch (startupError) {
-              // Join all admitted startup work; the exact refusal is expected, others are not.
               if (startupError !== err) {
                 additionalStartupFailure = startupError;
                 hasAdditionalStartupFailure = true;
@@ -1317,7 +1313,6 @@ export async function runGatewayLoop(params: {
             throw additionalStartupFailure;
           }
           iterationStartupOperations.acknowledgeHandledFailure(err);
-          // A second or later startup failure remains fatal after the handled refusal.
           await iterationStartupOperations.drain();
           if (installationReplacement) {
             canWaitForTailscaleServe = false;
