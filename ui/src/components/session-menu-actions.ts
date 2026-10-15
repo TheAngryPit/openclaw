@@ -5,11 +5,11 @@ import { EDITOR_IDS, type EditorId } from "../lib/editor-links.ts";
 import { resolveAsciiShortcutKey } from "../lib/keyboard-shortcuts.ts";
 import { projectGateway } from "../lib/reactive/application.ts";
 import { useOptionalApplication } from "../lib/reactive/context.ts";
+import type { SessionCreatedActor, SessionOwnerOption } from "../lib/session-owner.ts";
 import { customSnoozeStorageKey, readCustomSnooze } from "../lib/sessions/custom-snooze.ts";
 import type { SolidControllerHost } from "../lit/solid-controller-host.ts";
 import type { SessionCommunicationMenuAction } from "./session-communication-options.ts";
 import { SessionMenuSettings } from "./session-menu-settings.ts";
-import type { SessionCreatedActor, SessionOwnerOption } from "./session-owner-chip.ts";
 import { SessionOwnerMenu } from "./session-owner-menu.ts";
 import "../styles/sidebar-menus.css";
 
@@ -22,7 +22,6 @@ export type SessionMenuData = {
   target?: { key: string; agentId?: string };
   sessionId: string | null;
   isChild?: boolean;
-  hasChildren?: boolean;
   pinnable?: boolean;
   pinned: boolean;
   unread: boolean;
@@ -56,7 +55,6 @@ const SIMPLE_SESSION_ACTIONS = [
   "move-session",
   "new-group",
   "toggle-archived",
-  "archive-tree",
   "move-to-top-level",
   "delete",
 ] as const;
@@ -209,14 +207,6 @@ export class SessionMenuActions {
         return false;
       case "move-to-top-level":
         return batch || !session.isChild;
-      case "archive-tree":
-        return (
-          batch ||
-          !session.hasChildren ||
-          session.archived ||
-          session.archiving === true ||
-          !state.archiveAllowed
-        );
       case "toggle-archived":
         return session.archiving === true || (!batch && !session.archived && !state.archiveAllowed);
       case "delete":

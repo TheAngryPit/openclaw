@@ -106,7 +106,7 @@ type RuntimeReadHost = {
 
 type AsyncAuthProfileStoreOptions = Omit<
   LoadAuthProfileStoreOptions,
-  "database" | "onReadOwner" | "syncExternalCli"
+  "database" | "onReadOwner" | "onReadSource" | "syncExternalCli"
 >;
 
 type AuthProfileRowsReader = Pick<
@@ -565,10 +565,10 @@ export function createAuthProfileStoreRuntimeReader({
     return withPreparedAuthProfileStoreReads(agentDir, options, undefined, env);
   }
 
-  /** @deprecated Use loadAuthProfileStoreForRuntimeAsync. Retained until an announced stable removal window. */
+  /** @deprecated Use loadAuthProfileStoreForRuntimeAsync. Supported through 2026-12-31. */
   function loadAuthProfileStoreForRuntime(
     agentDir?: string,
-    options?: LoadAuthProfileStoreOptions,
+    options?: Omit<LoadAuthProfileStoreOptions, "onReadSource">,
     env?: NodeJS.ProcessEnv,
   ): AuthProfileStore {
     warnPluginSdkDeprecation({

@@ -140,11 +140,12 @@ export async function executeUsageCostWorker(
         });
     return {
       kind: "inventory",
-      files: files.map(({ kind, sourcePath, sessionId, mtimeMs }) => ({
-        kind,
-        sourcePath,
-        sessionId,
-        mtimeMs,
+      files: files.map((file) => ({
+        kind: file.kind,
+        sourcePath: file.sourcePath,
+        sessionId: file.sessionId,
+        mtimeMs: file.mtimeMs,
+        transcriptFile: file.kind === "sqlite" ? file : undefined,
       })),
     };
   }
@@ -179,10 +180,7 @@ export async function executeUsageCostWorker(
     });
     return result.found ? result.value : missing;
   };
-  const readMetadata = async (): Promise<{
-    found: boolean;
-    rows: SessionCostUsageRollupRow[];
-  }> => {
+  const readMetadata = async (): Promise<SessionCostUsageRollupRow[]> => {
     const receipt = refreshInputs?.rollupReceipt();
     const cached =
       selectedPaths?.flatMap((filePath) => {
@@ -192,7 +190,7 @@ export async function executeUsageCostWorker(
     const cachedKeys = new Set(cached.map((row) => row.key));
     const missing = selectedPaths?.filter((filePath) => !cachedKeys.has(filePath));
     if (missing?.length === 0) {
-      return { found: true, rows: cached };
+      return cached;
     }
     return control.runNativeSection(() =>
       readDatabase(cacheDatabase, () => {
@@ -205,12 +203,12 @@ export async function executeUsageCostWorker(
           for (const row of rows) {
             refreshInputs?.retainRollup(receipt, { row });
           }
-          return { found: result.found, rows: [...cached, ...rows] };
+          return [...cached, ...rows];
         } catch (error) {
           if (!isTransientSqliteError(error)) {
             throw error;
           }
-          return { found: false, rows: [] };
+          return [];
         }
       }),
     );
@@ -298,7 +296,11 @@ export async function executeUsageCostWorker(
     // Reserve compact numeric checkpoints before bodies can exhaust the allowance.
     const metadataLimit = Math.min(selectedPaths ? new Set(selectedPaths).size : 20_000, 20_000);
     const cacheBudget = {
-      remainingBytes: 32 * 1024 * 1024 - metadataLimit * 256,
+      remainingBytes:
+        (operation.kind === "sessions"
+          ? (operation.reportBudgetBytes ?? 32 * 1024 * 1024)
+          : 32 * 1024 * 1024) -
+        metadataLimit * 256,
       deferredPaths: new Set<string>(),
       deferredMetadata: new Map<string, SessionCostUsageDeferredMetadata>(),
       metadataLimit,
@@ -308,23 +310,56 @@ export async function executeUsageCostWorker(
       rows: SessionCostUsageRollupRow[],
       entries: Map<string, ReturnType<typeof prepareUsageCostReportEntry>>,
     ): Promise<UsageCostWorkerResult> => {
-      // Capture cache metadata before transcript stats: a concurrent refresh must
-      // not make a valid newer checkpoint appear ahead of this report's inventory.
       const byPath = new Map(rows.map((row) => [row.key, row]));
       // Uncached sessions remain pending; only cached reports need transcript freshness.
+      const sessions =
+        operation.kind === "sessions"
+          ? operation.sessions.filter(
+              (_, index) =>
+                byPath.has(sessionPaths?.[index] ?? "") ||
+                cacheBudget.deferredPaths.has(sessionPaths?.[index] ?? ""),
+            )
+          : [];
+      const discovered = sessions.flatMap((session) =>
+        session.transcriptFile ? [session.transcriptFile] : [],
+      );
+      for (const file of discovered) {
+        const checkpoint = entries.get(file.filePath)?.envelope?.checkpoint;
+        if (checkpoint?.kind !== "sqlite") {
+          continue;
+        }
+        const rewritten = (checkpoint.generation ?? null) !== (file.generation ?? null);
+        if (rewritten) {
+          // Discovery and reporting crossed a rewrite. Omit the projection without
+          // pruning it; an older checkpoint still needs the normal stale refresh.
+          cacheBudget.deferredPaths.add(file.filePath);
+        }
+        if (
+          rewritten ? checkpoint.mtimeMs >= file.mtimeMs : checkpoint.maxSeq > (file.maxSeq ?? 0)
+        ) {
+          // A same-generation append may publish newer totals after discovery.
+          // Across rewrites, the owner's monotonic mutation version orders the
+          // snapshots: newer cache waits for rediscovery instead of rebuilding.
+          Object.assign(file, {
+            size: checkpoint.size,
+            mtimeMs: checkpoint.mtimeMs,
+            eventCount: checkpoint.eventCount,
+            maxSeq: checkpoint.maxSeq,
+          });
+        }
+      }
       const reportFiles =
         operation.kind === "summary"
           ? await inventory()
-          : await resolveUsageCostTranscriptFiles(
-              operation.sessions
-                .filter(
-                  (_, index) =>
-                    byPath.has(sessionPaths?.[index] ?? "") ||
-                    cacheBudget.deferredPaths.has(sessionPaths?.[index] ?? ""),
-                )
-                .map((session) => session.sessionFile),
-              access,
-            );
+          : [
+              ...discovered,
+              ...(await resolveUsageCostTranscriptFiles(
+                sessions
+                  .filter((session) => !session.transcriptFile)
+                  .map((session) => session.sessionFile),
+                access,
+              )),
+            ];
       const filesByPath = new Map(
         reportFiles.flatMap((file) => (file ? [[file.filePath, file] as const] : [])),
       );
@@ -386,6 +421,7 @@ export async function executeUsageCostWorker(
                 ...operation,
                 files: (sessionPaths ?? []).map((filePath) => filesByPath.get(filePath ?? "")),
               })),
+              remainingReportBytes: Math.max(0, cacheBudget.remainingBytes),
             };
       control.throwIfCancelled();
       return { ...result, invalidRows: [...invalidRows.values()] };
@@ -451,7 +487,7 @@ export async function executeUsageCostWorker(
     }
   }
 
-  const { found: cacheFound, rows } = await readMetadata();
+  const rows = await readMetadata();
   const byPath = new Map(rows.map((row) => [row.key, row]));
 
   const requestedFiles = selectedFiles.filter((file) => file !== undefined);
@@ -471,8 +507,7 @@ export async function executeUsageCostWorker(
       bytes.buffer,
     ]);
   }
-  // Missing stores have nothing to prune; a real rollup write owns their creation.
-  if (!operation.sessionFiles && cacheFound) {
+  if (!operation.sessionFiles && pruned) {
     await host("prune", {});
   }
   const minMtimeMs = operation.sessionFiles ? undefined : operation.startMs;
