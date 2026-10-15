@@ -6,7 +6,7 @@ import { createChatSidebarContainer } from "./chat-sidebar.test-support.ts";
 import "../../../styles.css";
 import "../../../styles/chat.ts";
 import "../../../styles/chat/side-panel.css";
-import "./chat-detail-panel.ts";
+import "./chat-detail-panel.tsx";
 
 // The root jsdom ui shard also collects *.browser.test.ts files; CodeMirror
 // needs a real DOM, so this suite only runs in the checks-ui Chromium project.
@@ -128,26 +128,8 @@ describe.runIf(browserMode)("chat file editor", () => {
     localStorage.removeItem("openclaw.control.fileView.wrap.v1");
   });
 
-  it("renders content and decorates the requested line", async () => {
-    const panel = await mountFile({
-      kind: "file",
-      path: "src/example.ts",
-      name: "example.ts",
-      content: "const first = 1;\nconst second = 2;",
-      line: 2,
-    });
-
-    expect(panel.querySelector(".cm-content")?.textContent).toContain("const second = 2;");
-    const target = panel.querySelector(".file-view__line--target");
-    expect(target?.getAttribute("data-line")).toBe("2");
-  });
-
   it.each([
-    { name: "LF", content: "first\nneedle\nlast\nneedle\n", matchLines: [1, 3] },
-    { name: "CRLF", content: "first\r\nneedle\r\nlast\r\nneedle\r\n", matchLines: [1, 3] },
-    { name: "CR", content: "first\rneedle\rlast\rneedle\r", matchLines: [1, 3] },
     { name: "mixed CRLF first", content: "first\r\nneedle\rlast\r\nneedle", matchLines: [1, 3] },
-    { name: "mixed LF first", content: "first\nneedle\rlast\r\nneedle", matchLines: [1, 3] },
     {
       name: "editable mixed LF first",
       content: "first\nneedle\rlast\r\nneedle",

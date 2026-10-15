@@ -7,12 +7,14 @@ import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import { i18n } from "../../i18n/index.ts";
 import { gatewayHelloForMethods } from "../../test-helpers/gateway-methods.ts";
+import { cleanupSolid } from "../../test-helpers/mount-solid.ts";
+import { flush } from "../../test-helpers/solid-settle.ts";
 import { waitForFast } from "../../test-helpers/wait-for.ts";
 import {
   createConnectedContext,
   modelAccountProfile,
   mountProfilePage,
-} from "./profile-page.test-support.ts";
+} from "./profile-page.test-support.tsx";
 
 const channelIdentityMethods = [
   "users.self",
@@ -41,6 +43,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  cleanupSolid();
   document.body.replaceChildren();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -300,7 +303,7 @@ it("retires an in-flight channel identity list when negotiated grants change", a
     ],
   });
   await oldList.promise;
-  await page.updateComplete;
+  flush();
 
   expect(listCalls).toBe(2);
   expect(page.querySelector("#settings-profile-channel-identities")?.textContent).toContain(
@@ -411,7 +414,7 @@ it("does not report a pending link as successful after the admin grant is revoke
   await pendingLink.promise;
   await Promise.resolve();
   await Promise.resolve();
-  await page.updateComplete;
+  flush();
 
   harness.emitHello(gatewayHelloForMethods(channelIdentityMethods, ["operator.admin"]));
   await waitForFast(() =>

@@ -7,6 +7,7 @@ import type { ConnectionBootstrapCoordinator } from "../../app/connection-bootst
 import { type SelectedAgentSource, watchSelectedAgent } from "../agents/watch-selected-agent.ts";
 import { formatUiError } from "../format-error.ts";
 import { createGatewayConnectionLifecycle } from "../gateway-connection-lifecycle.ts";
+import { SessionRunVisualActivity } from "../session-run-state.ts";
 import type { SessionCreateOutcome } from "./create.ts";
 import { captureBootRoster } from "./session-boot-roster.ts";
 import { createSessionBootSnapshot } from "./session-boot-snapshot.ts";
@@ -126,6 +127,7 @@ export function createSessionCapability(
     deletionState: (row) => deletions.deletionState(row.key, row.agentId, row.sessionId),
   });
   const swarmActivity = new SwarmActivityTracker();
+  const runVisualActivity = new SessionRunVisualActivity();
   const pullRequestSummaries = new Map<string, SessionCatalogPullRequestSummary>();
   const pullRequestEpochs = new Map<string, object>();
   const listeners = new Set<(next: SessionState) => void>();
@@ -253,27 +255,24 @@ export function createSessionCapability(
         revision,
         agentId,
       );
-      const sources = roster.observations.observeReadRows(
-        admitted?.sessions ?? [],
-        revision,
-        agentId,
-      );
+      roster.observations.observeReadRows(admitted?.sessions ?? [], revision, agentId);
+      for (const row of admitted?.sessions ?? []) {
+        mutations.observeArchiveRead(row);
+      }
       const projected = permissions.reconcileList(admitted, revision, agentId);
       roster.observations.inherit(projected, admitted);
       if (!projected) {
         return projected;
       }
-      const sessions = roster.observations.projectRows(projected.sessions);
-      sessions.forEach((row, index) => {
-        const source = sources[index];
-        if (source) {
-          mutations.observePendingFields(
-            source.row,
-            source.select(row, optimisticSessionRowFields),
-            agentId,
-          );
-        }
-      });
+      for (const row of admitted?.sessions ?? []) {
+        mutations.observePendingFields(
+          row,
+          row.rowMode
+            ? optimisticSessionRowFields.filter((field) => Object.hasOwn(row, field))
+            : optimisticSessionRowFields,
+          agentId,
+        );
+      }
       return projected;
     },
     onCanonicalList(result, requestRevision, agentId, observed) {
@@ -393,7 +392,6 @@ export function createSessionCapability(
     createSessionReconciliation({
       readState: () => state,
       publish,
-      canonicalListRevision: () => canonicalListRevision,
       connection,
       snapshot: () => gateway.snapshot,
       permissions,
@@ -471,6 +469,7 @@ export function createSessionCapability(
       retireOperationConnection(previousClient);
       groups.invalidate();
       swarmActivity.clear();
+      runVisualActivity.clear();
       mutations.retireConnection();
       pullRequestSummaries.clear();
       pullRequestEpochs.clear();
@@ -539,6 +538,12 @@ export function createSessionCapability(
   });
 
   const stopEvents = gateway.subscribeEvents((event) => {
+    if (event.event === "agent" || event.event === "chat") {
+      if (runVisualActivity.observe(event)) {
+        notifySubscribers();
+      }
+      return;
+    }
     if (event.event === CONTROL_UI_SESSION_PULL_REQUESTS_CHANGED_EVENT) {
       githubPublication.observePullRequests(event.payload);
       return;
@@ -581,8 +586,10 @@ export function createSessionCapability(
     const runEnded =
       hasActiveRun === false || (status !== null && status !== undefined && status !== "running");
     const isTerminalMessage = event.event === "session.message" && runEnded;
+    if (reconciled.applied && hasActiveRun === false && eventInfo) {
+      runVisualActivity.retire(eventInfo.key);
+    }
     const primarySnapshotApplied = reconciled.applied && canApplySnapshot;
-    let primaryPublished = false;
     if (
       claimChanged ||
       swarmChanged ||
@@ -595,10 +602,9 @@ export function createSessionCapability(
       const result = decorateRows(reconciled.result);
       if (claimChanged || result !== state.result) {
         publishReconciledState({ ...state, result });
-        primaryPublished = true;
       }
     }
-    notifyManaged?.(primaryPublished);
+    notifyManaged?.();
     if (eventObservation.scope && !connection.isCurrent(eventObservation.scope)) {
       return;
     }
@@ -620,6 +626,7 @@ export function createSessionCapability(
       primarySnapshotApplied,
       affectsPrimary: eventObservation.affectsPrimary,
       affectedLists: eventObservation.lists,
+      immediate: event.event === "sessions.changed" && eventReason === "create",
     });
     notifyEvent?.(event);
   });
@@ -671,6 +678,7 @@ export function createSessionCapability(
     observeRow,
     inheritRow: roster.observations.inheritRow,
     projectRows: roster.observations.projectRows,
+    isRunVisuallyActive: runVisualActivity.isActive,
     reconcileRunTerminal,
     refresh: roster.refresh,
     invalidate: roster.scheduleEvent,
@@ -698,7 +706,6 @@ export function createSessionCapability(
     deletionState: deletions.deletionState,
     reset: mutations.reset,
     groupsLoad: groups.load,
-    groupsGeneration: groups.generation,
     groupsStatus: groups.status,
     groupsInvalidate: groups.invalidate,
     groupsPut: groups.put,
@@ -721,6 +728,7 @@ export function createSessionCapability(
       permissions.clear();
       deletions.clear();
       swarmActivity.clear();
+      runVisualActivity.clear();
       pullRequestSummaries.clear();
       pullRequestEpochs.clear();
       sessionEventSubscription.dispose();

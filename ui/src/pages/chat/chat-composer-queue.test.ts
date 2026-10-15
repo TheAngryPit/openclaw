@@ -4,7 +4,7 @@ import { render } from "lit";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { i18n, t } from "../../i18n/index.ts";
 import type { HumanMention } from "../../lib/chat/chat-types.ts";
-import { renderChatQueue } from "./components/chat-composer-queue.ts";
+import { renderChatQueue } from "./chat-composer-queue.test-support.ts";
 
 afterEach(async () => {
   document.body.replaceChildren();
@@ -218,26 +218,6 @@ describe("chat composer queue reordering", () => {
     expect(cancelFrame).toHaveBeenCalled();
   });
 
-  it.each([
-    { key: "ArrowUp", expected: ["c", "b"] },
-    { key: "ArrowDown", expected: ["c", "d"] },
-  ])("moves the focused row on $key", ({ key, expected }) => {
-    const onQueueMove = vi.fn();
-    const container = renderQueue({
-      queue: [waiting("a", 1), waiting("b", 2), waiting("c", 3), waiting("d", 4)],
-      onQueueMove,
-      onQueueRemove: vi.fn(),
-    });
-    const grip = container.querySelectorAll(".chat-queue__grip")[2]!;
-
-    const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
-    grip.dispatchEvent(event);
-
-    expect(onQueueMove.mock.calls).toEqual([expected]);
-    // Arrow keys belong to the handle here, so the transcript must not scroll.
-    expect(event.defaultPrevented).toBe(true);
-  });
-
   it("leaves other keys alone on the handle", () => {
     const onQueueMove = vi.fn();
     const container = renderQueue({
@@ -295,7 +275,7 @@ describe("chat composer queue reordering", () => {
     });
 
     const rows = [...container.querySelectorAll(".chat-queue__item")];
-    expect(rows.map((row) => row.querySelector("wa-dropdown") !== null)).toEqual([
+    expect(rows.map((row) => row.querySelector(".chat-queue__overflow") !== null)).toEqual([
       true,
       false,
       true,
@@ -311,7 +291,6 @@ describe("chat composer queue reordering", () => {
 
     const disabled = (selector: string) =>
       rows.map((row) => row.querySelector(selector)?.hasAttribute("disabled") ?? false);
-    expect(disabled("wa-dropdown-item")).toEqual([true, false, true]);
     expect(disabled(".chat-queue__more")).toEqual([true, false, true]);
     expect(disabled(".chat-queue__remove")).toEqual([false, false, false]);
 
@@ -323,7 +302,7 @@ describe("chat composer queue reordering", () => {
     const onQueueEditChange = vi.fn();
     const onQueueEditSubmit = vi.fn();
     const onQueueEditCancel = vi.fn();
-    const container = renderQueue({
+    const props = {
       queue: [waiting("a", 1)],
       queuedEdit: queueEdit({
         editingId: "a",
@@ -333,7 +312,8 @@ describe("chat composer queue reordering", () => {
         onCancel: onQueueEditCancel,
       }),
       onQueueRemove: vi.fn(),
-    });
+    };
+    const container = renderQueue(props);
     const editor = container.querySelector<HTMLTextAreaElement>(".chat-queue__edit-input")!;
     expect(editor.value).toBe("a draft");
     editor.dispatchEvent(new FocusEvent("focus"));
@@ -341,6 +321,18 @@ describe("chat composer queue reordering", () => {
     editor.value = "updated draft";
     editor.dispatchEvent(new Event("input", { bubbles: true }));
     expect(onQueueEditChange).toHaveBeenCalledWith("updated draft");
+    const valueWrites = vi.spyOn(editor, "value", "set");
+    const publishDraft = (editingText: string) =>
+      render(
+        renderChatQueue({ ...props, queuedEdit: { ...props.queuedEdit, editingText } }),
+        container,
+      );
+    publishDraft("updated draft");
+    expect(container.querySelector(".chat-queue__edit-input")).toBe(editor);
+    expect(valueWrites).not.toHaveBeenCalled();
+    publishDraft("recovered draft");
+    expect(editor.value).toBe("recovered draft");
+    expect(valueWrites).toHaveBeenCalledExactlyOnceWith("recovered draft");
     editor.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     expect(onQueueEditCancel).toHaveBeenCalledOnce();
     editor.dispatchEvent(

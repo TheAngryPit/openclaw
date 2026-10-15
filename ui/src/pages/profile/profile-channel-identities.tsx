@@ -8,7 +8,6 @@ import {
 import { registerProfileEnglish } from "../../i18n/locales/en-profile.ts";
 import { useApplication } from "../../lib/reactive/context.ts";
 import { registerEnglishCatalog, t } from "../../lib/reactive/i18n.ts";
-import { defineSolidBridge } from "../../lit/solid-bridge.ts";
 import {
   ProfileChannelIdentitiesController,
   type ProfileChannelIdentityBusyState,
@@ -17,64 +16,57 @@ import {
 
 registerEnglishCatalog(registerProfileEnglish);
 
-const ChannelIdentities = defineSolidBridge<ProfileChannelIdentityInputs>(
-  "openclaw-profile-channel-identities",
-  (props, host) => {
-    const application = useApplication();
-    const [revision, setRevision] = createSignal(0);
-    const controller = new ProfileChannelIdentitiesController(() =>
-      setRevision((value) => value + 1),
-    );
-    const readInputs = (): ProfileChannelIdentityInputs => ({
-      profileId: props.profileId,
-      visible: props.visible,
-      profileReady: props.profileReady,
-      identityBusy: props.identityBusy,
-      identityGeneration: props.identityGeneration,
-      targetGeneration: props.targetGeneration,
-      generations: props.generations,
-    });
-    const unsubscribe = application.gateway.subscribe((snapshot) =>
-      controller.update(readInputs(), snapshot),
-    );
-    createEffect(readInputs, (inputs) => controller.update(inputs, application.gateway.snapshot));
-    onCleanup(() => {
-      unsubscribe();
-      controller.dispose();
-    });
-    host.style.display = "contents";
+export type ProfileChannelIdentitiesProps = ProfileChannelIdentityInputs & {
+  onBusyStateChange: (state: ProfileChannelIdentityBusyState) => void;
+};
 
-    let lastReportedBusy: string | null = null;
-    createEffect(
-      () => {
-        revision();
-        return controller.busyState;
-      },
-      (busyState) => {
-        const key = `${busyState.loading}:${busyState.mutation}`;
-        if (key === lastReportedBusy) {
-          return;
-        }
-        lastReportedBusy = key;
-        host.dispatchEvent(
-          new CustomEvent<ProfileChannelIdentityBusyState>(
-            "profile-channel-identities-busy-changed",
-            {
-              detail: busyState,
-              bubbles: true,
-              composed: true,
-            },
-          ),
-        );
-      },
-    );
+export function ProfileChannelIdentities(props: ProfileChannelIdentitiesProps) {
+  const application = useApplication();
+  const [revision, setRevision] = createSignal(0);
+  const controller = new ProfileChannelIdentitiesController(() =>
+    setRevision((value) => value + 1),
+  );
+  const readInputs = (): ProfileChannelIdentityInputs => ({
+    profileId: props.profileId,
+    visible: props.visible,
+    profileReady: props.profileReady,
+    identityBusy: props.identityBusy,
+    identityGeneration: props.identityGeneration,
+    targetGeneration: props.targetGeneration,
+    generations: props.generations,
+  });
+  const unsubscribe = application.gateway.subscribe((snapshot) =>
+    controller.update(readInputs(), snapshot),
+  );
+  createEffect(readInputs, (inputs) => controller.update(inputs, application.gateway.snapshot));
+  onCleanup(() => {
+    unsubscribe();
+    controller.dispose();
+  });
 
-    const state = () => {
+  let lastReportedBusy: string | null = null;
+  createEffect(
+    () => {
       revision();
-      return controller;
-    };
+      return controller.busyState;
+    },
+    (busyState) => {
+      const key = `${busyState.loading}:${busyState.mutation}`;
+      if (key === lastReportedBusy) {
+        return;
+      }
+      lastReportedBusy = key;
+      props.onBusyStateChange(busyState);
+    },
+  );
 
-    return (
+  const state = () => {
+    revision();
+    return controller;
+  };
+
+  return (
+    <openclaw-profile-channel-identities style={{ display: "contents" }}>
       <Show when={state().canManageChannelIdentities}>
         <form
           id="settings-profile-channel-identities"
@@ -197,19 +189,6 @@ const ChannelIdentities = defineSolidBridge<ProfileChannelIdentityInputs>(
           </SettingsSection>
         </form>
       </Show>
-    );
-  },
-  {
-    properties: {
-      profileId: { default: null, attribute: false },
-      visible: { default: false, attribute: false },
-      profileReady: { default: false, attribute: false },
-      identityBusy: { default: false, attribute: false },
-      identityGeneration: { default: 0, attribute: false },
-      targetGeneration: { default: 0, attribute: false },
-      generations: { default: null, attribute: false },
-    },
-  },
-);
-
-export default ChannelIdentities;
+    </openclaw-profile-channel-identities>
+  );
+}

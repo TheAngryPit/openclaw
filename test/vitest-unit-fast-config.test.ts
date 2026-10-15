@@ -89,7 +89,7 @@ describe("unit-fast vitest lane", () => {
       import path from "node:path";
       const selectedTests = [
         "src/agents/agent-tools.deferred-followup-guidance.test.ts",
-        "src/test-utils/openclaw-test-state.test.ts",
+        "src/test-utils/temp-home.test.ts",
         "src/utils.test.ts",
         "src/media-generation/runtime-shared.test.ts",
       ];
@@ -98,7 +98,7 @@ describe("unit-fast vitest lane", () => {
       childProcess.spawnSync = function patchedSpawnSync(...args) {
         const [command, commandArgs] = args;
         if (command === "git" && commandArgs?.[0] === "ls-files") {
-          gitLsFilesCalls += 1;
+          gitLsFilesCalls += Number(!commandArgs.includes("--"));
           const stdout = [
             "src/agents/agent-tools.deferred-followup-guidance.test.ts",
             "src/agents/session-maintenance/coordinator.test.ts",
@@ -146,7 +146,7 @@ describe("unit-fast vitest lane", () => {
         paths.isUnitFastIsolatedTestFile(file),
         paths.isUnitFastTimerTestFile(file),
       ]);
-      console.log("UNIT_FAST_MEMBERSHIP_PROBE", JSON.stringify({ membership, unselectedFileReads }));
+      console.log("UNIT_FAST_MEMBERSHIP_PROBE", JSON.stringify({ membership, unselectedFileReads, fullInventoryReads: gitLsFilesCalls }));
       const { resolveCiTestRuntimeSelections } = await import("./scripts/lib/ci-test-runtime.mts");
       const runtimeSelections = ["unit-fast", "unit-fast-isolated"].map((name, index) => ({
         target: resolveCiTestRuntimeSelections({ targets: [selectedTests[index]] }, "bun-compatible"),
@@ -200,7 +200,7 @@ describe("unit-fast vitest lane", () => {
           unselectedFileReads,
         );
         const fullUnitConfig = createUnitVitestConfigWithOptions({}, { argv: ["node", "vitest", "run"] });
-        console.log("UNIT_FULL_EXCLUSION_PROBE", fullUnitConfig.test.exclude.includes("src/hooks/frontmatter.test.ts"));
+        console.log("UNIT_FULL_EXCLUSION_PROBE", fullUnitConfig.test.exclude.includes("src/hooks/frontmatter.test.ts"), gitLsFilesCalls);
         delete process.env.OPENCLAW_VITEST_INCLUDE_FILE;
         process.argv = ["node", "vitest", "run"];
         const { createVitestRunSpecs } = await import("./scripts/test-projects.test-support.mts");
@@ -256,6 +256,7 @@ describe("unit-fast vitest lane", () => {
         [false, false, false],
       ],
       unselectedFileReads: 0,
+      fullInventoryReads: 0,
     });
     const runtime = configProbeResult.stdout.match(/UNIT_FAST_RUNTIME_PROBE (.+)/u);
     expect(runtime, configProbeResult.stdout).not.toBeNull();
@@ -290,7 +291,7 @@ describe("unit-fast vitest lane", () => {
     expect(selection, configProbeResult.stdout).not.toBeNull();
     const selectedFastIncludes = [
       ["src/agents/agent-tools.deferred-followup-guidance.test.ts"],
-      ["src/test-utils/openclaw-test-state.test.ts"],
+      ["src/test-utils/temp-home.test.ts"],
       ["src/utils.test.ts"],
     ];
     expect(JSON.parse(selection?.[1] ?? "null")).toEqual({
@@ -301,7 +302,7 @@ describe("unit-fast vitest lane", () => {
     expect(unitSelection, configProbeResult.stdout).not.toBeNull();
     const excluded = [
       "src/agents/agent-tools.deferred-followup-guidance.test.ts",
-      "src/test-utils/openclaw-test-state.test.ts",
+      "src/test-utils/temp-home.test.ts",
       "src/utils.test.ts",
     ];
     const include = [...excluded, "src/media-generation/runtime-shared.test.ts"];
@@ -309,7 +310,7 @@ describe("unit-fast vitest lane", () => {
       { include, excluded },
       { include, excluded },
     ]);
-    expect(configProbeResult.stdout).toContain("UNIT_FULL_EXCLUSION_PROBE true");
+    expect(configProbeResult.stdout).toContain("UNIT_FULL_EXCLUSION_PROBE true 1");
   });
 
   it("keeps lifecycle drains in their reset-capable owner without dropping test coverage", () => {
@@ -554,8 +555,10 @@ describe("unit-fast vitest lane", () => {
 
   it("keeps obvious stateful files out of the unit-fast lane", () => {
     for (const file of [
+      "src/acp/translator.error-kind.test.ts",
       "src/agents/agent-command.compaction-rotation.test.ts",
       "src/agents/agent-command.embedded-maintenance.test.ts",
+      "src/agents/auth-profiles/session-override.model-endpoint.test.ts",
       "src/agents/code-mode-quickjs.integration.test.ts",
       "src/agents/prepared-model-runtime.scoped-refresh.test.ts",
       "src/agents/provider-transport-fetch.test.ts",
@@ -566,6 +569,10 @@ describe("unit-fast vitest lane", () => {
       expect(resolveUnitFastTestIncludePattern(file), file).toBeNull();
       expect(resolveUnitFastIsolatedTestIncludePattern(file), file).toBeNull();
     }
+    expect(
+      unitFastAnalysis.find((entry) => entry.file === "src/acp/translator.error-kind.test.ts")
+        ?.reasons,
+    ).toEqual(["database-worker-owner"]);
     expect(isUnitFastTestFile("src/plugin-sdk/temp-path.test.ts")).toBe(false);
     expect(isUnitFastTestFile("src/agents/openai-transport-stream.base.test.ts")).toBe(false);
     expect(
@@ -638,7 +645,6 @@ describe("unit-fast vitest lane", () => {
     // Fixture files must genuinely import a stateful test helper; #121923
     // rewrote the outbound poll tests to be stateless, so they left this list.
     const files = [
-      "src/acp/translator.error-kind.test.ts",
       "src/agents/auth-profiles/oauth-refresh-error.test.ts",
       "src/agents/embedded-agent-runner/model.provider-hooks.timeout.test.ts",
       "src/agents/tools/computer-tool.schema.test.ts",
