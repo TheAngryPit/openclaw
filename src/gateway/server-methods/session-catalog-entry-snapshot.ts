@@ -13,7 +13,11 @@ import type {
   SessionCatalogEntrySnapshot,
   SessionCatalogProvider,
 } from "../../plugins/session-catalog.js";
-import { normalizeAgentId, resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
+import {
+  normalizeAgentId,
+  parseAgentSessionKey,
+  resolveAgentIdFromSessionKey,
+} from "../../routing/session-key.js";
 import { projectSessionActor } from "../session-identity-projection.js";
 import { tryResolveSessionCompatibilityOwnerAgentId } from "../session-request-agent.js";
 import type { SessionRowProjection } from "../session-row-projection.js";
@@ -80,11 +84,16 @@ export function createSessionCatalogRequestEntrySnapshot(params: {
   let catalogEntries:
     | ReturnType<NonNullable<SessionCatalogEntrySnapshot["entriesForCatalog"]>>
     | undefined = cachedPlanning?.catalogEntries;
-  const entryAgentId = (sessionKey: string) =>
-    resolveAgentIdFromSessionKey(
+  const entryAgentId = (sessionKey: string) => {
+    const parsed = parseAgentSessionKey(sessionKey);
+    if (parsed?.agentId) {
+      return normalizeAgentId(parsed.agentId);
+    }
+    return resolveAgentIdFromSessionKey(
       sessionKey,
       tryResolveSessionCompatibilityOwnerAgentId(params.cfg, sessionKey) ?? params.fallbackAgentId,
     );
+  };
   const selectedKeysByAgentId = params.sessionKeys ? new Map<string, Set<string>>() : undefined;
   if (selectedKeysByAgentId) {
     for (const sessionKey of new Set(params.sessionKeys)) {
