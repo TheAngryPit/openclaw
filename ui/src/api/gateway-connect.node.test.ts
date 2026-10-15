@@ -112,6 +112,42 @@ describe("GatewayBrowserClient handshake", () => {
     vi.unstubAllGlobals();
   });
 
+  it("publishes negotiated scopes without a device token and retires them on disconnect", async () => {
+    client = new GatewayBrowserClient({ url: "ws://scopes.example.test" });
+    const { ws, connectFrame } = await startConnect(client);
+    const auth = { role: "operator", scopes: ["operator.sessions.read"] };
+    ws.emitMessage({
+      type: "res",
+      id: connectFrame.id,
+      ok: true,
+      payload: {
+        type: "hello-ok",
+        protocol: PROTOCOL_VERSION,
+        auth,
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(client.auth).toEqual(auth);
+    ws.emitClose(1006, "disconnected");
+    expect(client.auth).toBeNull();
+    await vi.advanceTimersByTimeAsync(1_000);
+    const next = await startConnect(client);
+    next.ws.emitMessage({
+      type: "res",
+      id: next.connectFrame.id,
+      ok: true,
+      payload: {
+        type: "hello-ok",
+        protocol: PROTOCOL_VERSION,
+        auth: { role: "operator", scopes: ["operator.admin"] },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(client.auth?.scopes).toEqual(["operator.admin"]);
+    client.stop();
+    expect(client.auth).toBeNull();
+  });
+
   it.each(["rejected", "expired"])(
     "waits on the exact pairing request and stops reconnecting when %s",
     async (decision) => {
@@ -276,6 +312,7 @@ describe("GatewayBrowserClient handshake", () => {
         const { ws, connectFrame } = await startConnect(client);
         const removeListener = client.addEventListener(onListenerEvent);
         const earlyRequest = client.request("gateway.info").catch(() => undefined);
+        const earlyCatalog = client.request("talk.catalog", {}).catch(() => undefined);
         ws.emitMessage({ type: "event", event: "chat", payload: { state: "delta" }, seq: 1 });
         expect(ws.sent.map((frame) => JSON.parse(frame).method)).toEqual(["connect"]);
         expect(onEvent).not.toHaveBeenCalled();
@@ -294,7 +331,7 @@ describe("GatewayBrowserClient handshake", () => {
         expect(client.connected).toBe(false);
         expect(ws.lastClose).toEqual({ code: 4008, reason: "connect failed" });
         ws.emitClose(4008, "connect failed");
-        await earlyRequest;
+        await Promise.all([earlyRequest, earlyCatalog]);
         removeListener();
         expect(onClose).toHaveBeenCalledWith(expect.objectContaining({ willRetry: false }));
       },

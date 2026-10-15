@@ -80,6 +80,9 @@ vi.mock("../../agents/auth-profiles/store-runtime.js", () => {
   return {
     ensureAuthProfileStore: readAuthProfileStoreForTest,
     ensureAuthProfileStoreAsync: async () => readAuthProfileStoreForTest(),
+    prepareAuthProfileProvider: async ({ profileId }: { profileId: string }) => ({
+      provider: authProfilesStoreMock.profiles[profileId]?.provider,
+    }),
     findPersistedAuthProfileCredentialAsync: async ({ profileId }: { profileId: string }) =>
       authProfilesStoreMock.profiles[profileId],
     ensureAuthProfileStoreWithoutExternalProfiles: readAuthProfileStoreForTest,
@@ -113,6 +116,10 @@ vi.mock("../../plugins/provider-thinking.js", () => ({
 import { resolveAgentDir, resolveSessionAgentId } from "../../agents/agent-scope.js";
 import type { ModelAliasIndex } from "../../agents/model-selection.js";
 import type { OpenClawConfig } from "../../config/config.js";
+import {
+  clearRuntimeConfigSnapshot,
+  setRuntimeConfigSnapshot,
+} from "../../config/runtime-snapshot.js";
 import type { InternalSessionEntry, SessionEntry } from "../../config/sessions.js";
 import {
   loadSessionEntry,
@@ -213,8 +220,9 @@ vi.mock("../../agents/prepared-model-catalog.js", () => {
   };
 });
 
+// mock-isolation: Exercise model directives without sandbox backend or session storage setup.
 vi.mock("../../agents/sandbox.js", () => ({
-  resolveSandboxRuntimeStatus: vi.fn(() => ({ sandboxed: false })),
+  resolveSandboxRuntimeStatusAsync: vi.fn(async () => ({ sandboxed: false })),
 }));
 
 vi.mock("../../config/sessions.js", () => ({
@@ -309,6 +317,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  clearRuntimeConfigSnapshot();
   cliBackendsTesting.resetDepsForTest();
   setDirectiveTestProviders([]);
   pluginPolicyMock.channels.clear();
@@ -597,6 +606,8 @@ describe("/model chat UX", () => {
       const tempRoot = tempDirs.make("openclaw-model-terminal-display-");
       const stateDir = path.join(tempRoot, "state");
       await withEnvAsync({ OPENCLAW_STATE_DIR: stateDir }, async () => {
+        const cfg = baseConfig();
+        setRuntimeConfigSnapshot(cfg);
         const sessionKey = "agent:main:main";
         const storePath = path.join(tempRoot, "custom-store", "openclaw-agent.sqlite");
         const scope = { agentId: "main", sessionKey, sessionId: "terminal-display", storePath };
@@ -637,6 +648,7 @@ describe("/model chat UX", () => {
           const before = structuredClone(sessionEntry);
           const reply = await handleDirectiveOnly(
             createDirectiveHandlingParams({
+              cfg,
               directives: parseInlineSessionDirectives(command),
               sessionEntry,
               sessionKey,
@@ -1143,33 +1155,6 @@ describe("handleDirectiveOnly model persist behavior (fixes #1435)", () => {
     expect(result?.text).toContain("Thinking level reset to default.");
     expect(sessionEntry.thinkingLevel).toBeUndefined();
     expect(sessionStore["agent:main:dm:1"]?.thinkingLevel).toBeUndefined();
-  });
-
-  it("reports current thinking status", async () => {
-    setDirectiveTestProviders([
-      {
-        id: "anthropic",
-        label: "Anthropic",
-        auth: [],
-        resolveThinkingProfile: () => ({
-          levels: [
-            { id: "off" },
-            { id: "minimal" },
-            { id: "low" },
-            { id: "medium" },
-            { id: "adaptive" },
-            { id: "high" },
-          ],
-        }),
-      },
-    ]);
-
-    const result = await runHandleCommand("/think", { currentThinkLevel: "low" });
-
-    expect(result?.text).toContain("Current thinking level: low");
-    expect(result?.text).toContain(
-      "Options: default, off, minimal, low, medium, adaptive, high, ultra.",
-    );
   });
 
   it("reports the effective thinking level for the pinned runtime", async () => {

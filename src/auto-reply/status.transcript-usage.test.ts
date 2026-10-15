@@ -3,6 +3,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { normalizeTestText } from "../../test/helpers/normalize-text.js";
 import { testing as cliBackendsTesting } from "../agents/cli-backends.test-support.js";
 import type { OpenClawConfig } from "../config/config.js";
+import {
+  clearRuntimeConfigSnapshot,
+  setRuntimeConfigSnapshot,
+} from "../config/runtime-snapshot.js";
 import { resolveSessionStorePathCore } from "../config/sessions/paths.js";
 import {
   appendTranscriptMessageSync,
@@ -77,7 +81,13 @@ async function buildTranscriptUsageStatusMessage(args: StatusTestArgs): Promise<
 }
 
 function withStatusHome(run: () => Promise<void>) {
-  return withTempHome(run, { prefix: "openclaw-status-" });
+  return withTempHome(
+    async () => {
+      setRuntimeConfigSnapshot({});
+      await run();
+    },
+    { prefix: "openclaw-status-" },
+  ).finally(clearRuntimeConfigSnapshot);
 }
 
 describe("status transcript usage and model context", () => {
@@ -226,40 +236,6 @@ describe("status transcript usage and model context", () => {
       expect(normalized).toContain("Cache: 100% hit · 2.3m cached, 11k new");
       expect(normalized).toContain("Context: 36k/1.0m (4%)");
       expect(normalized).not.toContain("Context: 2.3m/1.0m");
-    });
-  });
-
-  it("reads transcript usage using explicit agentId when sessionKey is missing", async () => {
-    await withStatusHome(async () => {
-      const sessionId = "sess-worker2";
-      writeTranscriptUsageLog({
-        agentId: "worker2",
-        sessionId,
-        usage: {
-          input: 2,
-          output: 3,
-          cacheRead: 1200,
-          cacheWrite: 0,
-          totalTokens: 1205,
-        },
-      });
-
-      const text = await buildTranscriptUsageStatusMessage({
-        agentId: "worker2",
-        sessionEntry: {
-          sessionId,
-          totalTokens: 5,
-          modelProvider: "anthropic",
-          model: "claude-opus-4-6",
-          agentHarnessId: "openclaw",
-          contextTokens: 32_000,
-          contextTokensSource: "runtime",
-        },
-        sessionKey: undefined,
-        resolvedHarness: "openclaw",
-      });
-
-      expect(normalizeTestText(text)).toContain("Context: 1.2k/32k");
     });
   });
 

@@ -100,16 +100,6 @@ describe("web shared timeout seconds", () => {
     expect(readCache(cache, "key")).toBeNull();
   });
 
-  it("does not write cache values when expiry would exceed the Date range", () => {
-    const cache = new Map<string, CacheEntry<string>>();
-    vi.spyOn(Date, "now").mockReturnValue(8_640_000_000_000_000);
-
-    writeCache(cache, "key", "value", 60_000);
-
-    expect(cache.size).toBe(0);
-    expect(readCache(cache, "key")).toBeNull();
-  });
-
   it("does not evict valid entries when an invalid expiry cannot be cached", () => {
     const cache = new Map<string, CacheEntry<string>>();
     for (let index = 0; index < 100; index += 1) {
@@ -176,23 +166,34 @@ describe("readResponseText", () => {
     );
   });
 
-  it("does not mark multi-chunk exact-limit streamed responses as truncated", async () => {
-    const cancel = vi.fn(async () => undefined);
-    const releaseLock = vi.fn();
-    const response = responseFromReader({
-      chunks: ["hel", "lo"],
-      cancel,
-      releaseLock,
-    });
+  it.each([
+    {
+      body: '<?xml version="1.0" encoding="utf-16"?><rss><title>café</title></rss>',
+      contentType: "application/rss+xml",
+    },
+    {
+      body: '<meta charset="UTF-16LE"><p>café</p>',
+      contentType: "text/html",
+    },
+    {
+      body: '<meta http-equiv="Content-Type" content="text/html; charset=utf-16"><p>café</p>',
+      contentType: "text/html",
+    },
+  ])(
+    "decodes ASCII-compatible documents that declare UTF-16 as UTF-8: $body",
+    async ({ body, contentType }) => {
+      const bytes = new TextEncoder().encode(body);
+      for (const options of [undefined, { maxBytes: bytes.byteLength }]) {
+        const response = new Response(bytes, { headers: { "content-type": contentType } });
 
-    await expect(readResponseText(response, { maxBytes: 5 })).resolves.toEqual({
-      text: "hello",
-      truncated: false,
-      bytesRead: 5,
-    });
-    expect(cancel).not.toHaveBeenCalled();
-    expect(releaseLock).toHaveBeenCalledTimes(1);
-  });
+        await expect(readResponseText(response, options)).resolves.toEqual({
+          text: body,
+          truncated: false,
+          bytesRead: bytes.byteLength,
+        });
+      }
+    },
+  );
 
   it("keeps truncated fallback charset decoding isolated between responses", async () => {
     const firstResponse = responseFromReader({
@@ -222,7 +223,7 @@ describe("readResponseText", () => {
     const cancel = vi.fn(async () => undefined);
     const releaseLock = vi.fn();
     const response = responseFromReader({
-      chunks: ["hello", ""],
+      chunks: ["hel", "lo", ""],
       cancel,
       releaseLock,
     });

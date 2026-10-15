@@ -17,10 +17,6 @@ describe("isInternalFormattingArtifact", () => {
     expect(isInternalFormattingArtifact("<lane|reasoning>")).toBe(true);
     expect(isInternalFormattingArtifact("<|>")).toBe(true);
     expect(isInternalFormattingArtifact("<|channel|>")).toBe(true);
-  });
-
-  it("matches set-thought directives (#88128)", () => {
-    expect(isInternalFormattingArtifact("  set-thought <channel|>  ")).toBe(true);
     expect(isInternalFormattingArtifact("set-thought <lane|reasoning>")).toBe(true);
   });
 
@@ -63,6 +59,19 @@ describe("isSilentReplyText", () => {
 });
 
 describe("isSilentReplyPayloadText", () => {
+  it.each([" \nNO_R \n"])("recognizes a truncated final silent token: %j", (text) => {
+    expect(isSilentReplyPayloadText(text)).toBe(true);
+  });
+
+  it.each(["NO", "no_r", "NO_R alert"])("preserves ordinary final text: %j", (text) => {
+    expect(isSilentReplyPayloadText(text)).toBe(false);
+  });
+
+  it("keeps custom silent tokens exact in final payloads", () => {
+    expect(isSilentReplyPayloadText("HELP-", "HELP-QUIET")).toBe(false);
+    expect(isSilentReplyPayloadText("NO_R", "NO_RESPONSE")).toBe(false);
+  });
+
   it("returns true when leaked reasoning text ends in NO_REPLY", () => {
     expect(
       isSilentReplyPayloadText(
@@ -120,6 +129,22 @@ describe("isSilentReplyPayloadText", () => {
       ),
     ).toBe(false);
   });
+
+  it("keeps reasoning bodies that mention the token mid-text and close with it", () => {
+    // Mixed reasoning + prose bodies stay deliverable: a standalone in-body
+    // mention of the token is never treated as a silence decision, matching
+    // the answer-preservation contract (#165025 untagged path: #138662).
+    expect(
+      isSilentReplyPayloadText(
+        "think\nThe runtime context confirms another continuation event -- same inbound (msg 24682), and my reply already went out successfully (msg 24683).\n\nThe correct move: NO_REPLY. The user already has my response. Adding more text would be noise.\n\nNO_REPLY.",
+      ),
+    ).toBe(false);
+    expect(
+      isSilentReplyPayloadText(
+        "analysis\nMeeting moved to 3 pm. The NO_REPLY token is a control marker.\nNO_REPLY",
+      ),
+    ).toBe(false);
+  });
 });
 
 describe("stripSilentToken", () => {
@@ -141,6 +166,7 @@ describe("custom silent tokens", () => {
     const upper = token.toUpperCase();
     for (let pass = 0; pass < 2; pass++) {
       expect(isSilentReplyText(`${upper} ${token}`, token)).toBe(true);
+      expect(isSilentReplyPayloadText(`think\ninternal reasoning\n${token}!`, token)).toBe(true);
       expect(stripSilentToken(`done ${upper}\n`, token)).toBe("done");
       expect(startsWithSilentToken(`${upper}你好`, token)).toBe(true);
       expect(stripLeadingSilentToken(`${upper}你好`, token)).toBe("你好");

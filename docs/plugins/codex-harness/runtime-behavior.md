@@ -23,7 +23,7 @@ Codex's native `skills` namespace or install marketplace skills. See
 Codex dynamic tools default to `searchable` loading. OpenClaw normally does
 not expose dynamic tools that duplicate Codex-native workspace operations:
 `read`, `write`, `edit`, `apply_patch`, `exec`, `process`,
-`get_goal`, `create_goal`, `update_goal`, `tool_call`, `tool_describe`,
+`get_goal`, `create_goal`, `update_goal`, `dispatch_action`, `tool_describe`,
 and `tool_search`. Goal operations stay native to Codex,
 so OpenClaw does not project a second goal store into Codex turns. Most
 remaining OpenClaw integration tools, such as messaging, media, cron,
@@ -270,6 +270,13 @@ A closed, replaced, or retired client still cannot complete a stale handoff.
 When native interruption and subscription cleanup are confirmed, stopping one
 chat leaves other chats running on the shared client. A follow-up can resume the
 stopped thread without waiting for those chats to finish.
+
+If native children are still running when their parent stops or calls
+`sessions_yield`, OpenClaw keeps the parent's subscription to observe their
+results. The same conversation can accept another message after Codex confirms
+that exact parent turn has ended. Child results stay attached to the original
+session lifecycle; a reset, replaced binding, or revoked source cannot inherit
+its retained authority.
 
 Managed local connections share a bounded inference relay. Up to 16 request
 preparations and uploads run at once, with another 16 waiting in arrival order.

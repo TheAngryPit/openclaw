@@ -15,6 +15,8 @@ import {
   closeOpenClawStateDatabaseAsync,
   closeOpenClawStateDatabaseForTest,
 } from "../../state/openclaw-state-db.js";
+import { clearRuntimeConfigSnapshot, setRuntimeConfigSnapshot } from "../io.js";
+import { resolveSessionStorePathCore } from "./paths.js";
 import {
   appendTranscriptEvent,
   persistSessionTranscriptTurn,
@@ -92,6 +94,9 @@ describe("SQLite active transcript event projection", () => {
       sessionId: "active-transcript-test",
       sessionKey: "agent:main:active-transcript-test",
     };
+    setRuntimeConfigSnapshot({
+      session: { store: resolveSessionStorePathCore(undefined, scope) },
+    });
   });
 
   afterEach(async () => {
@@ -99,6 +104,7 @@ describe("SQLite active transcript event projection", () => {
     closeOpenClawAgentDatabasesForTest();
     await closeOpenClawStateDatabaseAsync();
     closeOpenClawStateDatabaseForTest();
+    clearRuntimeConfigSnapshot();
   });
 
   it("defers branch rewind rebuilds off history and writer stacks", async ({ signal }) => {
@@ -800,10 +806,15 @@ describe("SQLite active transcript event projection", () => {
   );
 
   it("skips the preparation worker when the projection is already current", async () => {
-    await persistSessionTranscriptTurn(scope, {
-      messages: [{ eventId: "seed", message: { role: "user", content: "seed" } }],
-      touchSessionEntry: false,
-    });
+    runOpenClawAgentWriteTransaction(
+      (database) =>
+        expect(
+          appendTranscriptEventsInTransaction(database, scope, [
+            transcriptMessage("seed", null, { role: "user", content: "seed" }),
+          ]),
+        ).toBe(1),
+      { agentId: scope.agentId, env: scope.env },
+    );
     await closeSessionTranscriptReconcileWorkerPool();
     const poolBefore = getSessionTranscriptReconcileWorkerPoolSnapshot();
     expect(poolBefore.workersCreated).toBe(0);

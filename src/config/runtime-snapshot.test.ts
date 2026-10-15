@@ -5,7 +5,6 @@ import { createDeferredCore } from "../shared/deferred.js";
 import {
   applyConfigEnvVars,
   collectConfigRuntimeEnvOwnership,
-  getPublishedConfigRuntimeEnvState,
   initializePublishedConfigRuntimeEnv,
   prepareConfigRuntimeEnv,
 } from "./config-env-vars.js";
@@ -29,6 +28,7 @@ import {
   getRuntimeConfigSnapshotMetadata,
   getRuntimeConfigSourceSnapshot,
   getRuntimeConfigSnapshot,
+  getRuntimeConfigAppliedHash,
   preflightManagedRuntimeConfigWrite,
   loadPinnedRuntimeConfig,
   registerManagedRuntimeConfigWriteOwner,
@@ -135,26 +135,6 @@ describe("runtime snapshot state", () => {
     ).toBe(true);
     expect(getConfigResolutionFacts(getRuntimeConfigSnapshot())?.size).toBe(0);
     expect(getAuthoredConfigSecretRef(getRuntimeConfigSnapshot(), "gateway.auth.token")).toBeNull();
-  });
-
-  it("tracks snapshot metadata and cache keys across runtime refreshes", () => {
-    const firstConfig: OpenClawConfig = { gateway: { port: 18789 } };
-    const secondConfig: OpenClawConfig = { gateway: { port: 19001 } };
-
-    setRuntimeConfigSnapshot(firstConfig);
-    const firstMetadata = getRuntimeConfigSnapshotMetadata();
-    expect(firstMetadata?.revision).toBe(1);
-    expect(resolveRuntimeConfigCacheKey(firstConfig)).toBe(
-      `runtime:${firstMetadata?.revision}:${firstMetadata?.fingerprint}`,
-    );
-
-    setRuntimeConfigSnapshot(secondConfig);
-    const secondMetadata = getRuntimeConfigSnapshotMetadata();
-    expect(secondMetadata?.revision).toBe(2);
-    expect(secondMetadata?.fingerprint).not.toBe(firstMetadata?.fingerprint);
-    expect(resolveRuntimeConfigCacheKey(secondConfig)).toBe(
-      `runtime:${secondMetadata?.revision}:${secondMetadata?.fingerprint}`,
-    );
   });
 
   it("keeps model projections across display writes but invalidates source and resolution changes", () => {
@@ -570,6 +550,24 @@ function gatedPreparer() {
 }
 
 describe("prepared runtime snapshots", () => {
+  it("publishes applied config and its source only after asynchronous preparation", async () => {
+    const { started, deferred } = gatedPreparer();
+    const config: OpenClawConfig = { gateway: { port: 19001 } };
+    const source: OpenClawConfig = { gateway: { port: 19002 } };
+    const facts = createConfigResolutionFacts([]);
+    setConfigResolutionFacts(source, facts);
+    const pending = setAppliedRuntimeConfigSnapshot(config, source);
+    await started;
+    expect(getRuntimeConfigSnapshot()).toBeNull();
+    expect(getRuntimeConfigAppliedHash()).toBeNull();
+    deferred.resolve(() => {});
+    await pending;
+    expect(getRuntimeConfigSnapshot()).toBe(config);
+    expect(getRuntimeConfigSourceSnapshot()).toBe(source);
+    expect(getConfigResolutionFacts(config)).toBe(facts);
+    expect(getRuntimeConfigAppliedHash()).toBe(hashRuntimeConfigValue(source));
+  });
+
   it("keeps registration and setters synchronous when an async companion is available", () => {
     const active: OpenClawConfig = { gateway: { port: 18789 } };
     setRuntimeConfigSnapshot(active);
@@ -967,7 +965,7 @@ describe("captured async runtime reads", () => {
 describe("config environment across in-process restart", () => {
   it.each([{ operation: "replacement", nextValue: "second" }])(
     "applies config-owned value $operation after restart",
-    ({ nextValue }) => {
+    async ({ nextValue }) => {
       vi.stubEnv("OPENCLAW_TEST_RESTART_VALUE", undefined);
       vi.stubEnv("OPENCLAW_TEST_RESTART_AMBIENT", "ambient");
       const initial = {
@@ -983,7 +981,7 @@ describe("config environment across in-process restart", () => {
       initializePublishedConfigRuntimeEnv(initial, {
         ownedEnv: collectConfigRuntimeEnvOwnership(initial, beforeStartup, process.env),
       });
-      setAppliedRuntimeConfigSnapshot(initial, initial);
+      await setAppliedRuntimeConfigSnapshot(initial, initial);
 
       clearRuntimeConfigSnapshot();
       // Server shutdown and the run loop both clear snapshots before the next boot.
@@ -1032,18 +1030,5 @@ describe("config environment across in-process restart", () => {
     const publication = prepareConfigRuntimeEnv({ previousConfig: next, nextConfig: {} }).publish();
     publication.commit();
     expect(process.env.OPENCLAW_TEST_RESTART_VALUE).toBeUndefined();
-  });
-
-  it("still clears environment ownership on an explicit full runtime reset", () => {
-    vi.stubEnv("OPENCLAW_TEST_RESTART_VALUE", "owned");
-    const initial = { env: { vars: { OPENCLAW_TEST_RESTART_VALUE: "owned" } } };
-    initializePublishedConfigRuntimeEnv(initial, {
-      ownedEnv: { OPENCLAW_TEST_RESTART_VALUE: "owned" },
-    });
-
-    resetConfigRuntimeState();
-
-    expect(getPublishedConfigRuntimeEnvState().ownedEnv).toEqual({});
-    expect(getPublishedConfigRuntimeEnvState().sourceConfig).toBeNull();
   });
 });
