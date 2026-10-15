@@ -32,7 +32,11 @@ import { shouldHandleNavigationClick } from "../../../lib/navigation-click.ts";
 import { registerEnglishCatalog, t } from "../../../lib/reactive/i18n.ts";
 import { detectTextDirection } from "../../../lib/text-direction.ts";
 import { emptyLegacyContent } from "../../../lit/solid-content.tsx";
-import { AttachmentCardHeader, CompactAttachmentCard } from "./chat-attachment-card-solid.tsx";
+import {
+  AttachmentCardHeader,
+  AttachmentPreviewSkeleton,
+  CompactAttachmentCard,
+} from "./chat-attachment-card-solid.tsx";
 import {
   isCrossOriginHttpSource,
   safeAttachmentHref,
@@ -43,7 +47,7 @@ import "./chat-audio-player.tsx";
 import { openInlineChatImage } from "./chat-image-lightbox.ts";
 import "./chat-video-player.tsx";
 import { openResolvedImage } from "./chat-message-image-open.ts";
-import { isPdfAttachment } from "./chat-pdf-preview.ts";
+import { ChatPdfPreview, isPdfAttachment } from "./chat-pdf-preview.tsx";
 import type {
   AttachmentSidebarRuntime,
   SidebarContent,
@@ -164,12 +168,12 @@ function AttachmentPreview(props: SidebarAttachmentProps) {
           !isCrossOriginHttpSource(model().src ?? "")
         }
       >
-        <openclaw-chat-pdf-preview
-          prop:src={model().src ?? ""}
-          prop:sourceIdentity={model().sourceIdentity}
-          prop:label={props.content.title}
-          prop:mimeType={props.content.mimeType ?? ""}
-          prop:sizeBytes={model().source?.sizeBytes ?? props.content.sizeBytes}
+        <ChatPdfPreview
+          src={model().src ?? ""}
+          sourceIdentity={model().sourceIdentity}
+          label={props.content.title}
+          mimeType={props.content.mimeType ?? ""}
+          sizeBytes={model().source?.sizeBytes ?? props.content.sizeBytes}
         />
       </Match>
       <Match
@@ -225,15 +229,7 @@ function AttachmentPreview(props: SidebarAttachmentProps) {
             style={{ "--preview-ratio": model().ratio }}
           >
             <Show when={model().pending || model().imagePreview}>
-              <div
-                class="sidebar-attachment-preview__loading"
-                role="status"
-                aria-label={t("common.loading")}
-              >
-                <div class="skeleton skeleton-line" aria-hidden="true" />
-                <div class="skeleton skeleton-line skeleton-line--long" aria-hidden="true" />
-                <div class="skeleton skeleton-line skeleton-line--medium" aria-hidden="true" />
-              </div>
+              <AttachmentPreviewSkeleton />
             </Show>
             <Show when={model().imagePreview && model().src} keyed>
               {(src) => (

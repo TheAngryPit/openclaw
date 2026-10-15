@@ -47,6 +47,7 @@ import {
   resolveCodexAppServerLocalHomeDir,
   withClearedEnvironmentVariables,
   withEphemeralCodexAuthStore,
+  withManagedCodexThreadUnloading,
 } from "./auth-start-options.js";
 import type {
   CodexAppServerAuthRequirement,
@@ -118,7 +119,10 @@ export async function bridgeCodexAppServerStartOptions(
     return params.startOptions;
   }
   const scopeStartOptions = () =>
-    withCodexHomeEnvironment(withEphemeralCodexAuthStore(params), params.agentDir);
+    withCodexHomeEnvironment(
+      withManagedCodexThreadUnloading(withEphemeralCodexAuthStore(params)),
+      params.agentDir,
+    );
 
   if (params.preparedAuth) {
     const scopedStartOptions = await scopeStartOptions();
@@ -820,7 +824,7 @@ async function resolveCodexAppServerAuthProfileLoginParamsInternal(
   }
   if (!isCodexAppServerAuthProvider(credential.provider)) {
     throw new CodexAppServerAuthProfileUnavailableError(
-      `Codex app-server auth profile "${profileId}" must use the canonical OpenAI auth provider; run "openclaw doctor --fix" to migrate legacy provider IDs.`,
+      `Codex app-server auth profile "${profileId}" must use the OpenAI auth provider; run "openclaw doctor --fix" to migrate legacy provider IDs.`,
     );
   }
   const preferStoreCredential = Boolean(params.authProfileStore?.profiles[profileId]);

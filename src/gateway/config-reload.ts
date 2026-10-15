@@ -51,7 +51,6 @@ import {
   runOutsideGatewayRootWorkAdmission,
   runWithGatewayReloadWaitingRoot,
 } from "../process/gateway-work-admission.js";
-import { bumpSkillsSnapshotVersion } from "../skills/runtime/refresh-state.js";
 import { OpenClawStateLeaseAcquisitionError } from "../state/openclaw-state-lease-error.js";
 import { createConfigAppliedRevisionTracker } from "./config-applied-revision.js";
 import { diffConfigPaths, diffGatewayReloadPaths } from "./config-diff.js";
@@ -101,7 +100,14 @@ function settleCandidateApplications(
   status: RuntimeConfigWriteApplicationStatus,
 ) {
   for (const application of candidateApplications(candidate)) {
-    application.settle(status);
+    // A canonical reread may already contain an external writer's replacement.
+    application.settle(
+      status === "applied" &&
+        candidate &&
+        application.isCarriedBy?.(candidate.compareConfig) === false
+        ? "superseded"
+        : status,
+    );
   }
 }
 
@@ -563,7 +569,7 @@ export function startGatewayConfigReloader(
       await checkpoint();
       // Persisted content changed even when the runtime skipped applying it
       // (writer intent, reload mode off): change listeners still refresh.
-      const notifyCommitted = () => {
+      const notifyCommitted = async () => {
         opts.log.info(
           `config source revision ${initialEpoch} accepted (${candidate?.origin ?? "file"})`,
         );
@@ -574,6 +580,14 @@ export function startGatewayConfigReloader(
             persistedHash: persistedHash ?? null,
             changedPaths,
           });
+        }
+        if (options.runtimeApplied !== false && (changedPaths.length > 0 || pluginLifecycle)) {
+          try {
+            const { refreshSkillsDiscovery } = await import("../skills/runtime/refresh.js");
+            await refreshSkillsDiscovery({ config: currentConfig, reason: "config-change" });
+          } catch (error) {
+            opts.log.warn(`config applied, but skills discovery refresh failed: ${String(error)}`);
+          }
         }
       };
       const acceptConfig = async () => {
@@ -608,7 +622,7 @@ export function startGatewayConfigReloader(
             reapplyRuntimeOverlays: ownership.reapplyRuntimeOverlays,
             runtimeRefresh: ownership.runtimeRefresh,
           };
-          notifyCommitted();
+          await notifyCommitted();
           return;
         }
         // Runtime owners publish env at their commit edge. Keep this idempotent
@@ -631,24 +645,39 @@ export function startGatewayConfigReloader(
         await publishedSource?.rollback();
         throw error;
       }
-      notifyCommitted();
+      await notifyCommitted();
     };
     if (changedPaths.length === 0 && !pluginLifecycle) {
+      if (
+        candidate &&
+        acceptedSourceSnapshot &&
+        persistedHash !== lastSourceOnly?.hash &&
+        configSourceSnapshotsMatch(sourceSnapshot, acceptedSourceSnapshot) &&
+        resolveConfigWriteFollowUp(afterWrite).mode === "auto" &&
+        !runtimeRefresh?.includeAuthStoreRefs &&
+        !runtimeRefresh?.requireImmediateApplication &&
+        !candidateApplications(candidate).some(
+          (claim) => claim.prepare || claim.requireImmediateApplication,
+        )
+      ) {
+        // The watcher can publish before the writer's notification arrives. Consume
+        // that accepted runtime, not the notification's unresolved SecretRefs.
+        await acceptCurrentRuntimeEcho(
+          initialEpoch,
+          sourceSnapshot,
+          true,
+          assertInvokerOwned,
+          candidate,
+        );
+        settleRuntimeApplication();
+        return completeApplication();
+      }
       await commitReloadBaseline();
       pluginDrain.applied();
       publishedSource?.commit?.();
       opts.onConfigRevisionApplied?.(nextConfigRevisionHash);
       settleRuntimeApplication();
       return completeApplication();
-    }
-
-    // Rebuild skills on the next turn so sessions do not advertise removed tools.
-    const skillsChangedPath = changedPaths.find(
-      (path) => path === "skills" || path.startsWith("skills."),
-    );
-    if (skillsChangedPath !== undefined) {
-      bumpSkillsSnapshotVersion({ reason: "config-change", changedPath: skillsChangedPath });
-      opts.log.info(`skills snapshot invalidated by config change (${skillsChangedPath})`);
     }
 
     const followUp = resolveConfigWriteFollowUp(pluginLifecycle ? undefined : afterWrite);
@@ -774,6 +803,7 @@ export function startGatewayConfigReloader(
     snapshot: ConfigFileSnapshot,
     runtimeApplied: boolean,
     assertLeaseOwned: () => void,
+    candidate?: GatewayConfigReloadCandidate,
   ) => {
     const sourceOnly = runtimeApplied ? undefined : lastSourceOnly;
     const runtimeRefresh = runtimeApplied ? currentRuntimeRefresh : sourceOnly?.runtimeRefresh;
@@ -813,7 +843,7 @@ export function startGatewayConfigReloader(
       if (snapshot.valid && typeof snapshot.hash === "string") {
         await updateAcceptedSnapshot(hashConfigRaw(snapshot.raw), snapshot.parsed);
       }
-    });
+    }, candidate);
     source.accept(transactionEpoch);
     if (snapshot.valid) {
       await source.acceptPaths(snapshot.includedPaths ?? []);

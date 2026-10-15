@@ -3,8 +3,7 @@ import { For, Show } from "solid-js";
 import { Icon } from "../../../components/solid/icon.tsx";
 import type { MessageContentItem } from "../../../lib/chat/chat-types.ts";
 import { t } from "../../../lib/reactive/i18n.ts";
-import { LitContent } from "../../../lit/solid-content.tsx";
-import { renderAttachmentFileIcon } from "./chat-attachment-file-icon.ts";
+import { AttachmentFileIcon } from "./chat-attachment-file-icon-solid.tsx";
 import { omittedMediaReason } from "./chat-message-media.ts";
 
 type OmittedMediaItem = Extract<MessageContentItem, { type: "omitted_media" }>;
@@ -37,6 +36,7 @@ export function AssistantAttachmentStatusCard(
   props: AssistantAttachmentStatusCardProps,
 ): JSX.Element {
   const unavailable = () => props.reason !== undefined;
+  const action = () => props.onAllow ?? props.onRetry;
   const statusClass = () =>
     !unavailable()
       ? "chat-assistant-attachment-card--checking"
@@ -54,13 +54,11 @@ export function AssistantAttachmentStatusCard(
     >
       <div class="chat-assistant-attachment-card__header">
         <div class="chat-assistant-attachment-card__identity">
-          <LitContent
-            value={renderAttachmentFileIcon({
-              filename: props.label,
-              mimeType: props.mimeType,
-              mode: "large-placeholder",
-              unavailable: unavailable(),
-            })}
+          <AttachmentFileIcon
+            filename={props.label}
+            mimeType={props.mimeType}
+            mode="large-placeholder"
+            unavailable={unavailable()}
           />
           <span class="chat-assistant-attachment-card__details">
             <span
@@ -93,42 +91,34 @@ export function AssistantAttachmentStatusCard(
           </span>
         </div>
         <Show
-          when={props.onAllow}
+          when={action()}
           fallback={
-            <Show
-              when={props.onRetry}
-              fallback={
-                <Show when={!unavailable()}>
-                  <span
-                    class="chat-assistant-attachment-card__actions chat-assistant-attachment-card__actions--loading"
-                    aria-hidden="true"
-                    data-label={t("chat.attachments.open")}
-                  >
-                    <span
-                      class="chat-assistant-attachment-card__action-skeleton skeleton"
-                      aria-hidden="true"
-                    />
-                  </span>
-                </Show>
-              }
-            >
-              <button
-                class="chat-assistant-attachment-card__action chat-assistant-attachment-card__action--labeled chat-assistant-attachment-card__retry"
-                type="button"
-                onClick={() => props.onRetry?.()}
+            <Show when={!unavailable()}>
+              <span
+                class="chat-assistant-attachment-card__actions chat-assistant-attachment-card__actions--loading"
+                aria-hidden="true"
+                data-label={t("chat.attachments.open")}
               >
-                <Icon name="refresh" />
-                {t("common.retry")}
-              </button>
+                <span
+                  class="chat-assistant-attachment-card__action-skeleton skeleton"
+                  aria-hidden="true"
+                />
+              </span>
             </Show>
           }
         >
           <button
-            class="chat-assistant-attachment-card__action chat-assistant-attachment-card__action--labeled"
+            class={[
+              "chat-assistant-attachment-card__action chat-assistant-attachment-card__action--labeled",
+              { "chat-assistant-attachment-card__retry": !props.onAllow },
+            ]}
             type="button"
-            onClick={() => props.onAllow?.()}
+            onClick={() => action()?.()}
           >
-            {t("chat.attachments.allowImage")}
+            <Show when={!props.onAllow}>
+              <Icon name="refresh" />
+            </Show>
+            {props.onAllow ? t("chat.attachments.allowImage") : t("common.retry")}
           </button>
         </Show>
       </div>

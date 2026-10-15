@@ -2,6 +2,7 @@
 import "openclaw/plugin-sdk/compiled-subprocess-testing";
 import { createServer } from "node:http";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { fetchWithSsrFGuard } from "../../../../src/infra/net/fetch-guard.js";
 import { reserveTestPortListener } from "../../../../src/test-utils/port-claims.js";
 import { resolveRemoteEmbeddingBearerClient } from "./embeddings-remote-client.js";
 import { createRemoteEmbeddingProvider } from "./embeddings-remote-provider.js";
@@ -79,7 +80,6 @@ describe("remote embedding private-network policy", () => {
     remoteOverride?: boolean;
   }>([
     { allow: undefined, path: "/v1", permitted: true, hits: ["/v1/embeddings"] },
-    { allow: true, path: "/v1", permitted: true, hits: ["/v1/embeddings"] },
     { allow: false, path: "/v1", permitted: false, hits: [] },
     { allow: undefined, path: "/redirect", permitted: false, hits: ["/redirect/embeddings"] },
     {
@@ -139,19 +139,58 @@ describe("remote embedding private-network policy", () => {
   );
 });
 
+it.each([
+  { hostname: "probe.openai.azure.com", allow: undefined, permitted: false },
+  { hostname: "probe.openai.azure.com", allow: true, permitted: true },
+  { hostname: "llm.corp.example", allow: undefined, permitted: true },
+])(
+  "uses inference private-DNS policy for $hostname, allow=$allow",
+  async ({ hostname, allow, permitted }) => {
+    const baseUrl = `https://${hostname}/v1`;
+    const client = await resolveRemoteEmbeddingBearerClient({
+      provider: "openai",
+      defaultBaseUrl: "https://api.openai.com/v1",
+      options: {
+        config: {
+          models: {
+            providers: {
+              openai: {
+                baseUrl,
+                request: { allowPrivateNetwork: allow },
+                models: [],
+              },
+            },
+          },
+        },
+        model: "fixture-model",
+        remote: { apiKey: "fixture-key" },
+      },
+    });
+    const fetchImpl = vi.fn(async () => new Response("fixture"));
+    const result = fetchWithSsrFGuard({
+      url: `${baseUrl}/embeddings`,
+      policy: client.ssrfPolicy,
+      fetchImpl,
+      lookupFn: async () => [{ address: "10.0.0.5", family: 4 }],
+    });
+    if (permitted) {
+      const response = await result;
+      await response.release();
+      expect(fetchImpl).toHaveBeenCalledOnce();
+    } else {
+      await expect(result).rejects.toThrow(/private\/internal\/special-use/);
+      expect(fetchImpl).not.toHaveBeenCalled();
+    }
+  },
+);
+
 describe("resolveRemoteEmbeddingBearerClient", () => {
   it.each<{
     name: string;
-    remote?: EmbeddingProviderOptions["remote"];
+    remote: NonNullable<EmbeddingProviderOptions["remote"]>;
     authorization: string;
     tenant: string;
   }>([
-    {
-      name: "keeps provider credentials on the configured provider destination",
-      remote: undefined,
-      authorization: "Bearer provider-key",
-      tenant: "provider-a",
-    },
     {
       name: "uses only destination-owned remote credentials",
       remote: {
@@ -183,12 +222,10 @@ describe("resolveRemoteEmbeddingBearerClient", () => {
       },
     });
 
-    expect(client.baseUrl).toBe(remote?.baseUrl ?? configuredProvider.baseUrl);
+    expect(client.baseUrl).toBe(remote.baseUrl);
     expect(client.headers.Authorization).toBe(authorization);
-    expect(client.headers[remote ? "X-Remote-Tenant" : "X-Provider-Tenant"]).toBe(tenant);
-    if (remote) {
-      expect(client.headers).not.toHaveProperty("X-Provider-Tenant");
-    }
+    expect(client.headers["X-Remote-Tenant"]).toBe(tenant);
+    expect(client.headers).not.toHaveProperty("X-Provider-Tenant");
   });
 
   it("fails before egress when a remote destination has no destination-owned auth", async () => {
@@ -288,35 +325,9 @@ describe("resolveRemoteEmbeddingBearerClient", () => {
     ).rejects.toThrow(/memory\.search\.remote\.apiKey|Authorization header/);
   });
 
-  it("adds OpenClaw attribution to native OpenAI embedding requests", async () => {
-    vi.stubEnv("OPENCLAW_VERSION", "2026.3.22");
-    const client = await resolveRemoteEmbeddingBearerClient({
-      provider: "openai",
-      defaultBaseUrl: "https://api.openai.com/v1",
-      options: {
-        config: { models: {} } as never,
-        model: "text-embedding-3-large",
-        remote: {
-          apiKey: "sk-test",
-          headers: {
-            Originator: "caller",
-            "user-agent": "caller",
-          },
-        },
-      },
-    });
-
-    expect(client.headers).toEqual({
-      Authorization: "Bearer sk-test",
-      "Content-Type": "application/json",
-      originator: "openclaw",
-      version: "2026.3.22",
-      "User-Agent": "openclaw/2026.3.22",
-    });
-  });
-
   it("does not inherit a chat-only subscription base URL for embeddings", async () => {
     vi.stubEnv("OPENAI_API_KEY", "");
+    vi.stubEnv("OPENCLAW_VERSION", "2026.3.22");
     const client = await resolveRemoteEmbeddingBearerClient({
       provider: "openai",
       defaultBaseUrl: "https://api.openai.com/v1",
@@ -333,6 +344,7 @@ describe("resolveRemoteEmbeddingBearerClient", () => {
           },
         } as never,
         model: "text-embedding-3-small",
+        remote: { headers: { Originator: "caller", "user-agent": "caller" } },
       },
     });
 
@@ -340,9 +352,14 @@ describe("resolveRemoteEmbeddingBearerClient", () => {
     expect(client.baseUrl).toBe("https://api.openai.com/v1");
     // Destination now matches the provider's effective destination, so the
     // provider's own credentials still resolve — just at the embedding route.
-    expect(client.headers.Authorization).toBe("Bearer provider-key");
-    expect(client.headers["X-Provider-Tenant"]).toBe("provider-a");
-    expect(client.headers.originator).toBe("openclaw");
+    expect(client.headers).toEqual({
+      Authorization: "Bearer provider-key",
+      "Content-Type": "application/json",
+      "X-Provider-Tenant": "provider-a",
+      originator: "openclaw",
+      version: "2026.3.22",
+      "User-Agent": "openclaw/2026.3.22",
+    });
   });
 
   it("does not redirect a custom provider URL for a chat-only subscription api mode", async () => {

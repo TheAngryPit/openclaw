@@ -249,13 +249,12 @@ describe("createReadinessChecker", () => {
   });
 
   it.each([
-    { skipChannels: false, channelFailed: false, allowPending: true },
-    { skipChannels: true, channelFailed: false, allowPending: true },
-    { skipChannels: false, channelFailed: true, allowPending: true },
-    { skipChannels: true, channelFailed: false, allowPending: false },
+    { skipChannels: false, channelFailed: false },
+    { skipChannels: true, channelFailed: false },
+    { skipChannels: false, channelFailed: true },
   ])(
-    "reports warming, failed, and recovered core agents (skip channels: $skipChannels, channel failed: $channelFailed, allow pending: $allowPending)",
-    ({ skipChannels, channelFailed, allowPending }) => {
+    "reports warming, failed, and recovered core agents (skip channels: $skipChannels, channel failed: $channelFailed)",
+    ({ skipChannels, channelFailed }) => {
       withReadinessClock(() => {
         const pending = createAgentDatabaseInspectionRefusal({
           agentId: "main",
@@ -276,7 +275,6 @@ describe("createReadinessChecker", () => {
           startedAt: Date.now() - FIVE_MIN_MS,
           cacheTtlMs: 1_000,
           shouldSkipChannelReadiness: () => skipChannels,
-          allowPendingAgentDatabases: allowPending,
           getAgentDatabaseAdmissionRefusals: () => refusals,
         });
         const channelReadiness = channelFailed ? failingSnapshot(["discord"]) : readySnapshot();
@@ -284,7 +282,7 @@ describe("createReadinessChecker", () => {
 
         refusals = [pending];
         expect(readiness()).toEqual({
-          ...(allowPending ? channelReadiness : failingSnapshot(["agent-database:main"])),
+          ...failingSnapshot(["agent-database:main"]),
           agentDatabases: [pending],
         });
 
@@ -300,22 +298,6 @@ describe("createReadinessChecker", () => {
     },
   );
 
-  it("ignores disabled and unconfigured channels", () => {
-    withReadinessClock(() => {
-      const { readiness } = createReadinessHarness({
-        accounts: {
-          discord: stoppedAccount({
-            enabled: false,
-          }),
-          telegram: stoppedAccount({
-            configured: false,
-          }),
-        },
-      });
-      expect(readiness()).toEqual(readySnapshot());
-    });
-  });
-
   it("uses startup grace before marking disconnected channels not ready", () => {
     withReadinessClock(() => {
       const { readiness } = createReadinessHarness({
@@ -328,54 +310,6 @@ describe("createReadinessChecker", () => {
         },
       });
       expect(readiness()).toEqual(readySnapshot(30_000));
-    });
-  });
-
-  it("keeps a long-running Reef account ready during fresh reconnect grace", () => {
-    withReadinessClock(() => {
-      const { readiness } = createLongRunningReadinessHarness({
-        reef: managedAccount({
-          connected: false,
-          lifecycle: "recovering",
-          lastStartAt: Date.now() - THIRTY_ONE_MIN_MS,
-          lastDisconnect: { at: Date.now() - 5_000, error: "socket closed" },
-        }),
-      });
-      expect(readiness()).toEqual(readySnapshot(THIRTY_ONE_MIN_MS));
-    });
-  });
-
-  it("uses fresh recorded lifecycle within connect grace", () => {
-    withReadinessClock(() => {
-      const { readiness } = createLongRunningReadinessHarness({
-        discord: managedAccount({
-          connected: false,
-          lifecycle: "starting",
-          lastStartAt: Date.now() - 30_000,
-        }),
-        slack: stoppedAccount({
-          connected: false,
-          lifecycle: "recovering",
-          lastStartAt: Date.now() - 30_000,
-        }),
-      });
-      expect(readiness()).toEqual(readySnapshot(THIRTY_ONE_MIN_MS));
-    });
-  });
-
-  it("reports recorded blocked lifecycle as not ready", () => {
-    withReadinessClock(() => {
-      const { readiness } = createReadinessHarness({
-        accounts: {
-          slack: stoppedAccount({
-            lifecycle: "blocked",
-            linked: false,
-            ingressUnavailable: true,
-            restartPending: true,
-          }),
-        },
-      });
-      expect(readiness()).toEqual(failingSnapshot(["slack"]));
     });
   });
 

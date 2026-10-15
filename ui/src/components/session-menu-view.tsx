@@ -2,12 +2,7 @@ import type { JSX } from "@solidjs/web";
 import { createMemo, For, Match, Show, Switch } from "solid-js";
 import { t } from "../i18n/index.ts";
 import { EDITOR_IDS, EDITOR_LABELS } from "../lib/editor-links.ts";
-import { formatTimeMs } from "../lib/format.ts";
-import {
-  formatSessionSnoozeWakeTime,
-  isSessionSnoozed,
-  resolveSessionSnoozePresets,
-} from "../lib/sessions/session-snooze.ts";
+import { formatSessionSnoozeWakeTime, isSessionSnoozed } from "../lib/sessions/session-snooze.ts";
 import { useSessionMenuAppearance } from "./session-icon-picker-solid.tsx";
 import type {
   SessionMenuActions,
@@ -18,6 +13,7 @@ import type { CompactSessionMenuView } from "./session-menu-compact.ts";
 import { useSessionMenuDetails } from "./session-menu-details-solid.tsx";
 import { SessionMenuItem } from "./session-menu-item.tsx";
 import { sessionArchiveShortcut } from "./session-menu-options.ts";
+import { SessionSnoozeOptions } from "./session-menu-snooze.tsx";
 import { Icon, type IconName } from "./solid/icon.tsx";
 import { Kbd, KeyboardShortcut } from "./solid/kbd.tsx";
 
@@ -53,6 +49,16 @@ type SubmenuProps = Inline & {
   disabled?: boolean;
   title?: string;
 };
+
+const STANDARD_ITEMS = {
+  "copy-session-preview-link": ["sessionsView.copySessionPreviewLink", "link"],
+  "copy-markdown": ["sessionsView.copyMarkdown", "fileText"],
+  "copy-session-id": ["sessionsView.copySessionId", "copy"],
+  "open-new-tab": ["sessionsView.openNewTab", "externalLink"],
+  "open-new-window": ["sessionsView.openNewWindow", "monitor"],
+  "split-right": ["chat.splitView.splitRight", "columns2"],
+  "split-below": ["sessionsView.splitBelow", "panelBottomOpen"],
+} as const;
 
 export function useSessionMenuView(
   host: HTMLElement,
@@ -113,17 +119,27 @@ export function useSessionMenuView(
       </Show>
     </SessionMenuItem>
   );
+  const Items = (props: Inline & { kinds: readonly (keyof typeof STANDARD_ITEMS)[] }) => (
+    <For each={props.kinds}>
+      {(kind) => (
+        <Item
+          kind={kind}
+          label={t(STANDARD_ITEMS[kind][0])}
+          icon={STANDARD_ITEMS[kind][1]}
+          inline={props.inline}
+        />
+      )}
+    </For>
+  );
 
   const Submenu = (props: SubmenuProps) => {
-    const shortcut = () =>
-      props.view === "archive" ? "a" : !state.compact && props.view === "icon" ? "i" : undefined;
+    const shortcut = () => (!state.compact && props.view === "icon" ? "i" : undefined);
     return (
       <SessionMenuItem
         slot={props.inline === false ? "submenu" : undefined}
         class={[
           "session-menu__item",
           {
-            "session-menu__item--compact-details": state.compact && props.view === "archive",
             "people-menu__submenu": !state.compact && props.view === "assign-owner",
             "session-menu__advanced": !state.compact && props.view === "advanced",
           },
@@ -144,14 +160,7 @@ export function useSessionMenuView(
         </span>
         <span class="session-menu__text">{props.label}</span>
         <Show when={shortcut()}>
-          <Show when={state.compact} fallback={<SessionMenuShortcut shortcut={shortcut() ?? ""} />}>
-            <span class="session-menu__compact-details" aria-hidden="true">
-              <SessionMenuShortcut
-                shortcut={shortcut() ?? ""}
-                alias={sessionArchiveShortcut(state)}
-              />
-            </span>
-          </Show>
+          <SessionMenuShortcut shortcut={shortcut() ?? ""} />
         </Show>
         <Show when={state.compact} fallback={<Body view={props.view} />}>
           <span slot="details" class="session-menu__icon session-menu__chevron" aria-hidden="true">
@@ -162,42 +171,25 @@ export function useSessionMenuView(
     );
   };
 
-  const Archive = (props: Inline & { choice?: boolean }) => (
-    <Show
-      when={!props.choice && !batch() && state.session.hasChildren && !state.session.archived}
-      fallback={
-        <Item
-          kind="toggle-archived"
-          label={t(
-            state.session.archiving
-              ? "sessionsView.archiving"
-              : batch()
-                ? state.session.archived
-                  ? "sessionsView.restoreSessionCount"
-                  : "sessionsView.archiveSessionCount"
-                : state.session.archived
-                  ? "sessionsView.restoreSession"
-                  : props.choice
-                    ? "sessionsView.archiveSessionOnly"
-                    : "sessionsView.archiveSession",
-            { count: count() },
-          )}
-          icon={state.session.archived ? "archiveRestore" : "archive"}
-          inline={props.inline}
-          shortcut="a"
-        />
-      }
-    >
-      <Submenu
-        view="archive"
-        label={t(
-          state.session.archiving ? "sessionsView.archiving" : "sessionsView.archiveSession",
-        )}
-        icon="archive"
-        disabled={disabled("toggle-archived")}
-        title={state.actionDisabledReasons["toggle-archived"]}
-      />
-    </Show>
+  const Archive = (props: Inline) => (
+    <Item
+      kind="toggle-archived"
+      label={t(
+        state.session.archiving
+          ? "sessionsView.archiving"
+          : batch()
+            ? state.session.archived
+              ? "sessionsView.restoreSessionCount"
+              : "sessionsView.archiveSessionCount"
+            : state.session.archived
+              ? "sessionsView.restoreSession"
+              : "sessionsView.archiveSession",
+        { count: count() },
+      )}
+      icon={state.session.archived ? "archiveRestore" : "archive"}
+      inline={props.inline}
+      shortcut="a"
+    />
   );
 
   const Involvement = (props: Inline) => (
@@ -285,91 +277,21 @@ export function useSessionMenuView(
     );
   };
 
-  const SnoozeOptions = (props: Inline) => {
-    const now = new Date();
-    const presets = resolveSessionSnoozePresets(now);
-    const labels = {
-      hour: "sessionsView.snoozeHour",
-      "three-hours": "sessionsView.snoozeThreeHours",
-      evening: "sessionsView.snoozeEvening",
-      tomorrow: "sessionsView.snoozeTomorrow",
-      "next-week": "sessionsView.snoozeNextWeek",
-    } as const;
-    return (
-      <For each={presets}>
-        {(preset) => (
-          <SessionMenuItem
-            class="session-menu__item"
-            slot={props.inline ? undefined : "submenu"}
-            value={`snooze:${preset.snoozedUntil}`}
-            disabled={actions.actionDisabled("snooze")}
-            title={state.actionDisabledReasons.snooze}
-          >
-            <span class="session-menu__text">
-              {t(labels[preset.id])} ·{" "}
-              {preset.id === "next-week"
-                ? formatSessionSnoozeWakeTime(preset.snoozedUntil, now)
-                : formatTimeMs(preset.snoozedUntil)}
-            </span>
-          </SessionMenuItem>
-        )}
-      </For>
-    );
-  };
-
   const CopyOptions = (props: Inline) => (
     <>
       <Show when={state.navigationAllowed}>
-        <Item
-          kind="copy-session-preview-link"
-          label={t("sessionsView.copySessionPreviewLink")}
-          icon="link"
-          inline={props.inline}
-        />
+        <Items kinds={["copy-session-preview-link"]} inline={props.inline} />
       </Show>
-      <Item
-        kind="copy-markdown"
-        label={t("sessionsView.copyMarkdown")}
-        icon="fileText"
-        inline={props.inline}
-      />
-      <Item
-        kind="copy-session-id"
-        label={t("sessionsView.copySessionId")}
-        icon="copy"
-        inline={props.inline}
-      />
+      <Items kinds={["copy-markdown", "copy-session-id"]} inline={props.inline} />
     </>
   );
   const OpenOptions = (props: Inline) => (
     <>
       <Show when={state.navigationAllowed}>
-        <Item
-          kind="open-new-tab"
-          label={t("sessionsView.openNewTab")}
-          icon="externalLink"
-          inline={props.inline}
-        />
-        <Item
-          kind="open-new-window"
-          label={t("sessionsView.openNewWindow")}
-          icon="monitor"
-          inline={props.inline}
-        />
+        <Items kinds={["open-new-tab", "open-new-window"]} inline={props.inline} />
       </Show>
       <Show when={state.splitAllowed}>
-        <Item
-          kind="split-right"
-          label={t("chat.splitView.splitRight")}
-          icon="columns2"
-          inline={props.inline}
-        />
-        <Item
-          kind="split-below"
-          label={t("sessionsView.splitBelow")}
-          icon="panelBottomOpen"
-          inline={props.inline}
-        />
+        <Items kinds={["split-right", "split-below"]} inline={props.inline} />
       </Show>
       {options.renderOpenInExtra?.(props.inline ?? false)}
       <Show when={state.worktreePath}>
@@ -457,17 +379,8 @@ export function useSessionMenuView(
       <Match when={props.view === "advanced"}>
         <AdvancedBody inline={props.inline ?? false} />
       </Match>
-      <Match when={props.view === "archive"}>
-        <Archive inline={props.inline ?? false} choice />
-        <Item
-          kind="archive-tree"
-          label={t("sessionsView.archiveSessionTree")}
-          icon="archive"
-          inline={props.inline ?? false}
-        />
-      </Match>
       <Match when={props.view === "snooze"}>
-        <SnoozeOptions inline={props.inline ?? false} />
+        <SessionSnoozeOptions actions={actions} state={state} inline={props.inline ?? false} />
       </Match>
       <Match when={props.view === "copy"}>
         <CopyOptions inline={props.inline ?? false} />
@@ -523,6 +436,19 @@ export function useSessionMenuView(
           label={t("sessionsView.copyLink")}
           icon="link"
           shortcut="c"
+        />
+      </Show>
+      <Show when={!batch() && state.session.placementAction}>
+        <Item
+          kind="move-session"
+          label={t(
+            state.session.placementAction === "dispatch"
+              ? "sessionsView.moveToCloud"
+              : state.session.placementAction === "retry"
+                ? "sessionsView.retrySessionMove"
+                : "sessionsView.moveSession",
+          )}
+          icon="cloud"
         />
       </Show>
       <Show when={batch()}>

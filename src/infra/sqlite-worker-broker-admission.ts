@@ -14,7 +14,9 @@ import type {
   Actor,
   Job,
   SqliteWorkerOpenCustody,
+  StoreClient,
 } from "./sqlite-worker-broker.types.js";
+import { SqliteWorkerError } from "./sqlite-worker-contract.js";
 import { readDatabasePathIdentity, type DatabasePathIdentity } from "./sqlite-worker-identity.js";
 import { createSqliteWorkerOperationAdmission } from "./sqlite-worker-operation-admission.js";
 import {
@@ -52,13 +54,57 @@ export function validateSqliteWorkerDatabaseLocator(databasePath: string): void 
   }
 }
 
+export function reserveSqliteWorkerClient(
+  clients: Set<object>,
+  stores: Iterable<StoreClient>,
+  limit: number,
+  client: object,
+): boolean {
+  const reserved = clients.size < limit;
+  if (!reserved && ![...stores].some((store) => store.retireIdle)) {
+    throw new SqliteWorkerError("SQLite worker store capacity reached", "overloaded");
+  }
+  if (reserved) {
+    clients.add(client);
+  }
+  return reserved;
+}
+
+export async function reclaimSqliteWorkerClient(
+  options: PreparedSqliteWorkerOpen,
+  stores: Iterable<StoreClient>,
+  tryReserve: () => boolean,
+  isClosing: () => boolean,
+): Promise<void> {
+  const assertCurrent = () => {
+    options.signal?.throwIfAborted();
+    options.assertCurrent?.();
+    if (isClosing()) {
+      throw new SqliteWorkerError("SQLite worker host is closing", "closed");
+    }
+  };
+  assertCurrent();
+  for (const store of stores) {
+    if (tryReserve()) {
+      return;
+    }
+    if (store.actor.runtimeGeneration === options.runtimeGeneration) {
+      await store.retireIdle?.();
+    }
+    assertCurrent();
+  }
+  if (!tryReserve()) {
+    throw new SqliteWorkerError("SQLite worker store capacity reached", "overloaded");
+  }
+}
+
 export function captureSqliteWorkerOpen(
   options: SqliteWorkerStoreOptions,
   stateContext?: SqliteWorkerStateContext,
   assertCurrent?: () => void,
   custody: SqliteWorkerOpenCustody = {},
 ): PreparedSqliteWorkerOpen {
-  const { createAdmission, preparation, ...native } = custody;
+  const { createAdmission, preparation, retireIdle, ...native } = custody;
   const inCaller = AsyncLocalStorage.snapshot();
   const ownedAdmission = options.admission;
   const checkOpening = ownedAdmission
@@ -70,15 +116,6 @@ export function captureSqliteWorkerOpen(
   // Queued dispatch and native grants must retain the opener's live authority context.
   const assertOpening = checkOpening ? () => inCaller(checkOpening) : undefined;
   const databasePath = path.resolve(options.databasePath);
-  if (options.target && (options.admission || stateContext || custody.stateDatabasePath)) {
-    throw new Error("Ephemeral SQLite admission cannot borrow a file or shared-state owner");
-  }
-  if (
-    options.target &&
-    (options.target.kind !== "ephemeral" || !options.target.handle || !options.target.incarnation)
-  ) {
-    throw new Error("Ephemeral SQLite admission requires its captured handle and incarnation");
-  }
   if (
     options.admission &&
     (!options.existingOnly || !options.admission.identity.startsWith("file:"))
@@ -90,6 +127,7 @@ export function captureSqliteWorkerOpen(
   const carrierUrl = options.runtimeGeneration?.resolve(carrier) ?? carrier;
   return {
     ...native,
+    retireIdle: retireIdle ? () => inCaller(retireIdle) : undefined,
     maintenanceScope: custody.maintenanceScope ?? getOpenClawDatabaseMaintenanceScope(),
     ...(preparation !== undefined ? { preparation: serialize(preparation) } : {}),
     runtimeGeneration: options.runtimeGeneration,
@@ -120,7 +158,6 @@ export function captureSqliteWorkerOpen(
         }
       : {}),
     moduleUrl: new URL(options.moduleUrl),
-    ...(options.target ? { target: Object.freeze({ ...options.target }) } : {}),
     databasePath,
     input: serialize(options.input),
     existingOnly: options.existingOnly === true,
@@ -138,14 +175,6 @@ export async function prepareSqliteWorkerDatabaseAdmission(options: PreparedSqli
   validateSqliteWorkerModuleUrl(options.moduleUrl);
   const databasePath = path.resolve(options.databasePath);
   const inputHash = createHash("sha256").update(options.input).digest("hex");
-  if (options.target) {
-    return {
-      databasePath,
-      inputHash,
-      key: `ephemeral:${JSON.stringify([options.target.handle, options.target.incarnation])}`,
-      identity: undefined,
-    };
-  }
   const identity = await readDatabasePathIdentity(databasePath);
   options.assertCurrent?.();
   if (options.expectedIdentity && identity.key !== options.expectedIdentity) {
@@ -200,6 +229,27 @@ export function retainSqliteWorkerAdmissionPathReferences(actor: Actor, paths: S
         actor.pathReferences.delete(pathname);
       }
     }
+  };
+}
+
+/** All clients of one shared actor suspend its timer while maintenance retains it. */
+export function suspendSqliteWorkerScheduledMaintenance(
+  actor: Actor,
+  maintenanceScope: PreparedSqliteWorkerOpen["maintenanceScope"],
+): (() => void) | undefined {
+  if (!actor.stateContext) {
+    return undefined;
+  }
+  const buffer = (actor.stateContext.scheduledMaintenanceSuspension ??= new SharedArrayBuffer(
+    Int32Array.BYTES_PER_ELEMENT,
+  ));
+  if (!maintenanceScope) {
+    return undefined;
+  }
+  const holds = new Int32Array(buffer);
+  Atomics.add(holds, 0, 1);
+  return () => {
+    Atomics.sub(holds, 0, 1);
   };
 }
 
@@ -288,12 +338,38 @@ export function assertSqliteWorkerActorReusable(
   assertSqliteWorkerActorStateContext(actor, stateContext);
 }
 
-export function prepareSqliteWorkerActorContext(actor: Actor | undefined, job: Job): void {
+export function prepareSqliteWorkerActorContext(
+  actor: Actor | undefined,
+  job: Job,
+): SqliteWorkerStateContext | undefined {
   const { request } = job;
   const stateContext = request.stateContext ?? actor?.stateContext;
   if (actor && stateContext) {
     assertSqliteWorkerActorStateContext(actor, stateContext);
     request.stateDatabasePath = actor.stateDatabasePath ?? actor.databasePath;
-    request.stateContext = stateContext;
+    const delivered = {
+      ...stateContext,
+      ...(actor.stateContext?.scheduledMaintenanceSuspension
+        ? { scheduledMaintenanceSuspension: actor.stateContext.scheduledMaintenanceSuspension }
+        : {}),
+    };
+    if (request.type !== "open") {
+      const previous = actor.deliveredStateContext;
+      request.stateContext = {
+        ...delivered,
+        ...(delivered.scheduledMaintenanceSuspension &&
+        delivered.scheduledMaintenanceSuspension === previous?.scheduledMaintenanceSuspension
+          ? { scheduledMaintenanceSuspension: undefined }
+          : {}),
+        ...(Object.hasOwn(delivered, "stateIntegrity") &&
+        delivered.stateIntegrity === previous?.stateIntegrity
+          ? { stateIntegrity: undefined }
+          : {}),
+      };
+    } else {
+      request.stateContext = delivered;
+    }
+    return delivered;
   }
+  return undefined;
 }

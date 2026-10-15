@@ -5,7 +5,10 @@ import { getPreparedRuntimeAuthProfileStoreSnapshot } from "../../agents/auth-pr
 import { getRuntimeAuthProfileStoreMetadataRevision } from "../../agents/auth-profiles/runtime-snapshots.js";
 import { readSessionRuntimeOwnershipAsync } from "../../agents/harness/session-runtime-ownership.js";
 import type { AgentHarnessSessionRuntimeOwnership } from "../../agents/harness/types.js";
-import { getPublishedPreparedModelCatalogOwnerSnapshot } from "../../agents/prepared-model-catalog.js";
+import {
+  getPendingPreparedModelRuntimeReplacement,
+  getPublishedPreparedModelCatalogOwnerSnapshot,
+} from "../../agents/prepared-model-catalog.js";
 import { PreparedModelRuntimePublicationSupersededError } from "../../agents/prepared-model-runtime.errors.js";
 import { resolveSwarmConfig } from "../../agents/subagents/swarm/swarm-config.js";
 import type { SessionAcpMeta } from "../../config/sessions/types.js";
@@ -115,8 +118,6 @@ export function createGatewayChatMetadataRuntime(params: {
     buildProjection: prepareChatMetadataModelProjection,
     ...params.deps,
   };
-  const requestedModelLists: Parameters<typeof createChatMetadataModelList>[0]["requested"] =
-    new Map();
   let current: PreparedMetadataGeneration | undefined;
   let lastError: Error | undefined;
   let replacement: Deferred | undefined;
@@ -170,8 +171,8 @@ export function createGatewayChatMetadataRuntime(params: {
     assertPreparedAgentCurrent(agent);
     const profiles = resolveSessionCatalogProfiles(sessionEntry, agent.owner.config, agent.agentId);
     const neutral = !hasSessionCatalogContext(profiles);
-    // Read links on every draft request so connecting an account takes effect immediately;
-    // viewers without personal defaults can reuse the already-published neutral projection.
+    // The profile owner invalidates cached links when an account connects or disconnects.
+    // Viewers without personal defaults reuse the already-published neutral projection.
     const defaultProfileId =
       useRequesterDefaults &&
       !profiles.preferredProfileId &&
@@ -268,27 +269,33 @@ export function createGatewayChatMetadataRuntime(params: {
   };
 
   const runRefresh = async (options: ChatMetadataRefreshOptions) => {
+    // Superseded gates resolve so readers can join the successor's publication.
+    for (
+      let ownerReplacement = getPendingPreparedModelRuntimeReplacement();
+      ownerReplacement;
+      ownerReplacement = getPendingPreparedModelRuntimeReplacement()
+    ) {
+      await ownerReplacement;
+      assertOpen();
+    }
     assertOpen();
     const facts = captureGenerationFacts(deps);
     if (!current || !generationFactsMatch(current.facts, facts)) {
       // Commands and session-specific projections stay on demand within the published owner facts.
       const generation: PreparedMetadataGeneration = {
         facts,
-        modelLists: createChatMetadataModelList({
-          facts,
-          context: deps.getContext(),
-          requested: requestedModelLists,
-          maxEntries: CHAT_METADATA_CACHE_MAX_ENTRIES,
-        }),
+        modelLists:
+          current && generationFactsMatch(current.facts, facts, "catalog")
+            ? current.modelLists
+            : createChatMetadataModelList({
+                facts,
+                context: deps.getContext(),
+                maxEntries: CHAT_METADATA_CACHE_MAX_ENTRIES,
+              }),
         agentsById: new Map(),
         neutralProjectionByAgentId: new Map(),
         sessionProjectionByKey: new Map(),
       };
-      // Rebuild only variants clients already use, before the replacement becomes readable.
-      const { modelLists } = generation;
-      await Promise.allSettled(
-        [...requestedModelLists.values()].map((request) => modelLists.prepare(request)),
-      );
       assertOpen();
       // Mid-refresh config changes are best effort; the next publication refreshes these facts.
       current = generation;
@@ -610,7 +617,6 @@ export function createGatewayChatMetadataRuntime(params: {
         "gateway chat metadata runtime is stopped",
       );
       fail(stoppedError);
-      requestedModelLists.clear();
     }
     // Retain preparation and readers through shutdown, including evicted projections
     // and superseded refreshes no longer reachable from the current generation.

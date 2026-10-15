@@ -8,11 +8,12 @@ import { getSqliteWorkerStateContext } from "../../infra/sqlite-worker-state-con
 import { readOpenClawAgentDatabaseIdentity } from "../../state/openclaw-agent-db-identity.js";
 import { getOpenClawAgentDatabaseIfOpen } from "../../state/openclaw-agent-db.js";
 import type { AgentWorkerOperationContext } from "../../state/openclaw-agent-operation-context.js";
+import type { SessionEntryLifecycleUpsert } from "./session-accessor.lifecycle-types.js";
 import { hasPendingSessionTranscriptArchives } from "./session-accessor.sqlite-archive-store-kernel.js";
-import { readSessionEntryStore } from "./session-accessor.sqlite-entry-store.js";
 import { collectLifecycleIdentityChanges } from "./session-accessor.sqlite-identity.js";
 import {
   finishProjectedLifecycleRemovalPlans,
+  readProjectedLifecycleStore,
   selectProjectedLifecycleRemovals,
 } from "./session-accessor.sqlite-lifecycle-state.js";
 import type {
@@ -54,6 +55,7 @@ export function commitSessionLifecycleProjection(
       input.removalPlans,
       {
         resetScope: { agentId: input.agentId, path: database.path, env: options.env },
+        currentEntrySnapshot: publishActorEntry?.snapshot(),
         postimages,
         onArchived: (sessionKey, previous) => archivedPrevious.set(sessionKey, previous),
         onResetBoundary: ({
@@ -111,7 +113,7 @@ export function commitSessionLifecycleProjection(
         (plan) => plan.archivedEntries.length === 0 && plan.entryRemovals.length === 0,
       )
     ) {
-      publishActorEntry?.(postimages, candidate.publication);
+      publishActorEntry?.publish(postimages, candidate.publication);
     }
     const receipt = transferSessionEntryWorkerCandidate(database, admit, candidate);
     return receipt;
@@ -119,14 +121,16 @@ export function commitSessionLifecycleProjection(
 }
 
 type LifecycleProjectionPreparation = {
-  store: ReturnType<typeof readSessionEntryStore>;
+  store: Record<string, SessionEntry>;
   selected: ReturnType<typeof selectProjectedLifecycleRemovals>;
   archiveRecovery?: ProjectedLifecycleMutation["archiveRecovery"];
 };
 
 export type SessionLifecyclePlanningOperations = {
   prepare: {
-    input: LifecycleRemovalProjectionInput & { upsertSessionKeys: string[] };
+    input: LifecycleRemovalProjectionInput & {
+      upserts: readonly Pick<SessionEntryLifecycleUpsert, "sessionKey" | "relatedSessionKeys">[];
+    };
     output: LifecycleProjectionPreparation;
   };
   finish: {
@@ -164,14 +168,21 @@ export function bindSqliteWorkerBackend(
       const prepare = () => {
         if (command.type === "prepare") {
           const input = command.input;
-          const store = readSessionEntryStore(database, {
-            sessionKeys: [
-              ...input.removals.map((removal) =>
-                removal.exactStoredKey ? removal.sessionKey : removal.sessionKey.trim(),
-              ),
-              ...input.upsertSessionKeys,
-            ],
-          });
+          const upsert = input.upserts[0];
+          const retained =
+            !input.allowCanonicalRepair &&
+            input.removals.length === 0 &&
+            input.upserts.length === 1 &&
+            upsert &&
+            !upsert.relatedSessionKeys?.length
+              ? prepareSessionActorEntryPatch(database, upsert.sessionKey.trim())?.snapshot()
+              : undefined;
+          // Related-parent builders still require their complete multi-entry projection.
+          const store =
+            retained &&
+            (upsert?.relatedSessionKeys === undefined || !retained.entry.parentSessionKey)
+              ? { [retained.sessionKey]: retained.entry }
+              : readProjectedLifecycleStore(database, input);
           const identity = readOpenClawAgentDatabaseIdentity(database).identity;
           return {
             store,
@@ -194,8 +205,8 @@ export function bindSqliteWorkerBackend(
           input.upsertedEntries,
         );
       };
-      // Without removals the inventory is one statement. Archive recovery is an
-      // independent scheduling hint, already carried across asynchronous builders.
+      // Without removals, bounded row reads share this worker without yielding.
+      // Archive recovery is an independent hint carried across asynchronous builders.
       return command.type === "prepare" && command.input.removals.length === 0
         ? prepare()
         : runSqliteDeferredTransactionSync(database.db, prepare);

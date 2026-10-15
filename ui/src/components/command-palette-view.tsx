@@ -18,7 +18,6 @@ import {
 import { t } from "../lib/reactive/i18n.ts";
 import { createParkedProjection } from "../lib/reactive/parked-projection.ts";
 import { resolveUiSessionRowAgentId } from "../lib/sessions/session-key.ts";
-import { LitContent } from "../lit/solid-bridge.ts";
 import { paneDomId } from "../pages/chat/components/chat-composer-dom.ts";
 import {
   HumanMentionMenuView,
@@ -26,6 +25,12 @@ import {
   type HumanMentionMenuHost,
 } from "../pages/chat/components/chat-composer-mention-menu.tsx";
 import { SelectedHumanMentions } from "../pages/chat/components/chat-composer-selected-mentions.tsx";
+import {
+  PaletteSessionAttachments,
+  PaletteSessionControls,
+  PaletteSessionAuxiliary,
+  PaletteSessionRecovery,
+} from "../pages/new-session/palette-session-draft-view.tsx";
 import "../styles/command-palette.css";
 import type { PaletteSessionDraft } from "../pages/new-session/palette-session-draft.ts";
 import {
@@ -458,12 +463,12 @@ function PaletteActions(props: { readProps: () => CommandPaletteProps }) {
           <KeyboardShortcut combo={KEYBOARD_SHORTCUT_COMBOS.modifiedEnter} />
         </button>
       </openclaw-tooltip>
-      <LitContent render={() => current().draft.renderControls()} />
+      <PaletteSessionControls draft={current().draft} revision={current()} />
     </>
   );
 }
 
-function OpenPalette(props: { readProps: () => CommandPaletteProps }) {
+export function CommandPaletteView(props: { readProps: () => CommandPaletteProps }) {
   const current = () => props.readProps();
   const hideSearch = () =>
     current().promptMode || current().mentionMenu.open || current().draft.mentions.length > 0;
@@ -473,7 +478,7 @@ function OpenPalette(props: { readProps: () => CommandPaletteProps }) {
   const mentionListboxId = () => paneDomId(current().mentionHost.paneId, "mention-menu-listbox");
   const mentionAnnouncementId = () =>
     paneDomId(current().mentionHost.paneId, "mention-announcement");
-  const recovery = createMemo(() => current().draft.renderRecovery());
+  const recovery = createMemo(() => current().draft.recoveryAction);
   return (
     <>
       <openclaw-modal-dialog
@@ -552,7 +557,7 @@ function OpenPalette(props: { readProps: () => CommandPaletteProps }) {
               />
             </div>
           </Show>
-          <LitContent render={() => current().draft.renderAttachments()} />
+          <PaletteSessionAttachments draft={current().draft} revision={current()} />
           <HumanMentionMenuView
             args={[current().mentionMenu, current().mentionHost, current().requestUpdate]}
           />
@@ -581,20 +586,12 @@ function OpenPalette(props: { readProps: () => CommandPaletteProps }) {
           </Show>
           <Show when={recovery()}>
             <div class="cmd-palette__footer">
-              <LitContent render={() => recovery()} />
+              <PaletteSessionRecovery onOpen={() => recovery()?.()} />
             </div>
           </Show>
         </div>
       </openclaw-modal-dialog>
-      <LitContent render={() => current().draft.renderAuxiliary()} />
+      <PaletteSessionAuxiliary draft={current().draft} revision={current()} />
     </>
-  );
-}
-
-export function CommandPaletteView(props: { readProps: () => CommandPaletteProps }) {
-  return (
-    <Show when={props.readProps().open}>
-      <OpenPalette readProps={props.readProps} />
-    </Show>
   );
 }

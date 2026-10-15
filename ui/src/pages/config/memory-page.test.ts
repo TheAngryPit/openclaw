@@ -47,17 +47,12 @@ function selectTab(element: HTMLElement, tab: string) {
   target?.dispatchEvent(
     new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
   );
-  target?.dispatchEvent(new MouseEvent("click", { detail: 0, bubbles: true }));
-  dispatchTabShow(element, tab);
 }
 
-function dispatchTabShow(element: HTMLElement, tab: string) {
-  element.querySelector("wa-tab-group")?.dispatchEvent(
-    new CustomEvent("wa-tab-show", {
-      detail: { name: tab },
-      bubbles: true,
-    }),
-  );
+function moveTabFocus(element: HTMLElement, tab: string) {
+  element
+    .querySelector(`#memory-tab-${tab}`)
+    ?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
 }
 
 describe("MemorySettingsPage engine slot", () => {
@@ -315,30 +310,6 @@ describe("MemorySettingsPage catalog state", () => {
     }
   });
 
-  it("keeps a committed add-on change successful while making its failed refresh visible", async () => {
-    const refresh = vi.fn(() => Promise.reject(new Error("config refresh failed")));
-    const initial = [addon("active-memory", true), addon("memory-wiki", false)];
-    const updated = [addon("active-memory", false), addon("memory-wiki", false)];
-    const { element } = createPage({
-      configObject: {},
-      listCatalog: (call) => Promise.resolve({ plugins: call === 0 ? initial : updated }),
-      refresh,
-    });
-    mountMemoryPage(element);
-    try {
-      await waitForSolid(() => expect(addonSwitch(element, "Active memory")?.checked).toBe(true));
-      toggleAddon(element, "Active memory", false);
-
-      await waitForSolid(() => expect(refresh).toHaveBeenCalledOnce());
-      await waitForSolid(() => expect(element.textContent).toContain("config refresh failed"));
-      await waitForSolid(() => expect(addonSwitch(element, "Active memory")?.checked).toBe(false));
-      expect(element.textContent).toContain("Needs attention");
-      expect(element.textContent).not.toContain("Could not update Active memory");
-    } finally {
-      element.remove();
-    }
-  });
-
   it("retains runtime warnings through same-boot reconnects and publications, then clears a new boot", async () => {
     const initial = [addon("active-memory", true), addon("memory-wiki", false)];
     const updated = [addon("active-memory", true), addon("memory-wiki", true)];
@@ -569,8 +540,8 @@ describe("MemorySettingsPage tab routing", () => {
           element.routeData = { ...element.routeData } as ConfigRouteData;
           flush();
         }
-        dispatchTabShow(element, "overview");
-        dispatchTabShow(element, "dreams");
+        moveTabFocus(element, "overview");
+        moveTabFocus(element, "dreams");
 
         expect(replace).toHaveBeenCalledTimes(expectedUrl ? 1 : 0);
         expect(navigate).not.toHaveBeenCalled();

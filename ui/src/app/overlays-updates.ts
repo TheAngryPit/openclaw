@@ -8,8 +8,6 @@ import {
 import { isReportableUpdateRun } from "../../../src/shared/update-outcome.js";
 import { GatewayRequestError } from "../api/gateway.ts";
 import type { UpdateHoldResult } from "../api/types.ts";
-import { controlUiBuildDiffersFrom } from "../build-info.ts";
-import { isConfiguredUiDevGateway } from "../dev-gateway.ts";
 import { t } from "../i18n/index.ts";
 import { formatUiError } from "../lib/format-error.ts";
 import type { ConnectionBootstrapCoordinator } from "./connection-bootstrap.ts";
@@ -84,17 +82,12 @@ export function createApplicationUpdateOverlays(
   let connectedSource: NonNullable<typeof activeClient> | null = null;
   let connectedEpoch = 0;
   let confirmationTargetGeneration = 0;
-  // connectedEpoch also fences scope changes, so it cannot tell a first
-  // connection from a reconnect; legacy version-only skew needs that fact.
-  let connectedBefore = false;
   let operatorAccess = readGatewayOperatorAccess(gateway.snapshot);
   let updateGatewayScope = gatewayCredentialScope(gateway.connection.gatewayUrl);
   let profileId = gateway.snapshot.selfUser?.id ?? null;
   const receipts = createUpdateRunReceipts();
   let updateRequestRunning = false;
-  let updateStatusRevision = 0;
   let updateRunGeneration = 0;
-  let updateReadGeneration = 0;
   let updateHoldInFlight = false;
   let runId: string | null = null;
   let updateHistory: UpdateHistory = { kind: "unknown" };
@@ -275,13 +268,8 @@ export function createApplicationUpdateOverlays(
     if (!client || !id || !isCurrentClient(client)) {
       return;
     }
-    const generation = ++updateReadGeneration;
     const epoch = connectedEpoch;
-    const isCurrent = () =>
-      generation === updateReadGeneration &&
-      epoch === connectedEpoch &&
-      id === runId &&
-      isCurrentClient(client);
+    const isCurrent = () => epoch === connectedEpoch && id === runId && isCurrentClient(client);
     try {
       const response = await client.request<{ run: UpdateRunRecord | null }>("update.runs.get", {
         runId: id,
@@ -415,8 +403,6 @@ export function createApplicationUpdateOverlays(
       connectedEpoch++;
       updateFailureReporter.invalidate();
       updateRunGeneration++;
-      updateReadGeneration++;
-      updateStatusRevision++;
       runId = null;
       updateHistory = { kind: "unknown" };
       updateAttempt = null;
@@ -456,8 +442,6 @@ export function createApplicationUpdateOverlays(
         snapshot = { ...snapshot, updateStatusBanner: resolveUnknownUpdateOutcomeBanner() };
       }
       connectedEpoch++;
-      updateReadGeneration++;
-      updateStatusRevision++;
       updateRunGeneration++;
       updateRequestRunning = false;
     }
@@ -474,7 +458,6 @@ export function createApplicationUpdateOverlays(
         snapshot = { ...snapshot, controlUiRefreshRequired: true };
       } else if (!next.client) {
         connectedEpoch = 0;
-        connectedBefore = false;
         snapshot = { ...snapshot, controlUiRefreshRequired: false };
       } else if (next.hello) {
         snapshot = { ...snapshot, controlUiRefreshRequired: true };
@@ -482,24 +465,17 @@ export function createApplicationUpdateOverlays(
       publish();
       return;
     }
-    const serverBuildIdentity = {
-      version: next.hello?.server?.version,
-      buildId: next.hello?.server?.buildId,
-      controlUiBuildSource: next.hello?.server?.controlUiBuildSource,
-    };
     snapshot = {
       ...snapshot,
       ...(connectedSourceChanged || helloChanged
         ? projectConnectedUpdateSnapshot(snapshot, next.hello)
         : {}),
-      // Vite owns this document; reloading cannot adopt its proxied Gateway's build.
-      controlUiRefreshRequired: connectedSourceChanged
-        ? !isConfiguredUiDevGateway(gateway.connection.gatewayUrl) &&
-          (Boolean(serverBuildIdentity.buildId?.trim()) || connectedBefore) &&
-          controlUiBuildDiffersFrom(serverBuildIdentity)
-        : snapshot.controlUiRefreshRequired,
+      // The gateway store owns build staleness: it fences a stale same-origin
+      // hello (projected above) and connects only builds this document may
+      // drive. Cross-origin skew stays unsupported; reloading cannot change a
+      // document that Gateway did not serve (ui/AGENTS.md "Gateway Coupling").
+      controlUiRefreshRequired: false,
     };
-    connectedBefore = true;
     publish(true);
     if ((connectedSourceChanged || scopeChanged || accessGranted) && operatorAccess.canAdmin) {
       void runConnectionBootstrap("update-run", () =>
@@ -536,7 +512,6 @@ export function createApplicationUpdateOverlays(
       updateFailureReporter.invalidate();
       snapshot = { ...snapshot, updateFailureReportBusy: false };
       publish();
-      updateStatusRevision++;
       if (runId && runId !== payload.runId) {
         void refreshUpdateStatus("completion");
       } else {
@@ -549,7 +524,6 @@ export function createApplicationUpdateOverlays(
         return;
       }
       const previousCampaign = snapshot.updateSchedule?.campaign;
-      updateStatusRevision++;
       snapshot = { ...snapshot, ...projectUpdateAvailableEvent(snapshot, payload) };
       publish(true);
       if (
@@ -590,8 +564,6 @@ export function createApplicationUpdateOverlays(
       }
       const generation = ++updateRunGeneration;
       const sessionKey = hooks.getActiveSessionKey?.();
-      updateStatusRevision++;
-      updateReadGeneration++;
       const attempt: UpdateAdmissionAttempt = {
         history: snapshot.updateRun
           ? { kind: "known", runId: snapshot.updateRun.runId }
@@ -681,8 +653,9 @@ export function createApplicationUpdateOverlays(
         return false;
       }
       const generation = updateRunGeneration;
-      const revision = updateStatusRevision;
       const isCurrent = () => generation === updateRunGeneration && isCurrentClient(client);
+      const canPublish = () =>
+        isCurrent() && snapshot.updateSchedule?.campaign?.state !== "applying";
       updateHoldInFlight = true;
       try {
         const response = await client.request<UpdateHoldResult>("update.hold", {});
@@ -690,10 +663,9 @@ export function createApplicationUpdateOverlays(
           return false;
         }
         const updateSchedule = response.schedule && readUpdateScheduleValue(response.schedule);
-        // Campaign events can beat the hold reply; acknowledge the request
-        // without replacing the newer schedule they already published.
-        if (revision === updateStatusRevision && (updateSchedule !== undefined || response.ok)) {
-          updateStatusRevision += 1;
+        // Installation owns its interlock; other same-campaign display updates
+        // settle in completion order and converge on the next status refresh.
+        if (canPublish() && (updateSchedule !== undefined || response.ok)) {
           snapshot = {
             ...snapshot,
             ...(updateSchedule !== undefined ? { updateSchedule } : {}),
@@ -708,7 +680,7 @@ export function createApplicationUpdateOverlays(
         }
         return response.ok;
       } catch (error) {
-        if (isCurrent() && revision === updateStatusRevision) {
+        if (canPublish()) {
           publishError(error);
         }
         return false;
@@ -721,7 +693,6 @@ export function createApplicationUpdateOverlays(
       disposed = true;
       updateFailureReporter.invalidate();
       updateRunGeneration++;
-      updateReadGeneration++;
       updateCampaignPoller.stop();
     },
   };

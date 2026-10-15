@@ -83,7 +83,7 @@ import {
 } from "../terminal-interactivity.js";
 import { createGatewayCrashLoopRecovery } from "./crash-loop-recovery.js";
 import { enforceGatewayRunFutureConfigGuard } from "./future-config-guard.js";
-import { getGatewayStartGuardErrors, takeAcceptedGatewayRunMigrations } from "./pre-bootstrap.js";
+import { getGatewayStartGuardErrors } from "./pre-bootstrap.js";
 import { runGatewayLoop } from "./run-loop.js";
 import { resolveGatewayPasswordOption, toOptionString } from "./run-option-values.js";
 import type { GatewayRunOpts } from "./run-options.js";
@@ -139,7 +139,7 @@ function parseEnumOption<T extends string>(
 
 async function readGatewayStartupConfig(
   startupTrace: ReturnType<typeof createGatewayCliStartupTrace>,
-  readOptions: Pick<ConfigSnapshotReadOptions, "deferredPluginMigrations" | "lowerPrecedenceEnv">,
+  readOptions: Pick<ConfigSnapshotReadOptions, "lowerPrecedenceEnv"> = {},
 ): Promise<{
   cfg: OpenClawConfig;
   snapshot: ConfigFileSnapshot;
@@ -219,9 +219,7 @@ async function readGatewayStartupConfigWithShellEnv(params: {
     lowerPrecedenceEnv: Readonly<Record<string, string>>;
   }
 > {
-  // Both reads revalidate the accepted preflight generation instead of copying shared state.
-  const accepted = takeAcceptedGatewayRunMigrations();
-  const startupConfig = await readGatewayStartupConfig(params.startupTrace, accepted);
+  const startupConfig = await readGatewayStartupConfig(params.startupTrace);
   const plan = await resolveGatewayRunShellEnvFallbackPlan(
     startupConfig.snapshot.valid ? startupConfig.cfg : {},
   );
@@ -231,7 +229,7 @@ async function readGatewayStartupConfigWithShellEnv(params: {
   // Startup uses one shell-env plan; edits during this read take effect on the next start.
   const lowerPrecedenceEnv = await loadGatewayRunShellEnvFallback(plan);
   return {
-    ...(await readGatewayStartupConfig(params.startupTrace, { ...accepted, lowerPrecedenceEnv })),
+    ...(await readGatewayStartupConfig(params.startupTrace, { lowerPrecedenceEnv })),
     lowerPrecedenceEnv,
   };
 }
@@ -912,7 +910,8 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
       completeBoot,
       onRestartStartupFailure: recoverStartupFailure,
       onProcessResourcesSettled: hooks.onProcessResourcesSettled,
-      start: async ({ requestHotReloadRecovery, ...startupOptions } = {}) => {
+      start: async (startOptions = {}) => {
+        const { requestHotReloadRecovery, ...startupOptions } = startOptions;
         const snapshotPreparation = await import("../../config/io.snapshot-preparation.js");
         const startupConfigSnapshotReadForThisStart = startupConfigSnapshotReadForNextStart;
         startupConfigSnapshotReadForNextStart = undefined;
@@ -1033,7 +1032,6 @@ const testing = {
   createConfiguredGatewayHealthProbe,
   isGatewayHealthzResponse,
   resolveGatewayLockErrorExitCode,
-  resolveGatewayStartupFailureExitCode,
   runGatewayLoopWithSupervisedLockRecovery,
 };
 
