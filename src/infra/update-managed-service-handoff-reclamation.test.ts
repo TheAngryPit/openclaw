@@ -14,11 +14,19 @@ import {
   installPrivateUpdateHandoffStore,
   writePrivateUpdateHandoffChildGuard,
 } from "../../test/helpers/private-update-handoff-store.js";
-import { withUpdateCommandExecutor } from "../cli/update-cli/update-command-executor.js";
+import {
+  captureUpdateCommandExecutorAuthority,
+  requestUpdateCommandExecutorCancellation,
+  withUpdateCommandExecutor,
+} from "../cli/update-cli/update-command-executor.js";
 import * as processGroups from "../process/child-process-tree.js";
+import { withCommandProcessScope } from "../process/exec-spawn.js";
+import { runUtf8CommandWithTimeout } from "../process/exec.js";
+import { createDeferredCore } from "../shared/deferred.js";
 import * as processIdentity from "../shared/pid-alive.js";
 import { resolveTestNodeExecPath } from "../test-utils/node-process.js";
 import { executeSqliteQuerySync } from "./kysely-sync.js";
+import { createManagedCommandProcessCustody } from "./update-managed-command-custody.js";
 import {
   createManagedHandoffLeaseDatabase,
   leaseQueries,
@@ -167,6 +175,114 @@ it("does not reclaim original cancellation custody after the process dies", asyn
   expect(f.store.read(f.slot)).toEqual(before.occupied);
 });
 
+it.skipIf(process.platform === "win32")(
+  "settles live original cancellation custody after its bound native command joins",
+  async () => {
+    const f = fixture();
+    const runId = randomUUID();
+    const cancellation = new Error("cancel original update");
+    const ready = createDeferredCore<void>();
+    const execution = withUpdateCommandExecutor(runId, async (executor) => {
+      const fence = await executor.enter(f.slot);
+      const authority = captureUpdateCommandExecutorAuthority(fence, runId);
+      const original = f.store.read(f.install);
+      const occupied = f.store.read(f.slot);
+      if (original.kind !== "current" || occupied.kind !== "current") {
+        throw new Error("Original and occupied-slot owners were not admitted");
+      }
+      expect(original.lease.action).toMatchObject({
+        kind: "update",
+        mutationProtocol: "original-cancellation-v1",
+      });
+      expect(occupied.lease.mutationOriginal).toMatchObject({ key: f.install });
+
+      const native = await createManagedCommandProcessCustody({
+        roots: [f.install, f.slot],
+        runId,
+        databasePath: authority.databasePath,
+        databaseIdentity: authority,
+        parents: [original.lease, occupied.lease],
+        assertCurrent: fence.assertCurrent,
+      });
+      const socket = path.join(f.root, "c.sock");
+      try {
+        const result = await withCommandProcessScope(
+          async () => {
+            const command = runUtf8CommandWithTimeout(
+              [
+                resolveTestNodeExecPath(),
+                "-e",
+                `const server=require("node:net").createServer(); process.once("SIGTERM",()=>server.close(()=>process.exit(0))); server.listen(${JSON.stringify(socket)},()=>process.stdout.write("ready\\n"));`,
+              ],
+              {
+                killProcessTree: true,
+                requireProcessTreeExtinction: true,
+                onOutputChunk(chunk) {
+                  if (chunk.toString("utf8").includes("ready")) {
+                    ready.resolve();
+                  }
+                },
+              },
+            );
+            void command.then(
+              () => ready.reject(new Error("Native command exited before cancellation")),
+              (error: unknown) => ready.reject(error),
+            );
+            await ready.promise;
+
+            const commands = f.store.readCommandChildren([f.install, f.slot]);
+            expect(commands).toHaveLength(2);
+            expect(
+              commands.every(
+                (entry) => entry.action.kind === "update" && entry.action.custody === "bound",
+              ),
+            ).toBe(true);
+            expect(
+              commands.every((entry) => f.store.isProcessIdentityCurrent(entry.executor)),
+            ).toBe(true);
+
+            requestUpdateCommandExecutorCancellation(fence, runId, cancellation);
+            expect(f.store.read(f.install)).toMatchObject({
+              kind: "current",
+              lease: { version: 4 },
+            });
+            expect(f.store.read(f.slot)).toMatchObject({
+              kind: "current",
+              lease: { version: 2, mutationOriginal: { key: f.install } },
+            });
+            expect(f.store.readCommandChildren([f.install, f.slot])).toEqual(commands);
+
+            const commandResult = await command;
+            expect(commandResult).toMatchObject({ termination: "signal", cleanup: "cooperative" });
+            expect(f.store.readCommandChildren([f.install, f.slot])).toEqual([]);
+            expect(f.store.read(f.install)).toMatchObject({
+              kind: "current",
+              lease: { version: 4 },
+            });
+            expect(f.store.read(f.slot)).toMatchObject({ kind: "current", lease: { version: 2 } });
+            return commandResult;
+          },
+          undefined,
+          native.custody,
+        );
+        expect(result).toMatchObject({ termination: "signal", cleanup: "cooperative" });
+      } finally {
+        native.releaseAnchors();
+        fs.rmSync(socket, { force: true });
+      }
+    });
+
+    await expect(execution).rejects.toBe(cancellation);
+    expect(f.store.read(f.install).kind).toBe("absent");
+    expect(f.store.read(f.slot).kind).toBe("absent");
+    const next = f.store.acquire(f.install, "next-update", { kind: "update" });
+    expect(next.kind).toBe("acquired");
+    if (next.kind === "acquired") {
+      expect(f.store.release(next.lease)).toBe(true);
+    }
+  },
+);
+
 it.each(["release", "releaseAll"] as const)(
   "%s preserves an original until its exact occupied generation settles",
   (method) => {
@@ -218,6 +334,76 @@ it.each(["release", "releaseAll"] as const)(
       throw new Error("Next generation acquisition failed");
     }
     expect(store.release(next.lease)).toBe(true);
+  },
+);
+
+it.skipIf(process.platform === "win32")(
+  "retires the exact terminal original/mirror family from its selected mirror root",
+  () => {
+    const f = fixture();
+    const retained = f.crash("cancelled");
+    const descendants = [
+      {
+        name: "01234567-89ab-cdef-0123-456789abcdef-lineage-" + "a".repeat(64),
+        helper: { pid: 771101, startIdentity: "101" },
+        executor: { pid: 771102, startIdentity: "102" },
+      },
+      {
+        name: "01234567-89ab-cdef-0123-456789abcdef-lineage-" + "b".repeat(64),
+        helper: { pid: 771103, startIdentity: "103" },
+        executor: { pid: 771104, startIdentity: "104" },
+      },
+    ];
+    const database = createManagedHandoffLeaseDatabase(f.handoff);
+    database(true, (db) =>
+      executeSqliteQuerySync(
+        db,
+        leaseQueries(db)
+          .insertInto("managed_update_handoffs")
+          .values(
+            descendants.flatMap((child) =>
+              [f.install, f.slot].map((root) => ({
+                install_root: `${root}/.openclaw-update-child-${child.name}`,
+                owner: retained.original.lease.owner,
+                payload_json: JSON.stringify({
+                  version: 2,
+                  helper: child.helper,
+                  executor: child.executor,
+                  action: {
+                    kind: "update",
+                    ...(root === f.install ? { mutationProtocol: "original-cancellation-v1" } : {}),
+                  },
+                }),
+                updated_at: 3,
+              })),
+            ),
+          ),
+      ),
+    );
+    const dead = processIdentity.isPidDefinitelyDead;
+    vi.spyOn(processIdentity, "isPidDefinitelyDead").mockImplementation((pid) =>
+      descendants.some((child) => [child.helper.pid, child.executor.pid].includes(pid))
+        ? true
+        : dead(pid),
+    );
+    const groupAlive = processGroups.isChildProcessTreeAlive;
+    vi.spyOn(processGroups, "isChildProcessTreeAlive").mockImplementation((child) =>
+      descendants.some((entry) => entry.executor.pid === child.pid) ? false : groupAlive(child),
+    );
+    const terminal = f.store.prepareTerminalCancellationFamily(f.slot);
+    expect(terminal).not.toBeNull();
+    terminal!.retire(() => undefined);
+    expect(f.store.read(f.install)).toEqual({ kind: "absent" });
+    expect(f.store.read(f.slot)).toEqual({ kind: "absent" });
+    for (const child of descendants) {
+      for (const root of [f.install, f.slot]) {
+        expect(f.store.read(`${root}/.openclaw-update-child-${child.name}`)).toEqual({
+          kind: "absent",
+        });
+      }
+    }
+    const next = f.store.acquire(f.slot, "next-update", { kind: "update" });
+    expect(next.kind).toBe("acquired");
   },
 );
 

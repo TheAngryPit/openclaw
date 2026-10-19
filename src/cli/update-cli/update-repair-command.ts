@@ -58,6 +58,7 @@ import { updateFinalizeCommand } from "./update-command-finalize.js";
 import { refuseImmutableUpdateActivation } from "./update-command-immutable.js";
 import { resolveServiceRefreshEnv } from "./update-command-service-env.js";
 import { updateMaintenanceError } from "./update-maintenance-error.js";
+import { settleTerminalManagedHandoffMirrorFamily } from "./update-terminal-handoff-family.js";
 
 export function updateRepairCommand(opts: UpdateFinalizeOptions): Promise<void> {
   return repairUpdate(opts).catch((error: unknown) => {
@@ -116,6 +117,29 @@ async function repairUpdate(opts: UpdateFinalizeOptions): Promise<void> {
     );
     if (settlement?.warning) {
       defaultRuntime.error(`Warning: ${settlement.warning}`);
+    }
+  }
+  if (
+    !inheritedRunId &&
+    !env.OPENCLAW_UPDATE_RUN_HANDOFF &&
+    !env[POST_CORE_UPDATE_ENV] &&
+    opts.channel === undefined &&
+    !opts.acceptCapabilities
+  ) {
+    const terminal = await settleTerminalManagedHandoffMirrorFamily({
+      installRoot: discoveredRoot,
+      env,
+    });
+    if (terminal === "settled") {
+      reportRepairResult(
+        opts,
+        [],
+        "Verified and stopped the Gateway, then retired its repaired terminal updater custody. Continue the update or start the Gateway through its native service.",
+      );
+      return;
+    }
+    if (terminal === "not-qualified") {
+      throw new Error("Terminal updater custody is not qualified for this installation.");
     }
   }
   using handoff =

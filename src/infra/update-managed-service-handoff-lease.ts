@@ -58,6 +58,7 @@ import {
   type HandoffProcessIdentity,
 } from "./update-managed-service-handoff-schema.js";
 import { createManagedHandoffScopeReader } from "./update-managed-service-handoff-scope.js";
+import { prepareTerminalCancellationFamily } from "./update-managed-service-handoff-terminal-family.js";
 
 // Identity is earned by this process's original acquisition, not by decoding a
 // row or copying a grant. Survives the executor pinning/reopening the same DB.
@@ -661,6 +662,15 @@ function createLeaseStore(
     return !result.error && result.status === 0 && (ownPlacement || nativeClosed(life));
   }
   const store = {
+    prepareTerminalCancellationFamily: (root: string) =>
+      prepareTerminalCancellationFamily(root, {
+        rows: { row, handle, descendants, deleteRow, sameRow },
+        withDatabase,
+        transact,
+        processState,
+        hasUnsettledChildren,
+        childAliases,
+      }),
     retainReadConnection: withDatabase.retainReadConnection,
     transact,
     read,
