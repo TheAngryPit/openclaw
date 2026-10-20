@@ -704,6 +704,18 @@ struct GatewayEndpointStoreTests {
             (trustedProxyRoot, nil, "custom-password", true, snapshot), // pragma: allowlist secret
             (remoteTokenRoot, nil, "custom-password", true, remoteTokenSnapshot), // pragma: allowlist secret
             (remoteTokenRoot, "service-token", nil, true, serviceTokenSnapshot),
+            (
+                ["gateway": ["auth": ["password": "$GW_PASSWORD"]]],
+                "service-token",
+                nil,
+                true,
+                self.makeLaunchAgentTokenSnapshot("service-token")),
+            (
+                ["gateway": ["auth": ["password": "${GW_PASSWORD}"]]],
+                "service-token",
+                nil,
+                true,
+                self.makeLaunchAgentTokenSnapshot("service-token")),
             (remotePasswordRoot, nil, "remote-password", true, remotePasswordSnapshot), // pragma: allowlist secret
             (
                 remotePasswordWithLocalPasswordRefRoot,

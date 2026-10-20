@@ -211,7 +211,8 @@ actor GatewayEndpointStore {
         func configuredInput(_ key: String) -> (configured: Bool, isSecretRef: Bool) {
             guard let value = auth?[key] else { return (false, false) }
             guard let string = value as? String else { return (true, true) }
-            return (!string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, false)
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (!trimmed.isEmpty, self.envSecretRefName(trimmed) != nil)
         }
         func hasAmbientCandidate(_ envKey: String, _ launchdValue: String?) -> Bool {
             [modeEnv[envKey], launchdValue]
