@@ -62,7 +62,7 @@ describe("session catalog provider admission", () => {
         },
         read: async ({ hostId, threadId }) => ({ hostId, threadId, items: [] }),
       };
-      const lifetime = new SessionCatalogListLifetime([], [provider.id]);
+      const lifetime = new SessionCatalogListLifetime([]);
       const result = withPluginRuntimeGatewayRequestScope(
         { hasCurrentClientAuthority: caller.isCurrent, isWebchatConnect: () => false },
         () =>
@@ -217,7 +217,7 @@ describe("session catalog provider admission", () => {
         ),
       );
       const owner = new AbortController();
-      const lifetime = new SessionCatalogListLifetime([owner.signal], [queued.id]);
+      const lifetime = new SessionCatalogListLifetime([owner.signal]);
       let retiredErrors: unknown[] | undefined;
       const rejected = root.run(async () => {
         try {

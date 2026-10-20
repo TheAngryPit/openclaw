@@ -9,7 +9,6 @@ import {
 import type { ChatAttachmentControlsProps } from "./chat-attachment-controls.types.ts";
 import { currentAttachments, removeDraftAttachment } from "./chat-attachment-draft.ts";
 import { AttachmentRemove } from "./chat-attachment-file.tsx";
-import { solidTemplate } from "./chat-composer-controls.ts";
 import { ChatPastedText } from "./chat-pasted-text.tsx";
 
 function readTextFromDataUrl(dataUrl: string): string | null {
@@ -43,7 +42,6 @@ function showPastedTextInComposer(att: ChatAttachment, props: ChatAttachmentCont
   }
   removeDraftAttachment(att, props);
   props.onDraftChange(appendPastedTextToDraft(props.getDraft?.() ?? props.draft ?? "", text));
-  props.onRequestUpdate?.();
 }
 
 export function ComposerPastedText(componentProps: {
@@ -81,6 +79,15 @@ export function ComposerPastedText(componentProps: {
       {t("chat.attachments.showInTextField")}
     </button>
   );
+  // Peer attachment updates must preserve the composer's focused action nodes.
+  const composerAction = restoreAction();
+  const composerRemoveAction = (
+    <AttachmentRemove
+      label={removeLabel()}
+      disabled={componentProps.controls.disabled}
+      onClick={remove}
+    />
+  );
   const open = () => {
     if (!current()) {
       return;
@@ -102,24 +109,20 @@ export function ComposerPastedText(componentProps: {
           ? { status: "ready", src, sizeBytes: attachment.sizeBytes }
           : { status: "unavailable" };
       },
-      renderActions: () =>
-        solidTemplate(
-          () => (
-            <>
-              {restoreAction()}
-              <button
-                class="btn btn--sm"
-                type="button"
-                aria-label={removeLabel()}
-                disabled={componentProps.controls.disabled}
-                onClick={remove}
-              >
-                <Icon name="trash" />
-              </button>
-            </>
-          ),
-          {},
-        ),
+      renderActions: () => (
+        <>
+          {restoreAction()}
+          <button
+            class="btn btn--sm"
+            type="button"
+            aria-label={removeLabel()}
+            disabled={componentProps.controls.disabled}
+            onClick={remove}
+          >
+            <Icon name="trash" />
+          </button>
+        </>
+      ),
     });
   };
   return (
@@ -128,14 +131,8 @@ export function ComposerPastedText(componentProps: {
       sizeBytes={componentProps.attachment.sizeBytes}
       scope={componentProps.attachment.id}
       onOpen={open}
-      composerAction={restoreAction()}
-      composerRemoveAction={
-        <AttachmentRemove
-          label={removeLabel()}
-          disabled={componentProps.controls.disabled}
-          onClick={remove}
-        />
-      }
+      composerAction={composerAction}
+      composerRemoveAction={composerRemoveAction}
     />
   );
 }

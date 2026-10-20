@@ -7,9 +7,9 @@ import {
   captureGatewayDeviceRevocation,
   retainGatewayDeviceRevocation,
 } from "../device-revocation.js";
+import { catalogProvider as provider } from "./session-catalog.fixtures.test-support.js";
 import {
   hoisted,
-  provider,
   resetSessionCatalogTestState,
   startCall,
 } from "./session-catalog.test-helpers.js";
@@ -102,7 +102,7 @@ it("expires delivery without releasing native work that ignores cancellation", a
   const before = getActiveGatewayRootWorkCount();
   const root = tryBeginGatewayRootWorkAdmission("catalog-delivery-deadline");
   const owner = new GatewayConnectionWork();
-  const lifetime = new SessionCatalogListLifetime([], ["fixture"]);
+  const lifetime = new SessionCatalogListLifetime([]);
   const release = createDeferredCore();
   const connection = new AbortController();
   const sourceReleased = vi.fn();
@@ -160,7 +160,7 @@ it("caps pending provider keys and refuses late pages from evicted operations", 
   };
   const page = { catalogs: [catalog], instancesByCatalog: new Map([[catalog.id, new Map()]]) };
   const releases = Array.from({ length: 129 }, () => createDeferredCore<typeof page>());
-  const lifetimes = releases.map(() => new SessionCatalogListLifetime([], [catalog.id]));
+  const lifetimes = releases.map(() => new SessionCatalogListLifetime([]));
   const lists = releases.map((release, index) =>
     listSessionCatalogWithinBudget(
       operations,

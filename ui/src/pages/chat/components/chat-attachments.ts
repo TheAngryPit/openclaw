@@ -1,4 +1,3 @@
-// Shared attachment controls for chat and new-session composers.
 import { t } from "../../../i18n/index.ts";
 import type { ChatAttachment } from "../../../lib/chat/chat-types.ts";
 import { showToast } from "../../../lib/toast.ts";
@@ -106,23 +105,32 @@ export function appendChatAttachmentFiles(
   if (unsupported.length) {
     showToast({ message: t("chat.attachments.imagesOnly") });
   }
+  const reads = props.attachmentReads ?? new ChatAttachmentReadLifecycle(() => {});
   const stagedBytes = stagedAttachmentBytes(props);
   const files = admitAttachmentFiles(
     candidates.filter((file) => !unsupported.includes(file)),
     props.attachmentLimits,
     stagedBytes,
-    { resizeImages: true },
+    {
+      resizeImages: true,
+      compressVideos: true,
+      onRejected: (file, message) => reads.reject(file, message),
+    },
   );
   if (files.length === 0) {
     return 0;
   }
-  const reads =
-    props.attachmentReads ?? new ChatAttachmentReadLifecycle(() => props.onRequestUpdate?.());
-  const entries = reads.begin(files, currentAttachments(props), {
-    getAttachments: () => currentAttachments(props),
-    onAttachmentsChange: props.onAttachmentsChange,
-    onPendingReadsChange: props.onPendingReadsChange,
-  });
+  const entries = reads.begin(
+    files,
+    currentAttachments(props),
+    {
+      getAttachments: () => currentAttachments(props),
+      onAttachmentsChange: props.onAttachmentsChange,
+      onPendingReadsChange: props.onPendingReadsChange,
+    },
+    props.attachmentLimits,
+    stagedBytes,
+  );
   entries.forEach((entry, index) => {
     const file = files[index];
     if (file) {
@@ -162,7 +170,12 @@ export function handleChatAttachmentPaste(
     imageFiles.push(pasted.file);
   }
   if (imageFiles.length === 0) {
-    if (options.imagesOnly || !text || text.length <= LARGE_PASTE_TEXT_THRESHOLD) {
+    if (
+      options.imagesOnly ||
+      !text ||
+      text.length <= LARGE_PASTE_TEXT_THRESHOLD ||
+      !(props.getDraft?.() ?? props.draft ?? "")
+    ) {
       return;
     }
     e.preventDefault();

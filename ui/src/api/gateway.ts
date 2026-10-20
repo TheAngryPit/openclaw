@@ -89,7 +89,7 @@ export type GatewayControlUiPluginWidgetKind = NonNullable<HelloOk["controlUiWid
 export type GatewayHelloOk = Omit<HelloOk, "server" | "features" | "snapshot" | "policy"> & {
   server?: Partial<HelloOk["server"]>;
   features?: Partial<HelloOk["features"]>;
-  snapshot?: unknown;
+  snapshot?: Partial<HelloOk["snapshot"]>;
   policy?: Partial<HelloOk["policy"]>;
 };
 
@@ -105,6 +105,7 @@ export type GatewayBrowserClientOptions = GatewayBrowserConnectOptions & {
     willRetry: boolean;
     busy?: boolean;
   }) => void;
+  onConnecting?: () => void;
   onReconnectScheduled?: (delayMs: number) => void;
   onGap?: (info: { expected: number; received: number }) => void;
   onRequestTiming?: (timing: GatewayProtocolRequestTiming) => void;
@@ -142,7 +143,6 @@ export class GatewayBrowserClient {
   private maxPayloadBytes: number | undefined;
   private scopeUpgradeRuntime: Promise<GatewayScopeUpgrade> | null = null;
   private connectionHello: GatewayHelloOk | null = null;
-  inboundActivitySeq = 0;
   private lastInboundActivityAtMs: number | null = null;
   private maxInboundSilenceMs: number | null = null;
   private pendingDeviceTokenRetry = false;
@@ -172,6 +172,7 @@ export class GatewayBrowserClient {
     }
     this.client = new GatewayProtocolClient<ConnectPlan>({
       createSocket: (handlers) => {
+        this.opts.onConnecting?.();
         this.catalogRetryAbort.abort();
         this.catalogRetryAbort = new AbortController();
         this.connectionHello = null;
@@ -234,10 +235,12 @@ export class GatewayBrowserClient {
             error: error instanceof GatewayRequestError ? toGatewayErrorInfo(error) : undefined,
             willRetry: decision.retry,
           };
+          // Known failures must reach the UI before a retry can retire the liveness probe.
           if (
             decision.retry &&
             !context.socketOpened &&
             context.code === BROWSER_WEBSOCKET_CLOSE_CODE &&
+            !context.reason &&
             !info.error
           ) {
             const probe = new AbortController();
@@ -274,7 +277,6 @@ export class GatewayBrowserClient {
       },
       onGap: (info) => this.opts.onGap?.(info),
       onActivity: () => {
-        this.inboundActivitySeq += 1;
         this.lastInboundActivityAtMs = Date.now();
       },
       onRequestTiming: (timing) => this.opts.onRequestTiming?.(timing),
