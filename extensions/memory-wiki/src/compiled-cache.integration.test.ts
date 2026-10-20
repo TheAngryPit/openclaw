@@ -20,7 +20,6 @@ import {
   readMemoryWikiDashboardState,
   MEMORY_WIKI_DASHBOARD_ITEM_LIMIT,
   reconcileMemoryWikiCompiledCacheOwner,
-  resolveMemoryWikiCompiledCacheGeneration,
   resolveMemoryWikiCompiledCacheOwnerId,
   writeMemoryWikiCompiledCache,
   type MemoryWikiCompiledCacheSnapshot,
@@ -31,9 +30,9 @@ import { resolveMemoryWikiAgentConfig, resolveMemoryWikiConfig } from "./config.
 import { buildMemoryWikiImportInsights } from "./import-insights.js";
 import {
   appendMemoryWikiLog,
+  hashMemoryWikiVaultSources,
   loadMemoryWikiValidatedVaultIdentity,
   loadMemoryWikiVaultIdentity,
-  resolveMemoryWikiVaultSourceGeneration,
 } from "./log.js";
 import { renderWikiMarkdown } from "./markdown.js";
 import { createWikiPromptSectionPreparer } from "./prompt-section.js";
@@ -44,6 +43,8 @@ import { activateExistingMemoryWikiVault, initializeMemoryWikiVault } from "./va
 import { buildMemoryWikiOverview } from "./wiki-overview.js";
 
 const { createTempDir, createVault } = createMemoryWikiTestHarness();
+// Publication fixtures below have no vault source pages.
+const EMPTY_SOURCE_GENERATION = hashMemoryWikiVaultSources([]);
 let blobStateDir = "";
 let blobStoreEnv: NodeJS.ProcessEnv = {};
 
@@ -135,7 +136,6 @@ async function publishSnapshot(
   config: ReturnType<typeof resolveMemoryWikiConfig>,
   value: MemoryWikiCompiledCacheSnapshot,
 ): Promise<string> {
-  const generation = resolveMemoryWikiCompiledCacheGeneration(value);
   const publicationId = randomUUID();
   const reservationId = randomUUID();
   const parentPublicationId = (await loadMemoryWikiVaultIdentity(config.vault.path))
@@ -145,7 +145,6 @@ async function publishSnapshot(
     timestamp: "2026-07-17T00:00:00.000Z",
     details: { compiledCacheReservationId: reservationId },
   });
-  const sourceGeneration = await resolveMemoryWikiVaultSourceGeneration(config.vault.path);
   await appendMemoryWikiLog(config.vault.path, {
     type: "compile",
     timestamp: "2026-07-17T00:00:00.000Z",
@@ -153,16 +152,14 @@ async function publishSnapshot(
       compiledCachePublicationId: publicationId,
       compiledCacheParentPublicationId: parentPublicationId,
       compiledCacheReservationId: reservationId,
-      compiledCacheSourceGeneration: sourceGeneration,
+      compiledCacheSourceGeneration: EMPTY_SOURCE_GENERATION,
     },
   });
   await writeMemoryWikiCompiledCache(
     config,
     value,
-    generation,
     publicationId,
     parentPublicationId,
-    async () => {},
     async () => {},
     () => loadMemoryWikiValidatedVaultIdentity(config.vault.path),
   );
@@ -250,12 +247,7 @@ describe("Memory Wiki compiled cache lifecycle", () => {
       const publicationId = randomUUID();
       const reservationId = randomUUID();
       const externalStore = createCacheStore();
-      await externalStore.write(
-        config,
-        compiled,
-        resolveMemoryWikiCompiledCacheGeneration(compiled),
-        publicationId,
-      );
+      await externalStore.write(config, compiled, publicationId);
       await appendMemoryWikiLog(rootDir, {
         type: "compile",
         timestamp: new Date().toISOString(),
@@ -466,18 +458,11 @@ describe("Memory Wiki compiled cache lifecycle", () => {
     await expect(loadMemoryWikiCompiledCache(config)).resolves.toBeNull();
 
     const delayedSnapshot = snapshot("Private delayed pre-restore claim.");
-    await createCacheStore().write(
-      config,
-      delayedSnapshot,
-      resolveMemoryWikiCompiledCacheGeneration(delayedSnapshot),
-      randomUUID(),
-    );
+    await createCacheStore().write(config, delayedSnapshot, randomUUID());
     await expect(loadMemoryWikiCompiledCache(config)).resolves.toBeNull();
 
     const republishedId = randomUUID();
     const staleReservationId = randomUUID();
-    const newerGeneration = resolveMemoryWikiCompiledCacheGeneration(newerSnapshot);
-    const sourceGeneration = await resolveMemoryWikiVaultSourceGeneration(config.vault.path);
     await appendMemoryWikiLog(config.vault.path, {
       type: "compile",
       timestamp: "2026-07-17T00:02:00.000Z",
@@ -485,17 +470,15 @@ describe("Memory Wiki compiled cache lifecycle", () => {
         compiledCachePublicationId: republishedId,
         compiledCacheParentPublicationId: preRestorePublicationId,
         compiledCacheReservationId: staleReservationId,
-        compiledCacheSourceGeneration: sourceGeneration,
+        compiledCacheSourceGeneration: EMPTY_SOURCE_GENERATION,
       },
     });
     await expect(
       writeMemoryWikiCompiledCache(
         config,
         newerSnapshot,
-        newerGeneration,
         republishedId,
         preRestorePublicationId,
-        async () => {},
         async () => {},
         () => loadMemoryWikiValidatedVaultIdentity(config.vault.path),
       ),
@@ -525,16 +508,13 @@ describe("Memory Wiki compiled cache lifecycle", () => {
     });
     const compiledAfterBackup = snapshot("Private content scanned after backup.");
     await fs.writeFile(logPath, backupLog, "utf8");
-    const sourceGeneration = await resolveMemoryWikiVaultSourceGeneration(rootDir);
 
     await expect(
       writeMemoryWikiCompiledCache(
         config,
         compiledAfterBackup,
-        resolveMemoryWikiCompiledCacheGeneration(compiledAfterBackup),
         reservedPublicationId,
         parentPublicationId,
-        async () => {},
         async () => {
           await appendMemoryWikiLog(rootDir, {
             type: "compile",
@@ -543,7 +523,7 @@ describe("Memory Wiki compiled cache lifecycle", () => {
               compiledCachePublicationId: reservedPublicationId,
               compiledCacheParentPublicationId: parentPublicationId,
               compiledCacheReservationId: reservationId,
-              compiledCacheSourceGeneration: sourceGeneration,
+              compiledCacheSourceGeneration: EMPTY_SOURCE_GENERATION,
             },
           });
         },
@@ -566,16 +546,13 @@ describe("Memory Wiki compiled cache lifecycle", () => {
       details: { compiledCacheReservationId: staleReservationId },
     });
     const staleSnapshot = snapshot("stale candidate");
-    const sourceGeneration = await resolveMemoryWikiVaultSourceGeneration(config.vault.path);
     const callbackEntered = createDeferred<void>();
     const releaseCallback = createDeferred<void>();
     const staleWrite = writeMemoryWikiCompiledCache(
       config,
       staleSnapshot,
-      resolveMemoryWikiCompiledCacheGeneration(staleSnapshot),
       stalePublicationId,
       parentPublicationId,
-      async () => {},
       async () => {
         callbackEntered.resolve();
         await releaseCallback.promise;
@@ -586,7 +563,7 @@ describe("Memory Wiki compiled cache lifecycle", () => {
             compiledCachePublicationId: stalePublicationId,
             compiledCacheParentPublicationId: parentPublicationId,
             compiledCacheReservationId: staleReservationId,
-            compiledCacheSourceGeneration: sourceGeneration,
+            compiledCacheSourceGeneration: EMPTY_SOURCE_GENERATION,
           },
         });
       },

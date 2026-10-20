@@ -5,6 +5,7 @@ import {
   buildPluginToolGroups,
   expandPolicyWithPluginGroups,
   expandToolGroups,
+  normalizeToolList,
   normalizeToolPolicyName,
 } from "../tool-policy.js";
 import type { CronCreatorToolAllowlistEntry, CronToolsAllowCaptureRef } from "./cron-tool.types.js";
@@ -41,6 +42,7 @@ const NATIVE_CRON_CREATOR_CAPABILITIES: ReadonlySet<string> = new Set([
   "process",
   "web_search",
   "web_fetch",
+  "ask_user",
 ]);
 
 /** Fails closed on any backend-projected name outside the exact canonical vocabulary. */
@@ -288,7 +290,7 @@ function capCronJobToolsAllow(params: {
   const creatorToolsAllow = normalizeCronCreatorToolsAllow(params.creatorToolAllowlist);
   const requestedRaw = writesToolsAllow ? params.payload.toolsAllow : params.defaultToolsAllow;
   const requestedToolsAllow = Array.isArray(requestedRaw)
-    ? expandToolGroups(requestedRaw.filter((entry): entry is string => typeof entry === "string"))
+    ? normalizeToolList(requestedRaw.filter((entry): entry is string => typeof entry === "string"))
     : ["*"];
   if (requestedToolsAllow.includes("*")) {
     // A default agent turn gets what its owner conversation gets, like operator jobs.
@@ -307,27 +309,30 @@ function capCronJobToolsAllow(params: {
     }
     return;
   }
-  if (requestedToolsAllow.length === 0 || creatorToolsAllow.length === 0) {
-    params.payload.toolsAllow = [];
-    delete params.payload.toolsAllowIsDefault;
-    return;
-  }
-
   const pluginGroups = buildPluginToolGroups({
     tools: creatorToolsAllow,
     toolMeta: (tool) => (tool.pluginId ? { pluginId: tool.pluginId } : undefined),
   });
-  const requestedPolicy = expandPolicyWithPluginGroups(
-    { allow: requestedToolsAllow },
-    pluginGroups,
+  const selected = new Set(
+    requestedToolsAllow.flatMap((entry) => {
+      const matches = createToolPolicyMatcher(
+        expandPolicyWithPluginGroups({ allow: [entry] }, pluginGroups),
+      );
+      const tools = creatorToolsAllow.filter(
+        (tool) => matches(tool.name) || (tool.aliasName !== undefined && matches(tool.aliasName)),
+      );
+      if (tools.length === 0) {
+        throw new Error(
+          `Requested automation tool ${JSON.stringify(entry)} cannot be carried from this creator turn. No automation changes were saved. Use a supported tool name and creator runtime, or explicitly remove it from toolsAllow.`,
+        );
+      }
+      return tools;
+    }),
   );
-  const matches = createToolPolicyMatcher(requestedPolicy);
   // A creator tool matches under its canonical name or the runtime alias the
   // creating surface presented; the persisted cap always holds canonical names.
   params.payload.toolsAllow = creatorToolsAllow
-    .filter(
-      (tool) => matches(tool.name) || (tool.aliasName !== undefined && matches(tool.aliasName)),
-    )
+    .filter((tool) => selected.has(tool))
     .map((tool) => tool.name);
   delete params.payload.toolsAllowIsDefault;
 }
@@ -360,8 +365,11 @@ export function planCronJobUpdatePatch(params: {
   creatorAuthorityComplete?: boolean;
   creatorHoldsRuntimeAuthority?: boolean;
 }): CronJobUpdatePatchPlan {
-  const patch = structuredClone(params.patch);
-  const payload = isRecord(patch.payload) ? patch.payload : undefined;
+  const patch = { ...params.patch };
+  const payload = isRecord(patch.payload) ? { ...patch.payload } : undefined;
+  if (payload) {
+    patch.payload = payload;
+  }
   const explicitPayloadKind = readCronPayloadKind(payload);
   const explicitToolsAllow = classifyExplicitToolsAllow(payload);
   if (payload === undefined && !Object.hasOwn(patch, "trigger")) {

@@ -21,7 +21,6 @@ import {
   GRAPH_ROOT,
   type MSTeamsAttachmentDownloadLogger,
   type MSTeamsAttachmentFetchPolicy,
-  type MSTeamsAttachmentResolveFn,
   normalizeContentType,
   resolveMSTeamsMediaKind,
   resolveAttachmentFetchPolicy,
@@ -85,7 +84,6 @@ export function buildMSTeamsGraphMessageUrl(params: {
 
 type GraphMediaRequest = {
   accessToken: string;
-  fetchFn?: typeof fetch;
   ssrfPolicy?: SsrFPolicy;
   deadline?: MSTeamsRequestDeadline;
 };
@@ -98,7 +96,6 @@ async function withGraphMediaResponse<T>(
 ): Promise<T> {
   const { response, release } = await fetchWithSsrFGuard({
     url,
-    fetchImpl: params.fetchFn ?? fetch,
     init: {
       headers: ensureUserAgentHeader({ Authorization: `Bearer ${params.accessToken}` }),
     },
@@ -148,10 +145,9 @@ function normalizeGraphAttachment(att: MSTeamsAttachmentLike): MSTeamsAttachment
   }
   return {
     id: att.id ?? undefined,
-    contentType: normalizeContentType(att.contentType) ?? undefined,
+    contentType: normalizeContentType(att.contentType),
     contentUrl: att.contentUrl ?? undefined,
     name: att.name ?? undefined,
-    thumbnailUrl: att.thumbnailUrl ?? undefined,
     content,
   };
 }
@@ -227,8 +223,6 @@ export async function downloadMSTeamsGraphMedia(params: {
   maxBytes: number;
   allowHosts?: string[];
   authAllowHosts?: string[];
-  fetchFn?: typeof fetch;
-  resolveFn?: MSTeamsAttachmentResolveFn;
   deadline?: MSTeamsRequestDeadline;
   /** When true, embeds original filename in stored path for later extraction. */
   preserveFilenames?: boolean;
@@ -267,7 +261,7 @@ export async function downloadMSTeamsGraphMedia(params: {
     });
   } catch (err) {
     logGraphFailure("token acquisition", err);
-    return { media: [], messageUrl, tokenError: true };
+    return { media: [], tokenError: true };
   }
 
   let messageAttachments: MSTeamsAttachmentLike[] = [];
@@ -325,7 +319,6 @@ export async function downloadMSTeamsGraphMedia(params: {
     accessToken,
     messageUrl,
     maxBytes: params.maxBytes,
-    fetchFn: params.fetchFn,
     ssrfPolicy,
     logger: params.logger,
     deadline: params.deadline,
@@ -345,8 +338,6 @@ export async function downloadMSTeamsGraphMedia(params: {
       tokenProvider: params.tokenProvider,
       allowHosts: policy.allowHosts,
       authAllowHosts: policy.authAllowHosts,
-      fetchFn: params.fetchFn,
-      resolveFn: params.resolveFn,
       deadline: params.deadline,
       preserveFilenames: params.preserveFilenames,
       logger: params.logger,
@@ -364,6 +355,5 @@ export async function downloadMSTeamsGraphMedia(params: {
     attachmentCount: filteredAttachments.length + sharePointMedia.length,
     hostedStatus: hosted.status,
     attachmentStatus: messageStatus,
-    messageUrl,
   };
 }

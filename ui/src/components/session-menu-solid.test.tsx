@@ -2,6 +2,7 @@
 
 import { expect, it, vi } from "vitest";
 import { focusChatComposerFromPrintableKeydown } from "../pages/chat/chat-pane-shared.ts";
+import { mountSolid } from "../test-helpers/mount-solid.ts";
 import {
   containers,
   menuItem,
@@ -12,26 +13,46 @@ import {
   settleSessionMenu,
 } from "../test-helpers/session-menu.ts";
 import { createSessionOwnerMenuHarness } from "../test-helpers/session-owner-menu.ts";
+import { createSolidApplicationContextProvider } from "../test-helpers/solid-application-context.tsx";
 import { waitForSolid } from "../test-helpers/solid-settle.ts";
+import { EMPTY_SESSION_MENU_DATA } from "./session-menu-actions.ts";
+import { SessionMenu } from "./session-menu-solid.tsx";
 
 it("keeps advertised native menu shortcuts ahead of composer autotype", async () => {
-  const actions: string[] = [];
+  const actions: unknown[] = [];
   const host = await mountMenu({
     archiveAllowed: true,
-    onAction: (action) => actions.push(action.kind),
+    groups: ["Research", "Personal"],
+    onAction: (action) => actions.push(action),
   });
   const root = host.parentElement!;
   const composer = root.appendChild(document.createElement("div"));
   composer.className = "agent-chat__composer-combobox";
   const input = composer.appendChild(document.createElement("textarea"));
-  const capture = (event: KeyboardEvent) => focusChatComposerFromPrintableKeydown(root, event);
+  const capture = (event: KeyboardEvent) =>
+    focusChatComposerFromPrintableKeydown(root, event, input);
   document.addEventListener("keydown", capture, true);
   try {
     menuItem(host, "Pin session").focus();
     document.activeElement!.dispatchEvent(
       new KeyboardEvent("keydown", { key: "a", bubbles: true, cancelable: true, composed: true }),
     );
-    await waitForSolid(() => expect(actions).toEqual(["toggle-archived"]));
+    await waitForSolid(() => expect(actions).toEqual([{ kind: "toggle-archived" }]));
+    expect(document.activeElement).not.toBe(input);
+
+    host.anchor = { x: 100, y: 100 };
+    await settleSessionMenu(host);
+    const group = await openSubmenu(host, "Move to group");
+    menuItem(group, "Personal").focus();
+    document.activeElement!.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "1", bubbles: true, cancelable: true, composed: true }),
+    );
+    await waitForSolid(() =>
+      expect(actions).toEqual([
+        { kind: "toggle-archived" },
+        { kind: "move-to-group", category: "Research" },
+      ]),
+    );
     expect(document.activeElement).not.toBe(input);
 
     host.anchor = { x: 100, y: 100 };
@@ -76,16 +97,21 @@ it("updates registered menu props and retires its keyboard owner when unmounted"
   expect(calls).toEqual(["close", "delete"]);
 });
 
-it("preserves focused rows and an open owner search across external updates", async () => {
+it("preserves focus and owner search with the Solid application provider", async () => {
   const { context } = createSessionOwnerMenuHarness();
-  const host = await mountMenu({
-    context,
-    session: { label: "First title" },
-    archiveAllowed: true,
-  });
+  const provider = createSolidApplicationContextProvider(context);
+  const mounted = mountSolid(
+    () => (
+      <SessionMenu session={{ ...EMPTY_SESSION_MENU_DATA, label: "First title" }} archiveAllowed />
+    ),
+    { wrapper: provider.wrapper },
+  );
+  const host = mounted.container.querySelector("openclaw-session-menu")!;
   await waitForSolid(() => expect(menuItemLabels(host)).toContain("Assign to…"));
+  await settleSessionMenu(host);
   const pin = menuItem(host, "Pin session");
   pin.focus();
+  expect(document.activeElement).toBe(pin);
   host.session = { ...host.session, label: "Fresh title" };
   await settleSessionMenu(host);
   expect(menuItem(host, "Pin session")).toBe(pin);

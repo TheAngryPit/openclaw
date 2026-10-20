@@ -1,7 +1,5 @@
 .session-menu > .oc-menu {
-  padding: var(--menu-padding);
   border: 1px solid var(--overlay-border);
-  border-radius: var(--menu-radius);
   background: var(--bg-elevated);
   box-shadow: var(--overlay-shadow);
   min-width: 224px;
@@ -37,6 +35,8 @@
 
 .session-menu__item,
 .sidebar-session-sort-menu__item {
+  --oc-menu-item-padding-inline: 8px;
+
   box-sizing: border-box;
   display: flex;
   align-items: center;

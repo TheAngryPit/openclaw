@@ -1070,13 +1070,8 @@ final class NodeAppModel {
         self.apnsDeviceTokenHex = UserDefaults.standard.string(forKey: Self.apnsDeviceTokenUserDefaultsKey)
         restorePersistedWatchExecApprovalBridgeState()
         GatewayDiagnostics.bootstrap()
-        GatewayDiagnostics.log("node app model: init start")
         self.watchMessagingService.setStatusHandler { [weak self] status in
             Task { @MainActor in
-                GatewayDiagnostics.log(
-                    "node app model: watch status callback "
-                        + "reachable=\(status.reachable) activation=\(status.activationState) "
-                        + "backgrounded=\(self?.isBackgrounded ?? false)")
                 await self?.handleWatchMessagingStatusChanged(status)
             }
         }
@@ -1100,8 +1095,6 @@ final class NodeAppModel {
         self.watchMessagingService.setExecApprovalSnapshotRequestHandler { [weak self] event in
             Task { @MainActor in
                 guard let self else { return }
-                GatewayDiagnostics.log(
-                    "node app model: watch snapshot request id=\(event.requestId) backgrounded=\(self.isBackgrounded)")
                 // A correlated reply is an acknowledgment of canonical readback, not
                 // merely receipt. Always reconcile before echoing the Watch request.
                 await self.refreshWatchExecApprovalSnapshotOnDemand(
@@ -1111,11 +1104,9 @@ final class NodeAppModel {
                     heldApprovals: event.heldApprovals)
             }
         }
-        self.watchMessagingService.setAppSnapshotRequestHandler { [weak self] event in
+        self.watchMessagingService.setAppSnapshotRequestHandler { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                GatewayDiagnostics.log(
-                    "node app model: watch app snapshot request id=\(event.requestId)")
                 await self.flushQueuedWatchMessagesIfAvailable()
                 await self.syncWatchAppSnapshot(reason: "watch_app_request", includeChat: true)
             }
@@ -1151,7 +1142,6 @@ final class NodeAppModel {
 
     func setScenePhase(_ phase: ScenePhase) {
         let keepTalkActive = UserDefaults.standard.bool(forKey: "talk.background.enabled")
-        GatewayDiagnostics.log("node app model: scene phase=\(String(describing: phase))")
         if phase != .active {
             // Foreground probes belong to the active admission that started them;
             // retire that ownership before inactive/background work can be superseded.
@@ -4187,7 +4177,6 @@ extension NodeAppModel {
         }
         self.admitTalkAfterSessionHydration()
         await self.talkMode.prefetchRealtimeSessionIfReady(
-            reason: "operator_connected",
             shouldApply: shouldContinue)
         guard shouldContinue() else { return }
         await refreshShareRouteFromGateway(shouldApply: shouldContinue)
@@ -5548,10 +5537,6 @@ extension NodeAppModel {
 
     private func handleWatchMessagingStatusChanged(_ status: WatchMessagingStatus) async {
         self.watchMessagingStatus = status
-        GatewayDiagnostics.log(
-            "watch exec approval: status changed "
-                + "reachable=\(status.reachable) activation=\(status.activationState) "
-                + "backgrounded=\(self.isBackgrounded)")
         guard status.supported, status.paired, status.appInstalled else { return }
         guard status.reachable || status.activationState == "activated" else { return }
         let reason = status.reachable ? "watch_reachable" : "watch_activated"
@@ -5593,9 +5578,6 @@ extension NodeAppModel {
             key: Self.execApprovalPushKey,
             sortedBy: Self.execApprovalPushSortsBefore)
         else { return }
-        GatewayDiagnostics.log(
-            "watch exec approval: queued recovery "
-                + "id=\(push.approvalId) pendingCount=\(self.pendingWatchExecApprovalRecoveryPushes.count)")
         self.persistWatchExecApprovalBridgeState()
     }
 
@@ -5605,9 +5587,6 @@ extension NodeAppModel {
             from: &self.pendingWatchExecApprovalRecoveryPushes,
             key: Self.execApprovalPushKey)
         else { return }
-        GatewayDiagnostics.log(
-            "watch exec approval: cleared recovery "
-                + "id=\(push.approvalId) pendingCount=\(self.pendingWatchExecApprovalRecoveryPushes.count)")
         self.persistWatchExecApprovalBridgeState()
     }
 
@@ -5757,8 +5736,6 @@ extension NodeAppModel {
             resetResolutionAttemptId: resetResolutionAttemptId)
         do {
             _ = try await self.watchMessagingService.sendExecApprovalPrompt(message)
-            self.watchExecApprovalLogger.debug(
-                "watch exec approval prompt sent id=\(prompt.id, privacy: .public) reason=\(reason, privacy: .public)")
         } catch {
             self.watchExecApprovalLogger
                 .error(
@@ -5902,10 +5879,6 @@ extension NodeAppModel {
         guard shouldContinue() else { return }
         let deliveryGeneration = self.gatewayConnectGeneration
         self.pruneExpiredWatchExecApprovalPrompts()
-        GatewayDiagnostics.log(
-            "watch exec approval: sync snapshot start "
-                + "reason=\(reason) cacheCount=\(self.watchExecApprovalPromptsByID.count) "
-                + "backgrounded=\(self.isBackgrounded)")
         let approvals = self.watchExecApprovalPromptsByID.values
             .filter(self.isWatchExecApprovalPromptCurrent)
             .sorted(by: Self.watchExecApprovalPromptSortsBefore)
@@ -5924,12 +5897,6 @@ extension NodeAppModel {
         do {
             guard shouldContinue() else { return }
             _ = try await self.watchMessagingService.syncExecApprovalSnapshot(message)
-            GatewayDiagnostics.log(
-                "watch exec approval: sync snapshot sent reason=\(reason) count=\(approvals.count)")
-            self.watchExecApprovalLogger
-                .debug("watch approval snapshot reason=\(reason, privacy: .public)")
-            self.watchExecApprovalLogger.debug(
-                "watch approval snapshot count=\(approvals.count, privacy: .public)")
             if deliveryGeneration != self.gatewayConnectGeneration {
                 await self.syncWatchExecApprovalSnapshot(reason: "\(reason)_route_repair")
             }
@@ -6143,8 +6110,6 @@ extension NodeAppModel {
     }
 
     private func handleWatchAppCommand(_ event: WatchAppCommandEvent) async {
-        GatewayDiagnostics.log(
-            "watch app command: handle id=\(event.commandId) command=\(event.command.rawValue)")
         if event.command != .sendChat,
            !self.watchAppCommandTargetsCurrentGatewayIfTagged(event)
         {
@@ -6386,10 +6351,6 @@ extension NodeAppModel {
         do {
             guard shouldContinue() else { return }
             _ = try await self.watchMessagingService.syncAppSnapshot(message)
-            GatewayDiagnostics.log(
-                "watch app snapshot: sent reason=\(reason) "
-                    + "connected=\(message.gatewayConnected) approvals=\(message.pendingApprovalCount) "
-                    + "chatItems=\(message.chatItems?.count ?? -1)")
             if deliveryGeneration != self.gatewayConnectGeneration {
                 await self.syncWatchAppSnapshot(reason: "\(reason)_route_repair")
             }
@@ -6405,7 +6366,6 @@ extension NodeAppModel {
         requestGatewayStableID: String?,
         heldApprovals: [WatchExecApprovalSnapshotRequestItem]) async
     {
-        GatewayDiagnostics.log("watch exec approval: refresh on demand start reason=\(reason)")
         let currentGatewayStableID = self.currentExecApprovalGatewayStableID()
         let requestOwnerMatches = GatewayStableIdentifier.matches(
             currentGatewayStableID,
@@ -6428,7 +6388,6 @@ extension NodeAppModel {
             requestId: requestOwnerMatches ? requestId : nil,
             requestGatewayStableID: requestOwnerMatches ? requestGatewayStableID : nil)
         await self.syncWatchAppSnapshot(reason: "\(reason)_app", includeChat: true)
-        GatewayDiagnostics.log("watch exec approval: refresh on demand end reason=\(reason)")
     }
 
     @discardableResult
@@ -6658,18 +6617,7 @@ extension NodeAppModel {
             candidateIDs: approvalPushes.map(\.approvalId),
             cachedApprovalIDs: self.watchExecApprovalPromptsByID.keys.map(\.rawValue))
             .compactMap(ExecApprovalIdentifier.key))
-        let missingApprovalIDText = missingApprovalIDs
-            .map(\.rawValue)
-            .sorted(by: ExecApprovalIdentifier.sortsBefore)
-            .joined(separator: ",")
-        GatewayDiagnostics.log(
-            "watch exec approval: hydrate candidates "
-                + "reason=\(reason) ids=\(approvalPushes.map(\.approvalId).joined(separator: ",")) "
-                + "missing=\(missingApprovalIDText) "
-                + "cached=\(self.watchExecApprovalPromptsByID.count)")
         guard !missingApprovalIDs.isEmpty else {
-            self.watchExecApprovalLogger.debug(
-                "watch exec approval hydrate skipped reason=\(reason, privacy: .public): no missing approval ids")
             return true
         }
 
@@ -6678,8 +6626,6 @@ extension NodeAppModel {
             where ExecApprovalIdentifier.key(push.approvalId).map(missingApprovalIDs.contains) == true
         {
             let approvalId = push.approvalId
-            GatewayDiagnostics.log(
-                "watch exec approval: hydrate fetch start id=\(approvalId) reason=\(reason)")
             let operatorRoute: GatewayNodeSessionRoute
             switch await self.validateExecApprovalPushRoute(push, sourceReason: reason) {
             case let .validated(context):
@@ -6704,7 +6650,6 @@ extension NodeAppModel {
                         notificationCenter: self.notificationCenter)
                     continue
                 }
-                GatewayDiagnostics.log("watch exec approval: hydrate fetch loaded id=\(approvalId)")
                 self.upsertWatchExecApprovalPrompt(prompt)
             case let .terminal(terminal):
                 guard terminal.kind == push.kind else {
@@ -6714,8 +6659,6 @@ extension NodeAppModel {
                         notificationCenter: self.notificationCenter)
                     continue
                 }
-                GatewayDiagnostics.log(
-                    "watch exec approval: hydrate fetch terminal id=\(approvalId) status=\(terminal.verdict.status)")
                 self.removePendingWatchExecApprovalRecoveryPush(push)
                 await ApprovalNotificationBridge.removeNotifications(
                     for: push,
@@ -6749,7 +6692,6 @@ extension NodeAppModel {
         var seen = Set(pushes.compactMap(Self.execApprovalPushKey))
 
         let delivered = await notificationCenter.deliveredNotifications()
-        GatewayDiagnostics.log("watch exec approval: delivered notifications count=\(delivered.count)")
         for snapshot in delivered {
             guard let push = ApprovalNotificationBridge.parseRequestedPush(userInfo: snapshot.userInfo, kind: .exec),
                   let pushKey = Self.execApprovalPushKey(push),
@@ -7466,11 +7408,8 @@ extension NodeAppModel {
                     GatewayDiagnostics.pushRelay.skipped("operator_offline")
                     return
                 }
-                GatewayDiagnostics.pushRelay.stage("gateway identity request start")
                 gatewayIdentity = try await self.fetchPushRelayGatewayIdentity()
                 guard shouldContinue() else { return }
-                GatewayDiagnostics.pushRelay.stage("gateway identity request complete")
-                GatewayDiagnostics.pushRelay.stage("gateway registration payload start")
             } else {
                 gatewayIdentity = nil
             }
@@ -8143,8 +8082,6 @@ extension NodeAppModel {
         }
         let readbackFence = self.execApprovalReadbackFence(approvalID: approvalId)
         let fetchReason = Self.trimmedOrNil(sourceReason) ?? "direct"
-        GatewayDiagnostics.log(
-            "watch exec approval: fetch prompt start id=\(approvalId) reason=\(fetchReason)")
         #if DEBUG
         if let testExecApprovalPromptFetchHandler,
            let gatewayStableID = self.currentExecApprovalGatewayStableID()
@@ -8195,13 +8132,11 @@ extension NodeAppModel {
                 ? Self.decodeLegacyExecApprovalGet(
                     response,
                     approvalId: approvalId,
-                    gatewayStableID: context.gatewayStableID,
-                    fetchReason: fetchReason)
+                    gatewayStableID: context.gatewayStableID)
                 : Self.decodeUnifiedExecApprovalGet(
                     response,
                     approvalId: approvalId,
-                    gatewayStableID: context.gatewayStableID,
-                    fetchReason: fetchReason)
+                    gatewayStableID: context.gatewayStableID)
             return self.recordCanonicalExecApprovalFetchOutcome(outcome, fence: readbackFence)
         } catch is CancellationError {
             return .failed(message: "route_changed")
@@ -8232,8 +8167,7 @@ extension NodeAppModel {
     private static func decodeUnifiedExecApprovalGet(
         _ response: Data,
         approvalId: String,
-        gatewayStableID: String,
-        fetchReason: String) -> ExecApprovalPromptFetchOutcome
+        gatewayStableID: String) -> ExecApprovalPromptFetchOutcome
     {
         do {
             let result = try JSONDecoder().decode(ApprovalGetResult.self, from: response)
@@ -8246,8 +8180,6 @@ extension NodeAppModel {
                 else {
                     return .failed(message: "invalid_prompt_payload")
                 }
-                GatewayDiagnostics.log(
-                    "watch exec approval: fetch prompt loaded id=\(approvalId) reason=\(fetchReason)")
                 return .loaded(prompt)
             case .allowed, .denied, .expired, .cancelled:
                 guard let terminal = Self.makeExecApprovalTerminalResult(
@@ -8256,9 +8188,6 @@ extension NodeAppModel {
                 else {
                     return .failed(message: "invalid_terminal_payload")
                 }
-                GatewayDiagnostics.log(
-                    "watch exec approval: fetch terminal id=\(approvalId) "
-                        + "status=\(terminal.verdict.status) reason=\(fetchReason)")
                 return .terminal(terminal)
             }
         } catch {
@@ -8269,8 +8198,7 @@ extension NodeAppModel {
     private static func decodeLegacyExecApprovalGet(
         _ response: Data,
         approvalId: String,
-        gatewayStableID: String,
-        fetchReason: String) throws -> ExecApprovalPromptFetchOutcome
+        gatewayStableID: String) throws -> ExecApprovalPromptFetchOutcome
     {
         let result = try JSONDecoder().decode(LegacyExecApprovalGetResult.self, from: response)
         guard let prompt = Self.makeExecApprovalPrompt(
@@ -8280,8 +8208,6 @@ extension NodeAppModel {
         else {
             return .failed(message: "invalid_prompt_payload")
         }
-        GatewayDiagnostics.log(
-            "watch exec approval: legacy fetch loaded id=\(approvalId) reason=\(fetchReason)")
         return .loaded(prompt)
     }
 
@@ -8817,16 +8743,10 @@ extension NodeAppModel {
         else { return false }
         let reconnectReason = Self.trimmedOrNil(reason) ?? "watch_request"
         if self.operatorConnected {
-            GatewayDiagnostics.log(
-                "watch exec approval: watch_request_reconnect_connected "
-                    + "reason=\(reconnectReason) phase=already_connected")
             return true
         }
 
         guard self.isBackgrounded else {
-            GatewayDiagnostics.log(
-                "watch exec approval: watch_request_reconnect_begin "
-                    + "reason=\(reconnectReason) backgrounded=false strategy=default")
             let connected = await ensureOperatorApprovalConnection(timeoutMs: timeoutMs)
             guard self.isCurrentGatewayRoute(
                 generation: routeGeneration,
@@ -8852,13 +8772,8 @@ extension NodeAppModel {
             return false
         }
 
-        GatewayDiagnostics.log(
-            "watch exec approval: watch_request_reconnect_begin reason=\(reconnectReason) backgrounded=true")
         let leaseSeconds = min(45.0, max(15.0, Double(max(timeoutMs, 1000)) / 1000.0 + 8.0))
         self.grantBackgroundReconnectLease(seconds: leaseSeconds, reason: "watch_review_\(reconnectReason)")
-        GatewayDiagnostics.log(
-            "watch exec approval: watch_request_reconnect_lease_granted "
-                + "reason=\(reconnectReason) seconds=\(leaseSeconds)")
 
         let hadReconnectLoop = self.operatorGatewayTask != nil
         let canStartReconnectLoop = hadReconnectLoop || cfg.personalTailscaleAuthentication ||
@@ -8876,14 +8791,8 @@ extension NodeAppModel {
         }
 
         self.ensureOperatorReconnectLoopIfNeeded()
-        GatewayDiagnostics.log(
-            "watch exec approval: watch_request_reconnect_loop_\(hadReconnectLoop ? "reused" : "started") "
-                + "reason=\(reconnectReason)")
 
         let initialWaitMs = min(2500, max(750, timeoutMs / 4))
-        GatewayDiagnostics.log(
-            "watch exec approval: watch_request_reconnect_wait "
-                + "reason=\(reconnectReason) phase=initial timeoutMs=\(initialWaitMs)")
         if await self.waitForGatewayConnection(
             timeoutMs: initialWaitMs,
             pollMs: 200,
@@ -8893,9 +8802,6 @@ extension NodeAppModel {
                 generation: routeGeneration,
                 stableID: gatewayStableID)
             else { return false }
-            GatewayDiagnostics.log(
-                "watch exec approval: watch_request_reconnect_connected "
-                    + "reason=\(reconnectReason) phase=initial")
             return true
         }
 
@@ -8903,8 +8809,6 @@ extension NodeAppModel {
             generation: routeGeneration,
             stableID: gatewayStableID)
         else { return false }
-        GatewayDiagnostics.log(
-            "watch exec approval: watch_request_reconnect_restart reason=\(reconnectReason)")
         self.operatorGatewayTask?.cancel()
         self.operatorGatewayTask = nil
         await self.operatorGateway.disconnect()
@@ -8922,9 +8826,6 @@ extension NodeAppModel {
             sessionBox: sessionBox)
 
         let remainingWaitMs = max(250, timeoutMs - initialWaitMs)
-        GatewayDiagnostics.log(
-            "watch exec approval: watch_request_reconnect_wait "
-                + "reason=\(reconnectReason) phase=restart timeoutMs=\(remainingWaitMs)")
         let connected = await self.waitForGatewayConnection(
             timeoutMs: remainingWaitMs,
             pollMs: 200,
@@ -9519,8 +9420,7 @@ extension NodeAppModel {
             return Self.decodeUnifiedExecApprovalGet(
                 response,
                 approvalId: approvalID,
-                gatewayStableID: gatewayStableID,
-                fetchReason: "test")
+                gatewayStableID: gatewayStableID)
         }
     }
 
@@ -9603,8 +9503,7 @@ extension NodeAppModel {
             return Self.decodeUnifiedExecApprovalGet(
                 response,
                 approvalId: approvalID,
-                gatewayStableID: gatewayStableID,
-                fetchReason: "test")
+                gatewayStableID: gatewayStableID)
         }
     }
 

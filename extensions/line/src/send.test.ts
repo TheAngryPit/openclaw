@@ -310,9 +310,7 @@ describe("LINE send helpers", () => {
     await sendModule.pushMessagesLine("U123", [message] as never, { cfg: LINE_TEST_CFG });
     await sendModule.replyMessageLine("reply-token", [message] as never, {
       cfg: LINE_TEST_CFG,
-      verbose: true,
     });
-    expect(logVerboseMock).toHaveBeenCalledWith("line: replied with 1 messages");
 
     const pushed = pushMessageMock.mock.calls[0]?.[0] as {
       messages: Array<{ contents: Record<string, unknown> }>;
@@ -486,7 +484,6 @@ describe("LINE send helpers", () => {
     });
     const result = await sendModule.pushMessageLine("line:user:U123", "Image caption", {
       cfg: LINE_TEST_CFG,
-      verbose: true,
       mediaUrl: "https://example.com/original.jpg",
       mediaKind: "image",
     });
@@ -507,7 +504,6 @@ describe("LINE send helpers", () => {
       accountId: "default",
       direction: "outbound",
     });
-    expect(logVerboseMock).toHaveBeenCalledWith("line: pushed message to U123");
     expect(result).toEqual(expectedMediaSendResult("U123", ["push-first", "push-second"], 2));
   });
 
@@ -719,7 +715,7 @@ describe("LINE send helpers", () => {
     await sendModule.pushTextMessageWithQuickReplies(
       "U-quick",
       "Pick one",
-      [label, ...Array.from({ length: 19 }, (_, index) => `Choice ${index + 1}`)],
+      ["", "  ", label, ...Array.from({ length: 19 }, (_, index) => `Choice ${index + 1}`)],
       { cfg: LINE_TEST_CFG },
     );
 
@@ -839,6 +835,30 @@ describe("LINE send helpers", () => {
     expect(textSpy).not.toHaveBeenCalled();
     expect(tracked.wasCanceled()).toBe(true);
   });
+
+  it.each(["batch", "flex"] as const)(
+    "does not log reflected message content on a rejected %s push",
+    async (kind) => {
+      const text = "synthetic private message reflected by LINE";
+      lineFetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ message: text }), {
+          status: 400,
+          statusText: "Bad Request",
+          headers: { "content-type": "application/json" },
+        }),
+      );
+
+      const caught = await captureError(() =>
+        kind === "batch"
+          ? sendModule.pushMessagesLine("U123", [{ type: "text", text }], { cfg: LINE_TEST_CFG })
+          : sendModule.pushFlexMessage("U123", text, { type: "bubble" }, { cfg: LINE_TEST_CFG }),
+      );
+
+      expect(caught).toBeInstanceOf(HTTPFetchError);
+      expect(caught).toMatchObject({ status: 400, body: JSON.stringify({ message: text }) });
+      expect(logVerboseMock).not.toHaveBeenCalled();
+    },
+  );
 
   it("masks a reflected Authorization token through a real HTTP reflector", async () => {
     const token = "line-channel-access-token-xyz0123456789abcdef";

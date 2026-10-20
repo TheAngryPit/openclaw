@@ -994,17 +994,9 @@ extension GatewayNodeSession {
             return
         }
         guard evt.event == "node.invoke.request" else { return }
-        self.logger.info("node invoke request received")
         guard let payload = evt.payload else { return }
         do {
             let request: NodeInvokeRequestPayload = try self.decodeEventPayload(from: payload)
-            let timeoutLabel = request.timeoutMs.map(String.init) ?? "none"
-            self.logger.info(
-                """
-                node invoke request decoded id=\(request.id, privacy: .public) \
-                command=\(request.command, privacy: .public) \
-                timeoutMs=\(timeoutLabel, privacy: .public)
-                """)
             guard let onInvoke else { return }
             let route = GatewayNodeSessionRoute(
                 channelGeneration: channelGeneration,
@@ -1065,7 +1057,6 @@ extension GatewayNodeSession {
                 socketGeneration: socketGeneration)
             return
         }
-        self.logger.info("node invoke executing id=\(request.id, privacy: .public)")
         let bridgeRequest = BridgeInvokeRequest(
             id: request.id,
             command: request.command,
@@ -1095,8 +1086,6 @@ extension GatewayNodeSession {
         guard self.isCurrentRoute(route),
               self.channel === channel
         else { return }
-        self.logger.info(
-            "node invoke completed id=\(request.id, privacy: .public) ok=\(response.ok, privacy: .public)")
         await self.sendInvokeResult(
             request: request,
             response: response,
@@ -1460,8 +1449,6 @@ extension GatewayNodeSession {
         channel: GatewayChannelActor,
         socketGeneration: UInt64) async
     {
-        self.logger.info(
-            "node invoke result sending id=\(request.id, privacy: .public) ok=\(response.ok, privacy: .public)")
         var params: [String: AnyCodable] = [
             "id": AnyCodable(request.id),
             "nodeId": AnyCodable(request.nodeId),

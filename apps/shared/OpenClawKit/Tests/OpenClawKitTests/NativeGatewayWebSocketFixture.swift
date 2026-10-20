@@ -66,9 +66,14 @@ final class NativeGatewayWebSocketFixture: @unchecked Sendable {
         self.queue.sync { self.receivedRoles }
     }
 
+    var connectRoles: AsyncStream<String> {
+        self.connectRoleEvents.stream
+    }
+
     private var httpResponseHandler: HTTPResponseHandler?
     private var receivedRequests: [Request] = []
     private var receivedRoles: [String] = []
+    private let connectRoleEvents = AsyncStream<String>.makeStream()
     private var pendingHTTP: [Int: (Request, HTTPResponse)] = [:]
 
     private struct Client {
@@ -320,6 +325,7 @@ final class NativeGatewayWebSocketFixture: @unchecked Sendable {
         self.queue.sync {
             guard !self.stopped else { return }
             self.stopped = true
+            self.connectRoleEvents.continuation.finish()
             self.listener.cancel()
             for id in Array(self.rpcWaiters.keys) {
                 self.removeRPCWaiter(id)?.continuation.finish(throwing: CancellationError())
@@ -535,8 +541,9 @@ final class NativeGatewayWebSocketFixture: @unchecked Sendable {
             return
         }
         let auth = params?["auth"] as? [String: Any]
+        let role = params?["role"] as? String ?? ""
         self.connectDeviceIDs.append((params?["device"] as? [String: Any])?["id"] as? String)
-        self.receivedRoles.append(params?["role"] as? String ?? "")
+        self.receivedRoles.append(role)
         self.connectAuth.append(ConnectAuth(
             role: params?["role"] as? String,
             token: auth?["token"] as? String,
@@ -544,6 +551,7 @@ final class NativeGatewayWebSocketFixture: @unchecked Sendable {
             deviceToken: auth?["deviceToken"] as? String))
         client.phase = .open
         self.clients[index] = client
+        self.connectRoleEvents.continuation.yield(role)
         if let failure = self.connectFailures[index] {
             self.sendConnectFailure(id: id, failure: failure, index: index)
         } else {

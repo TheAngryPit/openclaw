@@ -23,7 +23,7 @@ import {
 } from "../test-helpers/session-owner-menu.ts";
 import { waitForSolid } from "../test-helpers/solid-settle.ts";
 import { waitForFast } from "../test-helpers/wait-for.ts";
-import type { SessionMenuAction } from "./session-menu.ts";
+import type { SessionMenuAction } from "./session-menu-solid.tsx";
 
 function press(target: EventTarget, key: string, options: KeyboardEventInit = {}) {
   const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...options });
@@ -326,7 +326,7 @@ describe("session menu", () => {
       },
     });
 
-    expect(menu.querySelector("[slot='submenu']")).toBeNull();
+    expect(menuPanel(menu).querySelector('[role="menu"]')).toBeNull();
     expect(menuItemLabels(menu)).not.toContain("Open in");
     expect(menuItemLabels(menu)).toContain("Advanced");
     expect(menuItemLabels(menu)).toContain("Assign to…");
@@ -347,10 +347,9 @@ describe("session menu", () => {
       await selectMenuValue(menu, `compact:open-${view}`);
       await settleSessionMenu(menu);
       expect(menuItemLabels(menu)).toEqual(labels);
-      expect(menu.querySelector("[slot='submenu']")).toBeNull();
+      expect(menuPanel(menu).querySelector('[role="menu"]')).toBeNull();
       if (view === "icon") {
         expect(menu.querySelectorAll(".session-menu__color-choice")).toHaveLength(9);
-        expect(menu.querySelector(".session-menu__icon-picker")?.getAttribute("slot")).toBeNull();
       }
       await selectMenuValue(
         menu,

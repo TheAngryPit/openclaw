@@ -1,16 +1,23 @@
 // Opt-in production-bundle benchmark; real delays model wire delivery, not test synchronization.
+// --cpu-profile: source-mapped reload/live/streaming tables and per-run/median cpu-profile.json.
+// --cpu-profile-compare <baseline cpu-profile.json>: profile and diff against that report.
+// Sampling inflates timings: never compare profiled runs with unprofiled runs.
+// --session-event-duration-ms 135000 --session-event-ancestor-refs extends the native churn.
+// Pair built bundles with --fixture-now-ms and --live-start-at-ms (one run per process).
+// OPENCLAW_CONTROL_UI_BUILD_ID supplies the matching identity outside a Git checkout.
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { chromium, type Browser } from "playwright";
 import { buildSandboxHostPath } from "../src/agents/sandbox-host.js";
-import { createSandboxHostHttpServer } from "../src/gateway/mcp-app-sandbox-http.js";
+import { captureSessionRowGeneration } from "../src/gateway/session-row-identity.js";
 import { shareSidebarSessionRows } from "../src/gateway/session-row-presentation.js";
 import { createColdLoadProbeInitScript } from "../ui/src/test-helpers/control-ui-cold-load-probes.ts";
 import {
   createControlUiMockBootstrapConfig,
   createControlUiMockGatewayInitScript,
+  controlUiSessionPath,
   controlUiSessionUrl,
   controlUiBundledSettingsStorageKey,
   prepareControlUiMockGatewayScenario,
@@ -18,14 +25,75 @@ import {
   startProductionControlUiE2eServer,
   startBuiltControlUiE2eServer,
 } from "../ui/src/test-helpers/control-ui-e2e.ts";
+import { createControlUiSandboxFixtureServer } from "../ui/src/test-helpers/control-ui-sandbox-fixture-server.ts";
 import { createTeamScaleSidebarListOwner } from "../ui/src/test-helpers/control-ui-sidebar-list-fixture.ts";
+import {
+  createControlUiStreamingReply,
+  createStreamingReplyProbeInitScript,
+} from "../ui/src/test-helpers/control-ui-streaming-reply.ts";
 import { createControlUiTeamScaleFixture } from "../ui/src/test-helpers/control-ui-team-scale-fixture.ts";
 import {
+  persistColdLoadWarmState,
+  restoreColdLoadWarmState,
+} from "./lib/control-ui-bench-warm-state.ts";
+import {
+  compareCpuTables,
+  formatCpuTables,
+  medianCpuTables,
+  readCpuProfileReport,
+  type ColdLoadCpuTables,
   mapColdLoadCpuProfile,
   prepareColdLoadTraceEvent,
   summarizeColdLoadTrace,
   summarizeCpuProfile,
 } from "./lib/control-ui-cold-load-trace.ts";
+import { probeColdLoadOverlays } from "./lib/control-ui-overlay-probe.ts";
+import { warmReloadProbe } from "./lib/control-ui-warm-reload-probe.ts";
+
+function readRigProbeSnapshot() {
+  const perf = Reflect.get(window, "__perf");
+  return {
+    atMs: performance.now(),
+    attribution: [...(Reflect.get(window, "__mutAttr") ?? new Map())],
+    mutations: structuredClone([...(perf?.mut ?? new Map())]),
+    loaf: [...(perf?.loaf ?? [])],
+    paints: [...(perf?.paints ?? [])],
+    rpc: [...(Reflect.get(window, "__wsLog") ?? [])],
+    avatarRequests: performance
+      .getEntriesByType("resource")
+      .filter((entry) => /\/api\/users\/[^/]+\/avatar/u.test(new URL(entry.name).pathname))
+      .map((entry) => ({ url: entry.name, start: entry.startTime, duration: entry.duration })),
+  };
+}
+
+function installWidgetReadiness() {
+  const ready = new Map<string, number>();
+  window.addEventListener("message", (event) => {
+    if (
+      event.data?.method !== "ui/notifications/sandbox-resource-loaded" &&
+      event.data?.method !== "ui/notifications/initialized"
+    ) {
+      return;
+    }
+    for (const [kind, selector] of [
+      ["board", ".board-widget__frame, openclaw-board-view mcp-app-view iframe"],
+      ["inline", ".chat-tool-card__preview-frame"],
+    ] as const) {
+      const frames = [...document.querySelectorAll<HTMLIFrameElement>(selector)];
+      const index = frames.findIndex((frame) => frame.contentWindow === event.source);
+      const key = `${kind}:${index}`;
+      if (index >= 0 && !ready.has(key)) {
+        ready.set(key, performance.now());
+      }
+    }
+  });
+  Reflect.set(window, "__readWidgetReadiness", () => ({
+    measurement: "HTML resource-loaded or MCP app initialized notification; not a paint timestamp",
+    firstInlineReadyMs: [...ready].find(([key]) => key.startsWith("inline:"))?.[1] ?? null,
+    firstBoardReadyMs: [...ready].find(([key]) => key.startsWith("board:"))?.[1] ?? null,
+    ready: Object.fromEntries(ready),
+  }));
+}
 
 function summarizeResponseTasks(raw: unknown[]) {
   const events = raw.map(prepareColdLoadTraceEvent);
@@ -155,19 +223,63 @@ function summarizeSidebarWindows(
 
 const { values } = parseArgs({
   options: {
+    "cpu-profile": { type: "boolean", default: false },
+    "cpu-profile-compare": { type: "string" },
+    "warm-reload": { type: "boolean", default: false },
+    "large-snapshot": { type: "boolean", default: false },
+    "transcript-messages": { type: "string" },
+    "overlay-probe": { type: "boolean", default: false },
+    untraced: { type: "boolean", default: false },
+    "probe-dir": { type: "string" },
     "live-events": { type: "boolean", default: false },
+    "streaming-reply": { type: "boolean", default: false },
+    "session-switch": { type: "boolean", default: false },
+    "init-script": { type: "string", multiple: true, default: [] },
     "sidebar-list-churn": { type: "boolean", default: false },
+    "sidebar-live-churn": { type: "boolean", default: false },
+    "session-event-churn": { type: "boolean", default: false },
+    "session-event-duration-ms": { type: "string", default: "30000" },
+    "session-event-ancestor-refs": { type: "boolean", default: false },
+    "fixture-now-ms": { type: "string" },
+    "live-start-at-ms": { type: "string" },
+    "duplicate-boot-reads": { type: "boolean", default: false },
+    "dashboard-mcp-app": { type: "boolean", default: false },
+    "chat-dashboard-route": { type: "boolean", default: false },
+    "closed-menu-members": { type: "boolean", default: false },
+    "capture-ms": { type: "string", default: "0" },
     "sidebar-row-transfer": { type: "string", default: "full" },
     "bundle-dir": { type: "string" },
+    port: { type: "string" },
+    "sandbox-port": { type: "string" },
+    "compare-bundle-dir": { type: "string", multiple: true, default: [] },
     runs: { type: "string", default: "3" },
     "latency-ms": { type: "string", default: "35" },
+    "method-latency-ms": { type: "string", multiple: true, default: [] },
+    face: { type: "string", default: "dashboard" },
+    "short-route": { type: "boolean", default: false },
+    "full-uuid-route": { type: "boolean", default: false },
     "frame-gap-ms": { type: "string", default: "4" },
     "sidebar-view": { type: "string", default: "sessions" },
     output: { type: "string", default: ".artifacts/control-ui-cold-load" },
   },
 });
+if (values["streaming-reply"] && values["live-events"]) {
+  throw new Error("streaming-reply measures an isolated answer; do not combine with live-events");
+}
+if (values["warm-reload"] && !values["probe-dir"]) {
+  throw new Error("warm-reload requires probe-dir with LoAF/mutation and RPC census init scripts");
+}
 if (values["sidebar-list-churn"] && !values["live-events"]) {
   throw new Error("sidebar-list-churn requires live-events");
+}
+if (values["sidebar-list-churn"] && values.untraced) {
+  throw new Error("sidebar-list-churn requires tracing for response task attribution");
+}
+if (values["sidebar-live-churn"] && (!values["live-events"] || values["sidebar-list-churn"])) {
+  throw new Error("sidebar-live-churn requires live-events and excludes sidebar-list-churn");
+}
+if (values["session-event-ancestor-refs"] && !values["session-event-churn"]) {
+  throw new Error("session-event-ancestor-refs requires session-event-churn");
 }
 const sidebarRowTransfer = values["sidebar-row-transfer"];
 if (!["full", "delta", "interleaved"].includes(sidebarRowTransfer)) {
@@ -180,59 +292,179 @@ const sidebarView = values["sidebar-view"];
 if (sidebarView !== "sessions" && sidebarView !== "online") {
   throw new Error("Expected sidebar-view sessions or online");
 }
+const cpuProfile = values["cpu-profile"] || Boolean(values["cpu-profile-compare"]);
+const baselineCpu = values["cpu-profile-compare"]
+  ? readCpuProfileReport(JSON.parse(await readFile(values["cpu-profile-compare"], "utf8")), [
+      "reload",
+      ...(values["live-events"] ? ["live"] : []),
+      ...(values["streaming-reply"] ? ["streaming"] : []),
+      ...(values["session-switch"] ? ["session-switch"] : []),
+    ])
+  : undefined;
+const cpuRuns: Record<string, ColdLoadCpuTables[]> = {};
 const runs = Number(values.runs);
 const latencyMs = Number(values["latency-ms"]);
+const methodLatencyMs: Record<string, number> = {};
+for (const value of values["method-latency-ms"]) {
+  const [method, delay, ...extra] = value.split("=");
+  const milliseconds = Number(delay);
+  if (
+    !method ||
+    delay === undefined ||
+    extra.length ||
+    !Number.isFinite(milliseconds) ||
+    milliseconds < 0
+  ) {
+    throw new Error("Expected method-latency-ms method=nonnegative-milliseconds");
+  }
+  methodLatencyMs[method] = milliseconds;
+}
+const face = values.face;
+if (face !== "chat" && face !== "dashboard") {
+  throw new Error("Expected face chat or dashboard");
+}
+if (values["chat-dashboard-route"] && face !== "dashboard") {
+  throw new Error("chat-dashboard-route requires the dashboard face");
+}
 const frameGapMs = Number(values["frame-gap-ms"]);
+const captureMs = Number(values["capture-ms"]);
+const transcriptMessages =
+  values["transcript-messages"] === undefined ? undefined : Number(values["transcript-messages"]);
+const sessionEventDurationMs = Number(values["session-event-duration-ms"]);
+const fixtureNowMs =
+  values["fixture-now-ms"] === undefined ? undefined : Number(values["fixture-now-ms"]);
+const liveStartAtMs =
+  values["live-start-at-ms"] === undefined ? undefined : Number(values["live-start-at-ms"]);
+const port = values.port === undefined ? undefined : Number(values.port);
+const sandboxPort =
+  values["sandbox-port"] === undefined ? undefined : Number(values["sandbox-port"]);
+if (
+  (port !== undefined || sandboxPort !== undefined) &&
+  (!values["bundle-dir"] ||
+    port === sandboxPort ||
+    [port, sandboxPort].some(
+      (value) =>
+        value === undefined || !Number.isInteger(value) || value < 40_000 || value > 65_535,
+    ))
+) {
+  throw new Error(
+    "Explicit port and sandbox-port require a built bundle and distinct ports from 40000 to 65535",
+  );
+}
 if (
   !Number.isInteger(runs) ||
   runs < 1 ||
-  runs > 20 ||
+  runs > (values["compare-bundle-dir"].length ? 60 : 20) ||
   !Number.isFinite(latencyMs) ||
   latencyMs < 0 ||
   !Number.isFinite(frameGapMs) ||
-  frameGapMs < 0
+  frameGapMs < 0 ||
+  !Number.isFinite(captureMs) ||
+  captureMs < 0 ||
+  (transcriptMessages !== undefined &&
+    (!Number.isSafeInteger(transcriptMessages) || transcriptMessages < 1)) ||
+  !Number.isSafeInteger(sessionEventDurationMs) ||
+  sessionEventDurationMs < 250 ||
+  sessionEventDurationMs % 125 !== 0 ||
+  [fixtureNowMs, liveStartAtMs].some(
+    (value) => value !== undefined && (!Number.isSafeInteger(value) || value < 0),
+  )
 ) {
-  throw new Error("Expected 1–20 runs and nonnegative finite wire delays");
+  throw new Error(
+    "Expected a bounded run count, positive transcript size, nonnegative wire delays/timestamps, and session duration in 125ms steps (at least 250ms)",
+  );
+}
+if (
+  values["compare-bundle-dir"].length &&
+  (!values["bundle-dir"] ||
+    !values["warm-reload"] ||
+    !values.untraced ||
+    cpuProfile ||
+    values["compare-bundle-dir"].length > 2 ||
+    runs % (values["compare-bundle-dir"].length + 1))
+) {
+  throw new Error(
+    "Bundle comparison requires complete cycles of two or three unprofiled warm bundles",
+  );
 }
 if (sidebarRowTransfer === "interleaved" && (runs < 14 || runs % 2 !== 0)) {
   throw new Error("Interleaved sidebar transfer requires an even run count of at least 14");
 }
+if (liveStartAtMs !== undefined && (runs !== 1 || !values["live-events"])) {
+  throw new Error("live-start-at-ms requires one live-events run");
+}
 const artifactDir = path.resolve(values.output, new Date().toISOString().replaceAll(":", "-"));
 await mkdir(artifactDir, { recursive: true });
-const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-const dirty = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" });
+const explicitBuildId = process.env.OPENCLAW_CONTROL_UI_BUILD_ID?.trim();
+const head = explicitBuildId
+  ? null
+  : execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+const buildId = explicitBuildId ?? head!;
+const dirty = explicitBuildId
+  ? null
+  : execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" });
 const bundleDir = values["bundle-dir"]
   ? path.resolve(values["bundle-dir"])
   : path.join(artifactDir, "ui");
 const server = values["bundle-dir"]
-  ? await startBuiltControlUiE2eServer(bundleDir)
-  : await startProductionControlUiE2eServer(bundleDir, head);
-const sandbox = createSandboxHostHttpServer();
+  ? await startBuiltControlUiE2eServer(bundleDir, undefined, port)
+  : await startProductionControlUiE2eServer(bundleDir, buildId);
+const comparisonBundleDirs = values["compare-bundle-dir"].map((directory) =>
+  path.resolve(directory),
+);
+const parkedBaselineDir = path.join(artifactDir, "baseline-bundle");
+const bundleSlots = [parkedBaselineDir, ...comparisonBundleDirs];
+let activeBundle = 0;
+async function selectComparisonBundle(index: number) {
+  if (!comparisonBundleDirs.length || activeBundle === index) {
+    return;
+  }
+  await server.replaceBuild(bundleSlots[index]!, bundleSlots[activeBundle]!);
+  activeBundle = index;
+}
+const sandbox = createControlUiSandboxFixtureServer((pathname) => fixture.assets.get(pathname));
 await new Promise<void>((resolve, reject) => {
   sandbox.once("error", reject);
-  sandbox.listen(0, "127.0.0.1", resolve);
+  sandbox.listen(sandboxPort ?? 0, "127.0.0.1", resolve);
 });
 const address = sandbox.address();
 if (!address || typeof address === "string") {
   throw new Error("Sandbox did not bind");
 }
 const fixture = createControlUiTeamScaleFixture({
+  now: fixtureNowMs,
   baseUrl: server.baseUrl,
-  sandboxUrl: buildSandboxHostPath({ blockDescendantFrames: true }),
+  sandboxUrl: buildSandboxHostPath({
+    blockDescendantFrames: true,
+    resourceDomains: values["dashboard-mcp-app"] ? [`http://127.0.0.1:${address.port}`] : undefined,
+  }),
   sandboxPort: address.port,
-  liveRun: values["live-events"],
+  liveRun: values["live-events"] || values["streaming-reply"],
   sidebarListChurn: values["sidebar-list-churn"],
+  sidebarLiveChurn: values["sidebar-live-churn"],
+  sessionEventChurn: values["session-event-churn"],
+  sessionEventDurationMs,
+  sessionEventAncestorRefs: values["session-event-ancestor-refs"],
+  duplicateBootReads: values["duplicate-boot-reads"],
+  dashboardMcpApp: values["dashboard-mcp-app"]
+    ? { font: await readFile("ui/public/fonts/space-grotesk-latin.woff2") }
+    : undefined,
+  closedMenuMembers: values["closed-menu-members"],
+  largeSnapshot: values["large-snapshot"],
+  transcriptMessages,
 });
-let sidebarLists = fixture.sidebarListChurn
-  ? createTeamScaleSidebarListOwner(fixture.sidebarListChurn)
-  : undefined;
+const streamingReply = values["streaming-reply"] ? createControlUiStreamingReply() : undefined;
+const extraInitScripts = await Promise.all(
+  values["init-script"].map((file) => readFile(file, "utf8")),
+);
+let sidebarLists = createTeamScaleSidebarListOwner(fixture.sidebarListInput);
 let runTransfer: "full" | "delta" = sidebarRowTransfer === "delta" ? "delta" : "full";
 let browser: Browser | undefined;
 const results = [];
 try {
   const prepared = await prepareControlUiMockGatewayScenario({
     ...fixture.scenario,
-    serverBuildId: head,
+    serverBuildId: buildId,
     serverVersion: JSON.parse(await readFile("package.json", "utf8")).version,
   });
   browser = await chromium.launch({
@@ -245,31 +477,43 @@ try {
     permissions: ["local-network-access"],
   });
   const page = await context.newPage();
-  if (fixture.sidebarListChurn) {
-    await context.exposeBinding("__teamScaleList", (_source, params: Record<string, unknown>) => {
-      const { result, previousRows } = sidebarLists!.list(params);
-      const response =
-        params.rowMode === "sidebar"
-          ? {
-              ...result,
-              ...shareSidebarSessionRows(
-                result.sessions,
-                typeof params.ifRowsRevision === "string" ? params.ifRowsRevision : undefined,
-                runTransfer === "delta" ? previousRows : undefined,
-              ),
-            }
-          : result;
-      sidebarLists!.recordWire(response);
-      return response;
-    });
-    await context.exposeBinding(
-      "__teamScaleMutate",
-      (
-        _source,
-        mutation: Parameters<ReturnType<typeof createTeamScaleSidebarListOwner>["apply"]>[0],
-      ) => sidebarLists!.apply(mutation),
-    );
-  }
+  const rigProbeScript = values["probe-dir"]
+    ? (
+        await Promise.all(
+          ["mutattr.init.js", "loaf-mutation.init.js", "ws-rpc-census.init.js"].map((filename) =>
+            readFile(path.resolve(values["probe-dir"]!, filename), "utf8"),
+          ),
+        )
+      ).join("\n") + `\nwindow.__readColdLoadRigProbes = ${readRigProbeSnapshot.toString()};`
+    : "";
+  await context.exposeBinding("__teamScaleList", (_source, params: Record<string, unknown>) => {
+    const { result, previousRows } = sidebarLists.list(params);
+    const response =
+      params.rowMode === "sidebar" || params.ifRowsRevision !== undefined
+        ? {
+            ...result,
+            ...shareSidebarSessionRows(
+              result.sessions,
+              typeof params.ifRowsRevision === "string" ? params.ifRowsRevision : undefined,
+              runTransfer === "delta" && previousRows
+                ? [captureSessionRowGeneration(previousRows)]
+                : undefined,
+            ),
+          }
+        : result;
+    sidebarLists.recordWire(response);
+    return response;
+  });
+  await context.exposeBinding(
+    "__teamScaleMutate",
+    (
+      _source,
+      mutation: Parameters<ReturnType<typeof createTeamScaleSidebarListOwner>["apply"]>[0],
+    ) => sidebarLists.apply(mutation),
+  );
+  await context.exposeBinding("__teamScaleCronList", (_source, params: Record<string, unknown>) =>
+    fixture.listCronJobs(params),
+  );
   const errors: string[] = [];
   const harnessWarnings: string[] = [];
   page.on("pageerror", (error) => {
@@ -296,8 +540,29 @@ try {
     const asset = assets.get(new URL(route.request().url()).pathname);
     return asset ? route.fulfill({ status: 200, ...asset }) : route.fallback();
   });
+  if (values["duplicate-boot-reads"]) {
+    await page.route("**/api/chat/media/outgoing/**", (route) => {
+      const asset = assets.get(new URL(route.request().url()).pathname);
+      return asset ? route.fulfill({ status: 200, ...asset }) : route.fallback();
+    });
+  }
+  if (values["sidebar-live-churn"] || values["closed-menu-members"]) {
+    await page.route("**/api/users/*/avatar?*", async (route) => {
+      const asset = fixture.assets.get(new URL(route.request().url()).pathname);
+      if (!asset) {
+        return route.fallback();
+      }
+      const { delayMs, ...response } = asset;
+      if (delayMs) {
+        await new Promise((resolve) => {
+          setTimeout(resolve, delayMs);
+        });
+      }
+      return route.fulfill(response);
+    });
+  }
   await page.addInitScript(
-    ({ key, pins }) => {
+    ({ key, pins, mode }) => {
       if (window !== window.top) {
         return;
       }
@@ -305,7 +570,7 @@ try {
         localStorage.setItem(
           key,
           JSON.stringify({
-            sidebarAgentsMode: "roster",
+            sidebarAgentsMode: mode,
             railShortcuts: pins,
             navigationByProfile: { "team-person-001": { railShortcuts: pins } },
           }),
@@ -315,36 +580,68 @@ try {
     {
       key: controlUiBundledSettingsStorageKey(server.baseUrl),
       pins: fixture.sidebarEntries,
+      mode:
+        !values["session-event-ancestor-refs"] &&
+        (values["sidebar-list-churn"] ||
+          values["sidebar-live-churn"] ||
+          values["session-event-churn"])
+          ? "roster"
+          : "chip",
     },
   );
+  const warmProbes = values["warm-reload"] ? `\n(${warmReloadProbe.toString()})();` : "";
   await page.addInitScript({
-    content: `;(() => { if (window !== window.top) return; ${createControlUiMockGatewayInitScript(prepared.scenario)}\n${fixture.sidebarListChurn ? `window.__teamScaleSidebarLists = { apply: (mutation) => window.__teamScaleMutate(mutation) }; window.openclawControlUiE2eGateway.setRequestHandler("sessions.list", async ({ params, respond }) => respond(await window.__teamScaleList(params)));` : ""}\n${createColdLoadProbeInitScript({ latencyMs, frameGapMs, events: fixture.events, liveEvents: fixture.liveEvents, liveHistory: fixture.liveHistory })} })();`,
+    content: `;(() => { if (window !== window.top) return; const __name = (fn) => fn; (${installWidgetReadiness.toString()})(); ${createControlUiMockGatewayInitScript(prepared.scenario)}\n${rigProbeScript}\nwindow.__teamScaleSidebarLists = { apply: (mutation) => window.__teamScaleMutate(mutation) }; window.openclawControlUiE2eGateway.setRequestHandler("sessions.list", async ({ params, respond }) => respond(await window.__teamScaleList(params))); window.openclawControlUiE2eGateway.setRequestHandler("cron.list", async ({ params, respond }) => respond(await window.__teamScaleCronList(params)));\n${createColdLoadProbeInitScript({ latencyMs, methodLatencyMs, frameGapMs, events: fixture.events, liveEvents: fixture.liveEvents, liveHistory: fixture.liveHistory, ownerProbes: !cpuProfile && !values["session-event-churn"] })}\n${streamingReply ? createStreamingReplyProbeInitScript() : ""}\n${extraInitScripts.join("\n")}\n${warmProbes} })();`,
   });
-  const url = controlUiSessionUrl(server.baseUrl, fixture.selectedSessionKey, "dashboard");
+  const url = values["full-uuid-route"]
+    ? new URL(
+        `/${face}/main/${fixture.selectedSessionKey.split(":").at(-1)!.replaceAll("-", "")}`,
+        server.baseUrl,
+      ).href
+    : values["short-route"]
+      ? new URL(controlUiSessionPath(fixture.selectedSessionKey, "", face), server.baseUrl).href
+      : controlUiSessionUrl(server.baseUrl, fixture.selectedSessionKey, face);
   async function settle() {
     try {
-      await page
-        .locator(".chat-pane__session-title-text", { hasText: "Project dashboard 1" })
-        .waitFor();
+      await page.locator(".chat-pane__header").first().waitFor();
+      if (values["session-event-ancestor-refs"]) {
+        await page
+          .locator(
+            `.sidebar-recent-session[data-session-key="${fixture.scenario.sessions![2]!.key}"]`,
+          )
+          .waitFor({ state: "visible" });
+      }
       await page
         .locator('.sidebar-rail [data-sidebar-entry^="session:"]')
         .nth(29)
         .waitFor({ state: "attached" });
-      await page.locator('[data-sidebar-entry="plugin:team-scale-6/overview"]').waitFor();
+      await page.locator('[data-sidebar-entry="plugin:team-scale-7/overview"]').waitFor();
       if (sidebarView === "online") {
         await page.locator('[data-online-user-id="team-person-120"]').waitFor();
       }
-      await page
-        .frameLocator(".board-widget__frame")
-        .frameLocator("iframe")
-        .getByText("Team metric 1", { exact: true })
-        .waitFor();
+      if (face === "dashboard") {
+        await page
+          .frameLocator(
+            values["dashboard-mcp-app"]
+              ? "openclaw-board-view mcp-app-view iframe"
+              : ".board-widget__frame",
+          )
+          .frameLocator("iframe")
+          .getByText("Team metric 1", { exact: true })
+          .waitFor();
+      }
       await page
         .frameLocator(".chat-tool-card__preview-frame")
         .last()
         .frameLocator("iframe")
         .getByText("Team metric 12", { exact: true })
         .waitFor();
+      if (face === "dashboard") {
+        await page.waitForFunction(() => {
+          const ready = Reflect.get(window, "__readWidgetReadiness")();
+          return ready.firstBoardReadyMs !== null;
+        });
+      }
       await page.waitForFunction(
         (eventCount) => {
           const state = Reflect.get(window, "__coldLoad")?.read();
@@ -375,7 +672,7 @@ try {
     await page.locator("#sidebar-session-owner-title").click();
     await page
       .locator(
-        `.sidebar-session-owner-filter [role="option"][data-value="${values["sidebar-list-churn"] ? "involving-me" : "all"}"]`,
+        `.sidebar-session-owner-filter [role="option"][data-value="${values["session-event-ancestor-refs"] ? "all" : "involving-me"}"]`,
       )
       .click();
   } catch (error) {
@@ -394,8 +691,61 @@ try {
     await page.locator('[data-navigation-view="online"]').click();
   }
   await settle();
+  if (values["chat-dashboard-route"]) {
+    // Save the operator's dashboard-first layout through its normal action.
+    await page.locator("button.chat-pane__layout-trigger:not([inert] *)").first().click();
+    await page.locator('.chat-pane__layout-menu [data-value="swap"]').click();
+    await page.evaluate(
+      (deepLink) => history.replaceState(null, "", deepLink),
+      controlUiSessionUrl(server.baseUrl, fixture.selectedSessionKey, "chat"),
+    );
+  }
   await page.locator('aside.sidebar[data-snapshot-saved="true"]').waitFor();
+  const warmInput: Parameters<typeof persistColdLoadWarmState>[0] = {
+    sessionKey: fixture.selectedSessionKey,
+    sidebarView: sidebarView === "online" ? "online" : "sessions",
+  };
+  await page.evaluate("globalThis.__name = (fn) => fn");
+  const { storage: warmStorage, ...snapshotSave } = await page.evaluate(
+    persistColdLoadWarmState,
+    warmInput,
+  );
+  for (let index = 1; index < bundleSlots.length; index++) {
+    await restoreColdLoadWarmState(page, warmStorage);
+    await selectComparisonBundle(index);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await settle();
+  }
+  await selectComparisonBundle(0);
   for (let run = 0; run < runs; run++) {
+    const cpuPhases: Record<string, ColdLoadCpuTables> = {};
+    async function recordCpu(phase: string, profile: Parameters<typeof mapColdLoadCpuProfile>[0]) {
+      const mapped = await mapColdLoadCpuProfile(profile, {
+        assetBaseUrl: new URL("assets/", server.baseUrl).href,
+        assetDirectory: path.join(bundleDir, "assets"),
+      });
+      const summary = summarizeCpuProfile(mapped.profile, { includeTables: true });
+      const tables = summary.tables!;
+      cpuPhases[phase] = tables;
+      (cpuRuns[phase] ??= []).push(tables);
+      console.log(
+        formatCpuTables(`Run ${run + 1} ${phase} CPU (profiled; timings inflated)`, tables),
+      );
+      console.log(
+        `Mapped frames: ${mapped.mappedFrames}; unmapped asset frames: ${mapped.unmappedFrames}; sampled: ${summary.sampledMs.toFixed(1)} ms; idle: ${summary.idleMs.toFixed(1)} ms`,
+      );
+      await writeFile(
+        path.join(artifactDir, `run-${run + 1}.${phase}.cpuprofile`),
+        JSON.stringify(profile),
+      );
+      await writeFile(
+        path.join(artifactDir, `run-${run + 1}.cpu-profile.json`),
+        JSON.stringify(cpuPhases, null, 2),
+      );
+      return { ...mapped, summary };
+    }
+    await restoreColdLoadWarmState(page, warmStorage);
+    await selectComparisonBundle(run % bundleSlots.length);
     runTransfer =
       sidebarRowTransfer === "delta" || (sidebarRowTransfer === "interleaved" && run % 2 === 1)
         ? "delta"
@@ -404,42 +754,72 @@ try {
     const rawTrace: unknown[] = [];
     let collectedTrace = rawTrace;
     cdp.on("Tracing.dataCollected", (data) => collectedTrace.push(...data.value));
-    await cdp.send("Profiler.enable");
-    await cdp.send("Profiler.setSamplingInterval", { interval: 1000 });
-    await cdp.send("Profiler.start");
-    await cdp.send("Tracing.start", {
-      categories:
-        "toplevel,loading,blink.user_timing,devtools.timeline,disabled-by-default-devtools.timeline,disabled-by-default-devtools.timeline.stack,disabled-by-default-devtools.screenshot,v8",
-      transferMode: "ReportEvents",
-    });
-    if (fixture.sidebarListChurn) {
-      sidebarLists = createTeamScaleSidebarListOwner(fixture.sidebarListChurn);
+    if (!values.untraced || cpuProfile) {
+      await cdp.send("Profiler.enable");
+      await cdp.send("Profiler.setSamplingInterval", { interval: 1000 });
+      await cdp.send("Profiler.start");
     }
+    if (!values.untraced) {
+      await cdp.send("Tracing.start", {
+        categories:
+          "toplevel,loading,blink.user_timing,devtools.timeline,disabled-by-default-devtools.timeline,disabled-by-default-devtools.timeline.stack,disabled-by-default-devtools.screenshot,v8",
+        transferMode: "ReportEvents",
+      });
+    }
+    sidebarLists = createTeamScaleSidebarListOwner(fixture.sidebarListInput);
     await page.reload({ waitUntil: "domcontentloaded" });
     await settle();
-    const metrics = await page.evaluate(() => Reflect.get(window, "__coldLoad").read());
+    if (captureMs) {
+      await page.waitForFunction((duration) => performance.now() >= duration, captureMs);
+    }
+    const metrics = await page.evaluate(() => ({
+      ...Reflect.get(window, "__coldLoad").read(),
+      widgetReadiness: Reflect.get(window, "__readWidgetReadiness")(),
+    }));
+    const warmReload = values["warm-reload"]
+      ? await page.evaluate(() => Reflect.get(window, "__warmReload").read())
+      : undefined;
     await writeFile(path.join(artifactDir, `run-${run + 1}.metrics.json`), JSON.stringify(metrics));
-    const profile = await cdp.send("Profiler.stop");
-    const complete = new Promise<void>((resolve) => {
-      cdp.once("Tracing.tracingComplete", () => resolve());
-    });
-    await cdp.send("Tracing.end");
-    await complete;
+    const profile = values.untraced && !cpuProfile ? undefined : await cdp.send("Profiler.stop");
+    if (!values.untraced) {
+      const complete = new Promise<void>((resolve) => {
+        cdp.once("Tracing.tracingComplete", () => resolve());
+      });
+      await cdp.send("Tracing.end");
+      await complete;
+    }
     await page.screenshot({ path: path.join(artifactDir, `run-${run + 1}.png`) });
     await writeFile(
       path.join(artifactDir, `run-${run + 1}.trace.json`),
       JSON.stringify({ traceEvents: rawTrace }),
     );
-    await writeFile(
-      path.join(artifactDir, `run-${run + 1}.cpuprofile`),
-      JSON.stringify(profile.profile),
-    );
+    if (profile) {
+      await writeFile(
+        path.join(artifactDir, `run-${run + 1}.cpuprofile`),
+        JSON.stringify(profile.profile),
+      );
+    }
+    if (rigProbeScript) {
+      await writeFile(
+        path.join(artifactDir, `run-${run + 1}.probes.json`),
+        JSON.stringify(await page.evaluate(readRigProbeSnapshot)),
+      );
+    }
     const trace = rawTrace.map(prepareColdLoadTraceEvent);
     const screenshots = trace.flatMap((event) =>
       event.name === "Screenshot" && event.args?.snapshot
         ? [{ ts: event.ts, data: event.args.snapshot }]
         : [],
     );
+    if (values["warm-reload"] && screenshots.length) {
+      await mkdir(path.join(artifactDir, `run-${run + 1}.filmstrip`));
+      for (const [index, frame] of screenshots.entries()) {
+        await writeFile(
+          path.join(artifactDir, `run-${run + 1}.filmstrip`, `${index}-${frame.ts}.jpg`),
+          Buffer.from(frame.data, "base64"),
+        );
+      }
+    }
     const visual = await page.evaluate(async (frames) => {
       const canvas = document.createElement("canvas");
       canvas.width = 344;
@@ -485,12 +865,112 @@ try {
         transitionGroups,
       };
     }, screenshots);
-    const mapped = values["sidebar-list-churn"]
-      ? { profile: profile.profile, mappedFrames: 0, unmappedFrames: profile.profile.nodes.length }
-      : await mapColdLoadCpuProfile(profile.profile, {
-          assetBaseUrl: new URL("assets/", server.baseUrl).href,
-          assetDirectory: path.join(bundleDir, "assets"),
-        });
+    const mapped = !profile
+      ? undefined
+      : cpuProfile
+        ? await recordCpu("reload", profile.profile)
+        : values["sidebar-list-churn"]
+          ? {
+              profile: profile.profile,
+              mappedFrames: 0,
+              unmappedFrames: profile.profile.nodes.length,
+            }
+          : await mapColdLoadCpuProfile(profile.profile, {
+              assetBaseUrl: new URL("assets/", server.baseUrl).href,
+              assetDirectory: path.join(bundleDir, "assets"),
+            });
+    let streaming;
+    if (streamingReply) {
+      const composer = page.locator(".agent-chat__composer-combobox textarea").last();
+      await composer.focus();
+      await cdp.send("Performance.enable");
+      let previousCpu = (await cdp.send("Performance.getMetrics")).metrics;
+      let previousDelivered = 0;
+      const cpu: Array<{
+        delivered: number;
+        deltas: number;
+        milliseconds: Record<string, number>;
+      }> = [];
+      if (cpuProfile) {
+        await cdp.send("Profiler.start");
+      }
+      await page.evaluate((input) => Reflect.get(window, "__streamingReply").start(input), {
+        ...streamingReply,
+        sessionKey: fixture.selectedSessionKey,
+        runId: fixture.scenario.inFlightRun!.runId,
+      });
+      const streamingInput = new AbortController();
+      const nativeInput = (async () => {
+        while (!streamingInput.signal.aborted) {
+          await page.keyboard.press("x");
+          await new Promise((resolve) => {
+            setTimeout(resolve, 500);
+          });
+        }
+      })();
+      try {
+        for (let quartile = 1; quartile <= 4; quartile++) {
+          await page.waitForFunction(
+            (count) => Reflect.get(window, "__streamingReply").read().delivered >= count,
+            Math.floor((streamingReply.deltas.length * quartile) / 4),
+            { timeout: 60_000 },
+          );
+          await page.evaluate(
+            () =>
+              new Promise<void>((resolve) => {
+                requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+              }),
+          );
+          const nextCpu = (await cdp.send("Performance.getMetrics")).metrics;
+          const delivered = await page.evaluate(
+            () => Reflect.get(window, "__streamingReply").read().delivered,
+          );
+          cpu.push({
+            delivered,
+            deltas: delivered - previousDelivered,
+            milliseconds: Object.fromEntries(
+              ["TaskDuration", "ScriptDuration", "LayoutDuration", "RecalcStyleDuration"].map(
+                (name) => [
+                  name,
+                  1000 *
+                    (nextCpu.find((metric) => metric.name === name)!.value -
+                      previousCpu.find((metric) => metric.name === name)!.value),
+                ],
+              ),
+            ),
+          });
+          previousCpu = nextCpu;
+          previousDelivered = delivered;
+        }
+      } finally {
+        streamingInput.abort();
+        await nativeInput;
+      }
+      if (cpuProfile) {
+        await recordCpu("streaming", (await cdp.send("Profiler.stop")).profile);
+      }
+      streaming = {
+        ...(await page.evaluate(() => Reflect.get(window, "__streamingReply").finish())),
+        cpu,
+      };
+      if (!streaming.finalHtml) {
+        throw new Error("Streaming reply produced no visible Markdown");
+      }
+      await writeFile(
+        path.join(artifactDir, `run-${run + 1}.streaming.json`),
+        JSON.stringify(
+          {
+            head,
+            chars: streamingReply.text.length,
+            deltasPerSecond: streamingReply.deltasPerSecond,
+            ...streaming,
+          },
+          null,
+          2,
+        ),
+      );
+      await page.screenshot({ path: path.join(artifactDir, `run-${run + 1}.streaming.png`) });
+    }
     let live;
     const readLivePresentation = () =>
       page.evaluate(
@@ -530,19 +1010,44 @@ try {
         ],
       );
     if (values["live-events"]) {
+      if (liveStartAtMs !== undefined) {
+        const remainingMs = liveStartAtMs - Date.now();
+        if (remainingMs < 0) {
+          throw new Error("Missed paired live-start barrier");
+        }
+        await new Promise((resolve) => {
+          setTimeout(resolve, Math.max(0, remainingMs));
+        });
+      }
       const before = await readLivePresentation();
+      await cdp.send("Performance.enable");
+      const cpuBefore = (await cdp.send("Performance.getMetrics")).metrics;
       const liveTrace: unknown[] = [];
       collectedTrace = liveTrace;
-      await cdp.send("Tracing.start", {
-        categories: "toplevel,blink.user_timing,devtools.timeline",
-        transferMode: "ReportEvents",
-      });
+      if (!values.untraced || cpuProfile) {
+        await cdp.send("Profiler.start");
+      }
+      if (!values.untraced) {
+        await cdp.send("Tracing.start", {
+          categories:
+            "toplevel,blink.user_timing,devtools.timeline,disabled-by-default-v8.cpu_profiler",
+          transferMode: "ReportEvents",
+        });
+      }
       const listOffset = sidebarLists?.stats().length ?? 0;
-      await page.evaluate(() => Reflect.get(window, "__coldLoad").startLive());
+      await page.evaluate((captureProbes) => {
+        if (captureProbes) {
+          const read = Reflect.get(window, "__readColdLoadRigProbes");
+          Reflect.set(window, "__coldLoadRigLiveStart", read());
+          setTimeout(() => Reflect.set(window, "__coldLoadRigLateStart", read()), 5_000);
+          setTimeout(() => Reflect.set(window, "__coldLoadRigQuietStart", read()), 15_000);
+        }
+        Reflect.get(window, "__coldLoad").startLive();
+      }, Boolean(rigProbeScript));
       await page.waitForFunction(
         (count) => Reflect.get(window, "__coldLoad").readLive().sentEvents === count,
         fixture.liveEvents.length,
-        { timeout: 35_000 },
+        { timeout: Math.max(35_000, fixture.liveEvents.at(-1)!.atMs + 5_000) },
       );
       const plannedWindowMs =
         fixture.liveEvents.at(-1)!.atMs + (values["sidebar-list-churn"] ? 16_000 : 750);
@@ -570,16 +1075,50 @@ try {
         }
       }
       await page.evaluate(() => Reflect.get(window, "__coldLoad").finishLive());
-      const liveComplete = new Promise<void>((resolve) => {
-        cdp.once("Tracing.tracingComplete", () => resolve());
-      });
-      await cdp.send("Tracing.end");
-      await liveComplete;
+      const cpuAfter = (await cdp.send("Performance.getMetrics")).metrics;
+      if (!values.untraced || cpuProfile) {
+        const liveProfile = await cdp.send("Profiler.stop");
+        if (cpuProfile) {
+          await recordCpu("live", liveProfile.profile);
+        } else {
+          await writeFile(
+            path.join(artifactDir, `run-${run + 1}.live.cpuprofile`),
+            JSON.stringify(liveProfile.profile),
+          );
+        }
+      }
+      if (!values.untraced) {
+        const liveComplete = new Promise<void>((resolve) => {
+          cdp.once("Tracing.tracingComplete", () => resolve());
+        });
+        await cdp.send("Tracing.end");
+        await liveComplete;
+      }
       await writeFile(
         path.join(artifactDir, `run-${run + 1}.live.trace.json`),
         JSON.stringify({ traceEvents: liveTrace }),
       );
       const after = await readLivePresentation();
+      const ancestorLink = page.locator(
+        `.sidebar-rail [data-sidebar-entry="session:${fixture.selectedSessionKey}"] a`,
+      );
+      const ancestorBaseline = values["session-event-ancestor-refs"]
+        ? {
+            text: await ancestorLink.getAttribute("aria-label"),
+            visible: await ancestorLink.isVisible(),
+            socketCount: await page.evaluate(() =>
+              Reflect.get(window, "openclawControlUiE2eGateway").socketCount(),
+            ),
+          }
+        : undefined;
+      if (
+        ancestorBaseline &&
+        (!ancestorBaseline.text?.includes("Synthetic ancestor baseline verified") ||
+          !ancestorBaseline.visible ||
+          ancestorBaseline.socketCount !== 1)
+      ) {
+        throw new Error("Ancestor-reference replay lost its raw baseline or rendered outcome");
+      }
       const liveMetrics = await page.evaluate(() => Reflect.get(window, "__coldLoad").readLive());
       // Independent coordinators drift; pair request starts within half their minimum cooldown.
       const pairedRefreshes = values["sidebar-list-churn"]
@@ -603,19 +1142,31 @@ try {
       const responseTasks = summarizeResponseTasks(liveTrace);
       live = {
         ...liveMetrics,
+        ancestorBaseline,
+        milliseconds: Object.fromEntries(
+          ["TaskDuration", "ScriptDuration", "LayoutDuration", "RecalcStyleDuration"].map(
+            (name) => [
+              name,
+              1000 *
+                (cpuAfter.find((metric) => metric.name === name)!.value -
+                  cpuBefore.find((metric) => metric.name === name)!.value),
+            ],
+          ),
+        ),
         head,
         sidebarRowTransfer: values["sidebar-list-churn"] ? runTransfer : undefined,
         sidebarLists: sidebarReads,
-        sidebarWindows: sidebarReads
-          ? summarizeSidebarWindows(
-              liveMetrics.rpcs,
-              liveMetrics.rpcOffset,
-              sidebarReads,
-              responseTasks,
-              activeStreamMs,
-              liveMetrics.elapsedMs,
-            )
-          : undefined,
+        sidebarWindows:
+          sidebarReads && !values.untraced
+            ? summarizeSidebarWindows(
+                liveMetrics.rpcs,
+                liveMetrics.rpcOffset,
+                sidebarReads,
+                responseTasks,
+                activeStreamMs,
+                liveMetrics.elapsedMs,
+              )
+            : undefined,
         pairedRefreshes,
         pairingMeasurement:
           "Conditional request starts after six seconds, paired within half the five-second minimum cooldown; response arrival skew is separate.",
@@ -625,6 +1176,14 @@ try {
           "Observed rates use the complete capture including drain; active-stream-normalized rates charge trailing coalesced reads to the event stream.",
         plannedWindowMs,
         presentation: { before, after },
+        probes: rigProbeScript
+          ? await page.evaluate(() => ({
+              start: Reflect.get(window, "__coldLoadRigLiveStart"),
+              lateStart: Reflect.get(window, "__coldLoadRigLateStart"),
+              quietStart: Reflect.get(window, "__coldLoadRigQuietStart"),
+              end: Reflect.get(window, "__readColdLoadRigProbes")(),
+            }))
+          : undefined,
       };
       await page.screenshot({ path: path.join(artifactDir, `run-${run + 1}.live.png`) });
       await writeFile(
@@ -637,19 +1196,98 @@ try {
         );
       }
     }
+    const overlays = values["overlay-probe"]
+      ? await probeColdLoadOverlays(
+          page,
+          artifactDir,
+          run,
+          values["closed-menu-members"]
+            ? [
+                ["sharing", ".chat-pane__sharing-trigger", ".chat-pane__sharing-member"],
+                ["layout", ".chat-pane__layout-trigger", ".chat-pane__layout-menu .oc-menu-item"],
+              ]
+            : undefined,
+        )
+      : undefined;
+    let sessionSwitch;
+    if (values["session-switch"]) {
+      if (sidebarView !== "sessions") {
+        await page.locator('[data-navigation-view="sessions"]').click();
+      }
+      const target = fixture.scenario.sessions![1]!;
+      const link = page.locator(
+        `.sidebar-recent-session[data-session-key="${target.key}"] a.sidebar-recent-session__link`,
+      );
+      await link.waitFor({ state: "visible" });
+      const rpcOffset = await page.evaluate(
+        () => Reflect.get(window, "__coldLoad").read().rpcs.length,
+      );
+      await cdp.send("Performance.enable");
+      const cpuBefore = (await cdp.send("Performance.getMetrics")).metrics;
+      if (cpuProfile) {
+        await cdp.send("Profiler.start");
+      }
+      const started = await page.evaluate(() => performance.now());
+      await link.click();
+      await page.waitForFunction(
+        (key) =>
+          [...document.querySelectorAll("openclaw-chat-pane")].some(
+            (pane) => Reflect.get(pane, "sessionKey") === key,
+          ),
+        target.key,
+      );
+      await page.locator(".chat-tool-card__preview-frame").last().waitFor({ state: "visible" });
+      await page.waitForFunction(() => {
+        const state = Reflect.get(window, "__coldLoad").read();
+        return !state.pending && !state.queued && state.idleMs > 750;
+      });
+      const elapsedMs = await page.evaluate((start) => performance.now() - start, started);
+      const cpuAfter = (await cdp.send("Performance.getMetrics")).metrics;
+      if (cpuProfile) {
+        await recordCpu("session-switch", (await cdp.send("Profiler.stop")).profile);
+      }
+      sessionSwitch = {
+        from: fixture.selectedSessionKey,
+        to: target.key,
+        elapsedMs,
+        milliseconds: Object.fromEntries(
+          ["TaskDuration", "ScriptDuration", "LayoutDuration", "RecalcStyleDuration"].map(
+            (name) => [
+              name,
+              1000 *
+                (cpuAfter.find((metric) => metric.name === name)!.value -
+                  cpuBefore.find((metric) => metric.name === name)!.value),
+            ],
+          ),
+        ),
+        rpcs: await page.evaluate(
+          (offset) => Reflect.get(window, "__coldLoad").read().rpcs.slice(offset),
+          rpcOffset,
+        ),
+      };
+      await page.screenshot({ path: path.join(artifactDir, `run-${run + 1}.session-switch.png`) });
+    }
     await cdp.detach();
     const result = {
       run: run + 1,
+      ...(comparisonBundleDirs.length
+        ? { variant: ["base", "candidate", "candidate-2"][activeBundle] }
+        : {}),
       head,
       sidebarRowTransfer: values["sidebar-list-churn"] ? runTransfer : undefined,
       ...metrics,
-      trace: summarizeColdLoadTrace(trace, metrics.at),
-      cpu: summarizeCpuProfile(mapped.profile),
-      mappedFrames: mapped.mappedFrames,
-      unmappedFrames: mapped.unmappedFrames,
+      trace: values.untraced ? undefined : summarizeColdLoadTrace(trace, metrics.at),
+      cpu: mapped ? summarizeCpuProfile(mapped.profile) : undefined,
+      mappedFrames: mapped?.mappedFrames,
+      unmappedFrames: mapped?.unmappedFrames,
       harnessWarnings,
       visual,
       live,
+      streaming,
+      sessionSwitch,
+      warmReload,
+      snapshotSave,
+      overlays,
     };
     results.push(result);
     console.log(JSON.stringify(result));
@@ -657,9 +1295,42 @@ try {
   if (errors.length) {
     throw new Error(`Browser errors: ${errors.join("\n")}`);
   }
+  if (cpuProfile) {
+    const median = Object.fromEntries(
+      Object.entries(cpuRuns).map(([phase, tables]) => [phase, medianCpuTables(tables)]),
+    );
+    await writeFile(path.join(artifactDir, "cpu-profile.json"), JSON.stringify(median, null, 2));
+    const comparisons: Record<string, ReturnType<typeof compareCpuTables>> = {};
+    for (const [phase, tables] of Object.entries(median)) {
+      console.log(
+        formatCpuTables(
+          `Median ${phase} CPU (${runs} profiled runs; missing functions count as zero)`,
+          tables,
+        ),
+      );
+      if (baselineCpu) {
+        // SAFETY: Baseline phases were validated against the enabled benchmark phases.
+        comparisons[phase] = compareCpuTables(baselineCpu[phase]!, tables);
+        console.log(
+          formatCpuTables(
+            `${phase} CPU delta (candidate minus baseline)`,
+            { functions: comparisons[phase], files: [] },
+            true,
+          ),
+        );
+      }
+    }
+    if (baselineCpu) {
+      await writeFile(
+        path.join(artifactDir, "cpu-profile-compare.json"),
+        JSON.stringify(comparisons, null, 2),
+      );
+    }
+  }
   await context.close();
 } finally {
   await browser?.close();
+  await selectComparisonBundle(0);
   await server.close();
   sandbox.closeAllConnections();
   await new Promise<void>((resolve, reject) => {
@@ -670,17 +1341,39 @@ try {
     JSON.stringify(
       {
         head,
+        buildId,
         dirty,
         bundleDir,
+        comparisonBundleDirs,
         fixture: fixture.counts,
         sidebarView,
+        streamingReply: values["streaming-reply"],
+        sessionSwitch: values["session-switch"],
         sidebarListChurn: values["sidebar-list-churn"],
+        sidebarLiveChurn: fixture.sidebarLiveChurn,
+        duplicateBootReads: values["duplicate-boot-reads"],
+        dashboardMcpApp: values["dashboard-mcp-app"],
+        chatDashboardRoute: values["chat-dashboard-route"],
+        traced: !values.untraced,
+        cpuProfile,
+        cpuProfileCompare: values["cpu-profile-compare"],
         sidebarRowTransfer,
         sidebarComparison: values["sidebar-list-churn"]
           ? "Same final client bundle; full/delta wire response A/B using the production presenter and one synthetic query/history owner. This does not measure real Gateway selection, history reset/fallback lifecycle, or server projection CPU. Node IPC is outside the measured application response task."
           : undefined,
         latencyMs,
+        methodLatencyMs,
+        face,
+        shortRoute: values["short-route"],
+        fullUuidRoute: values["full-uuid-route"],
         frameGapMs,
+        captureMs,
+        sessionEventDurationMs,
+        sessionEventAncestorRefs: values["session-event-ancestor-refs"],
+        fixtureNowMs,
+        liveStartAtMs,
+        port,
+        sandboxPort,
         results,
       },
       null,
