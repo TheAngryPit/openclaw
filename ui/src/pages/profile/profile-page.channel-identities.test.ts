@@ -393,6 +393,13 @@ it("does not report a pending link as successful after the admin grant is revoke
     expect(page.querySelector("#settings-profile-channel-identities input")).not.toBeNull(),
   );
   let section = page.querySelector<HTMLElement>("#settings-profile-channel-identities")!;
+  await waitForFast(() =>
+    expect(
+      page.querySelector<HTMLButtonElement>(
+        "#settings-profile-channel-identities button[type=submit]",
+      )?.disabled,
+    ).toBe(false),
+  );
   for (const [label, value] of [
     ["Channel ID", identity.channelId],
     ["Configured account ID", identity.accountId],

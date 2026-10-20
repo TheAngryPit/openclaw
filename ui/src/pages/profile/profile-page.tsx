@@ -6,13 +6,14 @@ import type {
   UsersSetDisplayNameResult,
 } from "../../../../packages/gateway-protocol/src/index.ts";
 import {
+  GATEWAY_OWNER_PROFILE_ID,
   GIT_COAUTHOR_PREFERENCE_KEY,
   isGitCoauthorCreditEnabled,
 } from "../../../../packages/gateway-protocol/src/index.ts";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import { subtitleForRoute, titleForRoute } from "../../app-navigation.ts";
 import type { ApplicationContext, ApplicationGatewaySnapshot } from "../../app/context-types.ts";
-import { hasOperatorWriteAccess } from "../../app/operator-access.ts";
+import { hasOperatorSelfReadAccess, hasOperatorWriteAccess } from "../../app/operator-access.ts";
 import { ShellLayoutBoundary } from "../../app/shell-layout-traits-solid.tsx";
 import { invalidateUserPreferences, saveUserPreferences } from "../../app/user-prefs-cache.ts";
 import type { AuthenticatedUser } from "../../app/user-profile.ts";
@@ -35,11 +36,13 @@ import { registerProfileEnglish } from "../../i18n/locales/en-profile.ts";
 import { formatUiError } from "../../lib/format-error.ts";
 import { useApplication } from "../../lib/reactive/context.ts";
 import { registerEnglishCatalog, t } from "../../lib/reactive/i18n.ts";
+import { projectOwner } from "../../lib/reactive/projection.ts";
 import { assertUploadsEnabled } from "../../lib/uploads.ts";
 import "../../styles/profile.css";
 import { PROFILE_SETTINGS_TARGET_IDS } from "../config/settings-targets.ts";
 import { processProfileAvatar, ProfileAvatarError } from "./avatar-processing.ts";
 import { IdentitySection } from "./identity-section.tsx";
+import type { ModelAccountsTargetSource } from "./model-accounts-state.ts";
 import { ModelAccounts } from "./model-accounts.tsx";
 import { PersonalInstructions } from "./personal-instructions.tsx";
 import { userProfileAvatarUrl } from "./profile-avatar-url.ts";
@@ -72,6 +75,20 @@ type IdentityChange =
   | { kind: "git-coauthor"; enabled: boolean };
 
 class ProfileState {
+  private publishTarget?: () => void;
+  readonly modelAccountsTarget: ModelAccountsTargetSource = {
+    read: () => ({
+      gateway: this.context.gateway.snapshot,
+      identityId: this.selfUser?.id ?? null,
+      profileId: this.ownProfile?.id ?? null,
+    }),
+    subscribe: (listener) => {
+      this.publishTarget = listener;
+      return () => {
+        this.publishTarget = undefined;
+      };
+    },
+  };
   selfUser: AuthenticatedUser | null = null;
   ownProfile: UserProfile | null = null;
   displayName = "";
@@ -82,7 +99,9 @@ class ProfileState {
 
   client: GatewayBrowserClient | null = null;
   connected = false;
+  identityReady = false;
   connecting = false;
+  canRead = false;
   canWrite = false;
   connectionScopes: readonly string[] | null = null;
   identityRequestId = 0;
@@ -90,15 +109,22 @@ class ProfileState {
   channelIdentityProfileId: string | null = null;
   channelIdentityBusy: ProfileChannelIdentityBusyState = { loading: false, mutation: false };
   channelIdentityGenerations = { request: 0, target: 0 };
+  hello: ApplicationGatewaySnapshot["hello"] | undefined;
 
   constructor(
     readonly context: ApplicationContext,
-    readonly publish: () => void,
+    private readonly invalidate: () => void,
   ) {}
+  publish() {
+    this.invalidate();
+    this.publishTarget?.();
+  }
   dispose() {
+    this.publishTarget = undefined;
     this.advanceIdentityRequest(true);
     this.client = null;
     this.connected = false;
+    this.identityReady = false;
     this.channelIdentityProfileId = null;
     this.identityProfileReady = false;
     this.channelIdentityBusy = { loading: false, mutation: false };
@@ -114,38 +140,55 @@ class ProfileState {
   applyGatewaySnapshot(snapshot: ApplicationGatewaySnapshot) {
     const clientChanged = snapshot.client !== this.client;
     const nextConnected = snapshot.phase === "connected";
+    // Hello can precede users.self; unresolved identity is not a sign-out.
+    const identityReady = nextConnected && snapshot.selfUser !== undefined;
+    const nextCanRead = hasOperatorSelfReadAccess(snapshot.hello?.auth ?? null);
     const nextCanWrite = nextConnected && hasOperatorWriteAccess(snapshot.hello?.auth ?? null);
     const writeAccessChanged = nextCanWrite !== this.canWrite;
-    const connectionChanged = nextConnected !== this.connected;
+    const connectionTargetChanged =
+      nextConnected !== this.connected || identityReady !== this.identityReady;
+    const connectionChanged =
+      connectionTargetChanged || (nextConnected && this.hello !== snapshot.hello);
     const grantedScopes = snapshot.hello?.auth?.scopes ?? null;
     const nextConnectionScopes = nextConnected ? (grantedScopes ? [...grantedScopes] : null) : null;
-    const connectionScopesChanged = !sameConnectionScopes(
-      this.connectionScopes,
-      nextConnectionScopes,
-    );
-    const nextSelfUser = nextConnected
+    const connectionScopesChanged =
+      (nextConnected || clientChanged) &&
+      !sameConnectionScopes(this.connectionScopes, nextConnectionScopes);
+    const nextSelfUser = identityReady
       ? resolveCurrentSelfUser({ snapshotUser: snapshot.selfUser })
-      : null;
+      : clientChanged
+        ? null
+        : this.selfUser;
     const selfProfileChanged =
       nextSelfUser?.id !== this.selfUser?.id ||
       nextSelfUser?.identity?.id !== this.selfUser?.identity?.id;
-    const identityTargetChanged = clientChanged || connectionChanged || selfProfileChanged;
+    const identityTargetChanged = clientChanged || connectionTargetChanged || selfProfileChanged;
+    const writeAccessLost =
+      nextConnected &&
+      !nextCanWrite &&
+      this.connectionScopes?.some(
+        (scope) => scope === "operator.write" || scope === "operator.admin",
+      );
+    const readAccessLost = nextConnected && this.canRead && !nextCanRead;
     const identitySourceChanged =
-      identityTargetChanged || writeAccessChanged || connectionScopesChanged;
+      clientChanged || selfProfileChanged || writeAccessLost || readAccessLost;
+    const requestSourceChanged =
+      identitySourceChanged || connectionChanged || connectionScopesChanged || writeAccessChanged;
     this.client = snapshot.client;
     this.connected = nextConnected;
+    this.identityReady = identityReady;
+    this.hello = snapshot.hello;
     this.connecting = snapshot.phase === "connecting" || snapshot.phase === "reconnecting";
-    this.canWrite = nextCanWrite;
+    this.canRead = nextConnected ? nextCanRead : clientChanged ? false : this.canRead;
+    this.canWrite = nextCanWrite && identityReady;
     // Hello records this connection's negotiated grants, not the profile's role ceiling.
-    this.connectionScopes = nextConnectionScopes;
+    this.connectionScopes =
+      nextConnected || clientChanged
+        ? (snapshot.hello?.auth?.scopes ?? null)
+        : this.connectionScopes;
     this.selfUser = nextSelfUser;
-    if (identitySourceChanged) {
+    if (requestSourceChanged) {
       this.advanceIdentityRequest(identityTargetChanged);
-      if (identityTargetChanged || writeAccessChanged) {
-        this.ownProfile = null;
-        this.displayName = "";
-        this.gitCoauthorEnabled = true;
-      }
       this.identityLoading = false;
       this.identityBusy = null;
       this.identityError = null;
@@ -158,11 +201,16 @@ class ProfileState {
         this.channelIdentityProfileId = null;
       }
     }
+    if (identitySourceChanged) {
+      this.ownProfile = null;
+      this.displayName = "";
+      this.gitCoauthorEnabled = true;
+    }
     this.publish();
-    if (!nextConnected || !snapshot.client) {
+    if (!identityReady || !snapshot.client) {
       return;
     }
-    if (identitySourceChanged) {
+    if (requestSourceChanged) {
       void this.loadIdentity();
     }
     void this.context.agents.ensureList().then((list) => {
@@ -174,7 +222,7 @@ class ProfileState {
 
   async loadIdentity() {
     const client = this.client;
-    if (!client || !this.connected || this.identityLoading) {
+    if (!client || !this.identityReady || !this.canRead || this.identityLoading) {
       return;
     }
     const requestId = this.advanceIdentityRequest();
@@ -200,7 +248,8 @@ class ProfileState {
       this.displayName = hasUnsavedDisplayName ? displayNameDraft : (profile.displayName ?? "");
       this.gitCoauthorEnabled = true;
       this.publish();
-      if (profile.githubIdentity) {
+      // Consent belongs to the person, not to a display-primary GitHub account.
+      if (profile.id !== GATEWAY_OWNER_PROFILE_ID) {
         const { loadUserPreferences } = await import("../../app/user-prefs-request.ts");
         if (requestId !== this.identityRequestId) {
           return;
@@ -236,7 +285,7 @@ class ProfileState {
       !this.canWrite ||
       this.identityBusy ||
       this.identityLoading ||
-      (change.kind === "git-coauthor" && !profile.githubIdentity)
+      (change.kind === "git-coauthor" && profile.id === GATEWAY_OWNER_PROFILE_ID)
     ) {
       return;
     }
@@ -338,7 +387,7 @@ class ProfileState {
 
   refreshManually() {
     if (
-      this.connected &&
+      this.identityReady &&
       !this.identityBusy &&
       !this.identityLoading &&
       !this.channelIdentityBusy.loading &&
@@ -374,6 +423,8 @@ function accessSummary(scopes: readonly string[] | null) {
 
 export function ProfilePage() {
   const context = useApplication();
+  const agents = projectOwner(context.agents, (source) => source.state.agentsList);
+  const identities = projectOwner(context.agentIdentity, (source) => source);
   const [revision, setRevision] = createSignal(0, { ownedWrite: true });
   const state = new ProfileState(context, () => setRevision((value) => value + 1));
   const view = () => {
@@ -384,6 +435,7 @@ export function ProfilePage() {
     state.channelIdentityBusy = busyState;
     state.publish();
   };
+  // Retire identity requests synchronously when connection authority changes.
   const stops = [
     context.gateway.subscribe((snapshot) => state.applyGatewaySnapshot(snapshot)),
     context.agents.subscribe(state.publish),
@@ -407,9 +459,10 @@ export function ProfilePage() {
     state.dispose();
   });
   const connected = () => view().connected && view().client !== null;
+  const hasPresentation = () =>
+    connected() || view().connectionScopes !== null || view().selfUser !== null;
   const agent = () => {
-    revision();
-    const list = context.agents.state.agentsList;
+    const list = agents.read();
     const id = list?.defaultId ?? "main";
     return list?.agents.find((row) => row.id === id) ?? { id };
   };
@@ -442,6 +495,7 @@ export function ProfilePage() {
             <button
               class="btn profile-refresh"
               disabled={
+                !view().identityReady ||
                 view().identityLoading ||
                 view().identityBusy !== null ||
                 view().channelIdentityBusy.loading ||
@@ -457,7 +511,7 @@ export function ProfilePage() {
       <SettingsWorkspace>
         <SettingsPage>
           <Show
-            when={connected()}
+            when={hasPresentation()}
             fallback={
               <SettingsGroup>
                 {view().connecting ? (
@@ -473,7 +527,7 @@ export function ProfilePage() {
             <ProfileHero
               row={agent()}
               user={view().selfUser}
-              identity={context.agentIdentity.get(agent().id)}
+              identity={identities.read().get(agent().id)}
             />
             <div id="settings-profile-access">
               <SettingsSection title={t("profilePage.access.title")}>
@@ -525,7 +579,7 @@ export function ProfilePage() {
               fallback={
                 <div id={PROFILE_SETTINGS_TARGET_IDS.identity}>
                   <SettingsSection title={t("profilePage.identity.title")}>
-                    {view().identityLoading ? (
+                    {view().identityLoading || (view().connected && !view().identityReady) ? (
                       <SettingsLoadingSkeleton label={t("profilePage.identity.loading")} rows={2} />
                     ) : (
                       <SettingsEmpty
@@ -547,6 +601,7 @@ export function ProfilePage() {
                 config={context.config}
                 profile={view().ownProfile!}
                 canWrite={view().canWrite}
+                connected={view().identityReady}
                 avatarUrl={avatarUrl()}
                 displayName={view().displayName}
                 gitCoauthorEnabled={view().gitCoauthorEnabled}
@@ -579,15 +634,14 @@ export function ProfilePage() {
           </Show>
           <PersonalInstructions
             hidden={
-              !connected() ||
+              !hasPresentation() ||
               view().context.gateway.snapshot.hello?.policy?.hasMultipleSessionSharingIdentities !==
                 true
             }
           />
-          <Show when={connected()}>
+          <Show when={hasPresentation()}>
             <ModelAccounts
-              identityId={view().selfUser?.id ?? null}
-              profileId={view().ownProfile?.id ?? null}
+              target={state.modelAccountsTarget}
               personLabel={
                 view().ownProfile
                   ? view().ownProfile!.displayName?.trim() ||

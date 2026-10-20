@@ -3,6 +3,7 @@ import { For, Show } from "solid-js";
 import { Icon } from "../../../components/solid/icon.tsx";
 import type { MessageContentItem } from "../../../lib/chat/chat-types.ts";
 import { t } from "../../../lib/reactive/i18n.ts";
+import { attachmentContextCopyRef } from "./chat-attachment-context-copy.ts";
 import { AttachmentFileIcon } from "./chat-attachment-file-icon-solid.tsx";
 import { omittedMediaReason } from "./chat-message-media.ts";
 
@@ -28,6 +29,7 @@ export type AssistantAttachmentStatusCardProps = {
   badge: string;
   reason?: string;
   onRetry?: () => void;
+  onOpen?: () => void;
   onAllow?: () => void;
   path?: string;
 };
@@ -35,16 +37,18 @@ export type AssistantAttachmentStatusCardProps = {
 export function AssistantAttachmentStatusCard(
   props: AssistantAttachmentStatusCardProps,
 ): JSX.Element {
+  const copyRef = attachmentContextCopyRef(() => ({ name: props.label }));
   const unavailable = () => props.reason !== undefined;
-  const action = () => props.onAllow ?? props.onRetry;
+  const action = () => props.onAllow ?? props.onRetry ?? props.onOpen;
   const statusClass = () =>
     !unavailable()
       ? "chat-assistant-attachment-card--checking"
-      : props.onRetry || props.onAllow
+      : props.onRetry || props.onAllow || props.onOpen
         ? "chat-assistant-attachment-card--recoverable"
         : "chat-assistant-attachment-card--definitive";
   return (
     <div
+      ref={copyRef}
       class={[
         "chat-assistant-attachment-card",
         "chat-assistant-attachment-card--blocked",
@@ -110,18 +114,31 @@ export function AssistantAttachmentStatusCard(
           <button
             class={[
               "chat-assistant-attachment-card__action chat-assistant-attachment-card__action--labeled",
-              { "chat-assistant-attachment-card__retry": !props.onAllow },
+              { "chat-assistant-attachment-card__retry": !props.onAllow && Boolean(props.onRetry) },
             ]}
             type="button"
             onClick={() => action()?.()}
           >
-            <Show when={!props.onAllow}>
+            <Show when={!props.onAllow && Boolean(props.onRetry)}>
               <Icon name="refresh" />
             </Show>
-            {props.onAllow ? t("chat.attachments.allowImage") : t("common.retry")}
+            {props.onAllow
+              ? t("chat.attachments.allowImage")
+              : props.onRetry
+                ? t("common.retry")
+                : t("chat.attachments.openOriginal")}
           </button>
         </Show>
       </div>
+      <Show when={props.onOpen && (props.onRetry || props.onAllow)}>
+        <button
+          type="button"
+          class="chat-assistant-attachment-card__action chat-assistant-attachment-card__action--labeled chat-assistant-attachment-card__original"
+          onClick={() => props.onOpen?.()}
+        >
+          {t("chat.attachments.openOriginal")}
+        </button>
+      </Show>
     </div>
   );
 }

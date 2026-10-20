@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { observeSqliteReadSql } from "../../test/helpers/sqlite-statement-execution-counter.js";
 import type { SessionEntry } from "../config/sessions.js";
 import { loadSessionEntry, replaceSessionEntry } from "../config/sessions/session-accessor.js";
 import { writeSessionEntry } from "../config/sessions/session-accessor.sqlite-entry-store.js";
@@ -75,14 +76,6 @@ describe("session groups catalog", () => {
       await replaceSessionEntry({ agentId, env, storePath, sessionKey }, entry);
     }
     return storePath;
-  }
-
-  function useLegacyGroupSchema() {
-    // Publish fixture DDL before reopening; admitted files do not observe outside writers.
-    const { db } = openOpenClawStateDatabase({ env });
-    db.exec("ALTER TABLE session_groups DROP COLUMN cwd;");
-    db.exec("ALTER TABLE session_groups DROP COLUMN worktree;");
-    closeOpenClawStateDatabaseForTest();
   }
 
   it("replaces the ordered catalog with deduped trimmed names", async () => {
@@ -180,7 +173,20 @@ describe("session groups catalog", () => {
     expect(readConfigMachineState("sidebar.sectionOrder", { env })).toEqual(expectedSectionOrder);
 
     await putSessionGroups({ cfg, names: ["Beta", "Alpha"], env });
-    expect(readSessionGroupCatalog(env).sectionOrder).toEqual(expectedSectionOrder);
+    const { db } = openOpenClawStateDatabase({ env });
+    const reads = observeSqliteReadSql(requireNodeSqlite().StatementSync.prototype);
+    try {
+      expect(readSessionGroupCatalogSnapshot(db)).toMatchObject({
+        groups: [
+          { name: "Beta", position: 0 },
+          { name: "Alpha", position: 1 },
+        ],
+        sectionOrder: expectedSectionOrder,
+      });
+      expect(reads.queries).toHaveLength(1);
+    } finally {
+      reads.restore();
+    }
   });
 
   it("rejects renaming an unknown group after defaults schema activation", async () => {
@@ -216,7 +222,11 @@ describe("session groups catalog", () => {
   });
 
   it("keeps a stale defaults update schema-free on a legacy database", async () => {
-    useLegacyGroupSchema();
+    // Publish fixture DDL before reopening; admitted files do not observe outside writers.
+    const { db } = openOpenClawStateDatabase({ env });
+    db.exec("ALTER TABLE session_groups DROP COLUMN cwd;");
+    db.exec("ALTER TABLE session_groups DROP COLUMN worktree;");
+    closeOpenClawStateDatabaseForTest();
 
     expect(
       await updateSessionGroupDefaults("Missing", { cwd: "/repos/missing", worktree: true }, env),
@@ -224,9 +234,9 @@ describe("session groups catalog", () => {
     const columns = openOpenClawStateDatabase({ env })
       .db.prepare("PRAGMA table_info(session_groups)")
       .all() as Array<{ name: string }>;
-    expect(columns.map((column) => column.name)).not.toEqual(
-      expect.arrayContaining(["cwd", "worktree"]),
-    );
+    const columnNames = columns.map((column) => column.name);
+    expect(columnNames).not.toContain("cwd");
+    expect(columnNames).not.toContain("worktree");
   });
 
   it("publishes catalog writes and serves repeated viewers without parent-thread SQLite", async () => {

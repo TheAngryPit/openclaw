@@ -4,7 +4,7 @@ Install the pinned Ruby bundle:
 
 ```bash
 cd apps/ios
-# Install Ruby 3.4.11 with mise or another .ruby-version-aware manager.
+# Install Ruby 4.0.7 with mise or another .ruby-version-aware manager.
 ruby --version
 gem install bundler -v 4.0.22
 bundle _4.0.22_ install
@@ -278,6 +278,63 @@ phase durations, setup RPC progress, and bounded exit/error diagnostics.
 Raw logs and setup codes are excluded. Setup-code timeouts are preparation failures
 and prevent native test execution.
 
+## Temporary resource investigation
+
+Qualification, screenshot-only runs, and store/TestFlight uploads collect a
+bounded `ios-resource-timeline.jsonl` while their main command runs. This temporary
+instrumentation investigates runner contention; it does not change test deadlines,
+simulator services, build parallelism, or release admission.
+
+The collector takes one serial sample approximately every 15 seconds. It records
+host CPU counters, load, memory compression and swap activity, memory-pressure
+level, disk activity, and at most twelve top CPU/RSS process rows. Process rows
+contain PIDs, parent PIDs, fixed role names, state, CPU time, and RSS; unknown names
+become `other`. It never exports arguments, environment values, paths, or application
+content. Fixed phase labels correlate samples with builds, simulator startup,
+Gateway preparation, native tests, screenshots, archiving, and upload.
+
+Each native observation requests termination after two seconds. A starved runner
+can delay process termination and output closure beyond that deadline. Samples
+record their start/end timestamps and phases plus each probe's elapsed wall time;
+slow samples can span phases and must not be treated as instantaneous snapshots.
+Collection is independent of the workload, never overlaps or catches up after a
+slow sample, and stops at a 4 MiB output limit. Missing observations remain
+diagnostics, not release failures.
+The footer records collector Node CPU time and RSS; native observation subprocess
+CPU is excluded. RSS is not physical memory footprint, CPU deltas miss processes
+that start and exit between samples, and sparse sampling cannot establish a
+continuous peak. Interpret memory pressure and swap activity alongside free memory.
+
+The timeline is retained with the qualification proof or screenshot diagnostics,
+including after failures. Store runs also preserve the existing sanitized screenshot
+resource/startup/crash JSON before their temporary source checkout is removed.
+Xcode build timing summaries appear in screenshot/archive logs; qualification
+exports recognized task totals as `buildTimings` in its proof. Task totals can
+overlap and must not be summed as wall time.
+
+For a non-publishing comparison on one fixed candidate branch:
+
+```bash
+gh workflow run ios-release-e2e.yml --ref YOUR_BRANCH -f mode=stock -f resource_diagnostics=false
+gh workflow run ios-release-e2e.yml --ref YOUR_BRANCH -f mode=stock -f resource_diagnostics=true
+gh workflow run ios-store-release.yml --ref YOUR_BRANCH -f operation=screenshots -f resource_diagnostics=true
+gh workflow run ios-store-release.yml --ref YOUR_BRANCH -f operation=screenshots -f resource_diagnostics=false
+```
+
+Wait for each arm of the same flow to finish before starting the next. Keep source,
+Gateway selection, runner resources, Xcode, and simulator runtime matched; a single
+pair checks integration, not a reliable performance percentile. The switch only
+affects non-publishing dispatches. Real store/TestFlight operations keep collection
+enabled. Locally the same wrapper accepts `OPENCLAW_IOS_RESOURCE_DIAGNOSTICS=0`:
+
+```bash
+node scripts/ios-resource-timeline.mjs --output /tmp/ios-resource-timeline.jsonl -- pnpm ios:screenshots
+```
+
+Remove the collector, phase markers, and comparison switches after the contention
+cause and its improvement are verified. Do not make full Instruments recordings,
+allocation tracing, or automatic sysdiagnose part of normal release runs.
+
 ## GitHub Actions
 
 Run **iOS Store Release** from `main` with one of these operations:
@@ -293,6 +350,11 @@ readonly encrypted signing assets, a job-owned temporary keychain, and the share
 `ios-release` concurrency lock. TestFlight does not stage the App Store listing.
 For a failure after upload, use [staging recovery](../VERSIONING.md#staging-recovery)
 with the saved destination; do not repeat the upload.
+
+The `release` path also runs every Monday at 11:00 AM Pacific, with native
+qualification and the same store environment. Weekly runs send Discord results;
+manual operations do not. See [weekly mobile releases](https://docs.openclaw.ai/ci/scheduled-workflows#weekly-mobile-store-releases)
+for webhook setup and scheduling behavior.
 
 Create `ios-testflight` as a GitHub environment restricted to `main` with no
 required reviewers, and make the secrets below available to it. Keep the
@@ -315,9 +377,9 @@ gh workflow run ios-store-release.yml --ref main -f operation=testflight
 
 Inspect `testflight-result.json` in the recovery artifact and the matching build
 and group in App Store Connect. Once the manual flow is verified, set repository
-variable `IOS_TESTFLIGHT_ENABLED` to `true` to enable scheduled runs. Manual
+variable `IOS_TESTFLIGHT_ENABLED` to `true` to enable daily TestFlight runs. Manual
 TestFlight dispatch is available regardless of that activation variable. Set it
-back to `false` to stop future scheduled jobs without disabling manual releases.
+back to `false` to stop daily TestFlight jobs without disabling weekly or manual releases.
 
 Repository/environment secrets required by name:
 
