@@ -1,4 +1,3 @@
-import path from "node:path";
 import { createServer, type ViteDevServer } from "vite";
 import { expect, it } from "vitest";
 import type { GatewayServer } from "../../../src/gateway/server-public.ts";
@@ -31,7 +30,6 @@ suite.define(() => {
     });
     let gateway: GatewayServer | undefined;
     let proxy: ViteDevServer | undefined;
-    const proofDir = process.env.OPENCLAW_CAPTURE_UI_PROOF === "1" ? suite.artifactDir : null;
     await runQaGatewayFixture(
       async () => {
         setDisplayName(ensureProfileForEmail(authenticatedUser).id, "Test Person");
@@ -107,14 +105,7 @@ suite.define(() => {
         gatewayUrl.protocol = "ws:";
 
         await suite.withPage(
-          {
-            locale: "en-US",
-            serviceWorkers: "block",
-            viewport: { height: 800, width: 1280 },
-            ...(proofDir
-              ? { recordVideo: { dir: proofDir, size: { height: 800, width: 1280 } } }
-              : {}),
-          },
+          { locale: "en-US", serviceWorkers: "block", viewport: { height: 800, width: 1280 } },
           async ({ page }) => {
             const text = (selector: string) =>
               expect.poll(() => page.locator(selector).textContent());
@@ -128,13 +119,8 @@ suite.define(() => {
             await text(".profile-hero__name").toBe("Test Person");
             await text(".profile-hero__handle").toContain(authenticatedUser);
             await text(".profile-hero").not.toContain("Clipper");
-            if (proofDir) {
-              await page.screenshot({
-                animations: "disabled",
-                path: path.join(proofDir, "01-real-gateway-authenticated-profile.png"),
-              });
-            }
-            await page.locator(".identity-name-control input").fill("Local draft");
+            const draft = page.locator(".identity-name-control input");
+            await draft.fill("Local draft");
             const editor = await page.context().newPage();
             await editor.goto(new URL("settings/profile", suite.server.baseUrl).href);
             const nameInput = editor.locator(".identity-name-control input");
@@ -145,15 +131,7 @@ suite.define(() => {
             await nameInput.fill("");
             await nameInput.press("Enter");
             await text(".profile-hero__name").toBe(authenticatedUser);
-            await expect
-              .poll(() => page.locator(".identity-name-control input").inputValue())
-              .toBe("Local draft");
-            if (proofDir) {
-              await page.screenshot({
-                animations: "disabled",
-                path: path.join(proofDir, "02-real-gateway-cleared-profile.png"),
-              });
-            }
+            await expect.poll(() => draft.inputValue()).toBe("Local draft");
 
             const channelIdentity = {
               channelId: "synthetic-e2e-channel",
@@ -203,12 +181,6 @@ suite.define(() => {
             await expect.poll(() => identityRow.count()).toBe(1);
             await expect.poll(() => identityRow.textContent()).toContain(channelIdentity.senderId);
             await expectIdentitySectionInFrame(".settings-row", channelIdentity.senderId);
-            if (proofDir) {
-              await page.screenshot({
-                animations: "disabled",
-                path: path.join(proofDir, "03-real-gateway-channel-link-added.png"),
-              });
-            }
 
             const reloadWithLink = await page.reload();
             expect(reloadWithLink?.status()).toBe(200);
@@ -218,12 +190,6 @@ suite.define(() => {
             await expect.poll(() => identityRow.count()).toBe(1);
             await expect.poll(() => identityRow.textContent()).toContain(channelIdentity.senderId);
             await expectIdentitySectionInFrame(".settings-row", channelIdentity.senderId);
-            if (proofDir) {
-              await page.screenshot({
-                animations: "disabled",
-                path: path.join(proofDir, "04-real-gateway-channel-link-reloaded.png"),
-              });
-            }
 
             await identitySection
               .getByRole("button", {
@@ -251,12 +217,6 @@ suite.define(() => {
               ".settings-empty",
               "No channel accounts are linked to your profile.",
             );
-            if (proofDir) {
-              await page.screenshot({
-                animations: "disabled",
-                path: path.join(proofDir, "05-real-gateway-channel-link-removed-reloaded.png"),
-              });
-            }
           },
         );
       },
