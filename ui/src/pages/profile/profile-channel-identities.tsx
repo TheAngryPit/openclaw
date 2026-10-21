@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createSignal, onCleanup } from "solid-js";
+import { For, Show, createEffect, createMemo, onCleanup } from "solid-js";
 import {
   SettingsEmpty,
   SettingsLoadingSkeleton,
@@ -9,10 +9,10 @@ import { registerProfileEnglish } from "../../i18n/locales/en-profile.ts";
 import { useApplication } from "../../lib/reactive/context.ts";
 import { registerEnglishCatalog, t } from "../../lib/reactive/i18n.ts";
 import {
-  ProfileChannelIdentitiesController,
+  createProfileChannelIdentitiesState,
   type ProfileChannelIdentityBusyState,
   type ProfileChannelIdentityInputs,
-} from "./profile-channel-identities-controller.ts";
+} from "./profile-channel-identities-state.ts";
 
 registerEnglishCatalog(registerProfileEnglish);
 
@@ -22,11 +22,8 @@ export type ProfileChannelIdentitiesProps = ProfileChannelIdentityInputs & {
 
 export function ProfileChannelIdentities(props: ProfileChannelIdentitiesProps) {
   const application = useApplication();
-  const [revision, setRevision] = createSignal(0);
-  const controller = new ProfileChannelIdentitiesController(() =>
-    setRevision((value) => value + 1),
-  );
-  const readInputs = (): ProfileChannelIdentityInputs => ({
+  const identitiesState = createProfileChannelIdentitiesState();
+  const inputs = createMemo<ProfileChannelIdentityInputs>(() => ({
     profileId: props.profileId,
     visible: props.visible,
     profileReady: props.profileReady,
@@ -34,22 +31,21 @@ export function ProfileChannelIdentities(props: ProfileChannelIdentitiesProps) {
     identityGeneration: props.identityGeneration,
     targetGeneration: props.targetGeneration,
     generations: props.generations,
-  });
+  }));
   const unsubscribe = application.gateway.subscribe((snapshot) =>
-    controller.update(readInputs(), snapshot),
+    identitiesState.update(inputs(), snapshot),
   );
-  createEffect(readInputs, (inputs) => controller.update(inputs, application.gateway.snapshot));
+  createEffect(inputs, (currentInputs) =>
+    identitiesState.update(currentInputs, application.gateway.snapshot),
+  );
   onCleanup(() => {
     unsubscribe();
-    controller.dispose();
+    identitiesState.dispose();
   });
 
   let lastReportedBusy: string | null = null;
   createEffect(
-    () => {
-      revision();
-      return controller.busyState;
-    },
+    () => identitiesState.state().busyState,
     (busyState) => {
       const key = `${busyState.loading}:${busyState.mutation}`;
       if (key === lastReportedBusy) {
@@ -60,10 +56,7 @@ export function ProfileChannelIdentities(props: ProfileChannelIdentitiesProps) {
     },
   );
 
-  const state = () => {
-    revision();
-    return controller;
-  };
+  const state = identitiesState.state;
 
   return (
     <openclaw-profile-channel-identities style={{ display: "contents" }}>
@@ -73,7 +66,7 @@ export function ProfileChannelIdentities(props: ProfileChannelIdentitiesProps) {
           aria-busy={state().busy ? "true" : "false"}
           onSubmit={(event) => {
             event.preventDefault();
-            void controller.linkIdentity();
+            void identitiesState.linkIdentity();
           }}
         >
           <SettingsSection
@@ -100,7 +93,7 @@ export function ProfileChannelIdentities(props: ProfileChannelIdentitiesProps) {
                         class="btn"
                         aria-label={t("profilePage.channelIdentities.retry")}
                         disabled={state().loading || state().mutation !== null}
-                        onClick={() => void controller.loadLinks()}
+                        onClick={() => void identitiesState.loadLinks()}
                       >
                         {t("profilePage.channelIdentities.retry")}
                       </button>
@@ -140,7 +133,7 @@ export function ProfileChannelIdentities(props: ProfileChannelIdentitiesProps) {
                               link.identity.senderId,
                             ].join(", ")}`}
                             disabled={state().busy}
-                            onClick={() => void controller.unlinkIdentity(link)}
+                            onClick={() => void identitiesState.unlinkIdentity(link)}
                           >
                             {state().isRemoving(link)
                               ? t("profilePage.channelIdentities.removing")
@@ -169,7 +162,9 @@ export function ProfileChannelIdentities(props: ProfileChannelIdentitiesProps) {
                       required
                       value={state()[field]}
                       disabled={state().formDisabled}
-                      onInput={(event) => controller.setDraft(field, event.currentTarget.value)}
+                      onInput={(event) =>
+                        identitiesState.setDraft(field, event.currentTarget.value)
+                      }
                     />
                   }
                 />

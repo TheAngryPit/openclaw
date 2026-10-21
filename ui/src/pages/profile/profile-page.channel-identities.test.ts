@@ -251,6 +251,168 @@ it("offers an accessible retry after a failed list and renders the empty state",
   expect(page.querySelector('#settings-profile-channel-identities [role="alert"]')).toBeNull();
 });
 
+it("admits only one channel identity link before the reactive view flushes", async () => {
+  const pendingLink = createDeferred<{
+    profileId: string;
+    identity: { channelId: string; accountId: string; senderId: string };
+  }>();
+  const identity = { channelId: "telegram", accountId: "main", senderId: "same-turn" };
+  const request = vi.fn(async (method: string) => {
+    if (method === "users.self") {
+      return { profile: modelAccountProfile };
+    }
+    if (method === "users.listModelAccounts") {
+      return { profileId: modelAccountProfile.id, accounts: [], links: [] };
+    }
+    if (method === "users.listChannelIdentities") {
+      return { links: [] };
+    }
+    if (method === "users.linkChannelIdentity") {
+      return pendingLink.promise;
+    }
+    if (method === "users.prefs.get") {
+      return { status: "no_durable_identity" };
+    }
+    throw new Error("unexpected method: " + method);
+  });
+  const harness = createChannelIdentityHarness(request as GatewayBrowserClient["request"]);
+  const page = mountProfilePage(harness.context);
+  try {
+    await waitForFast(() =>
+      expect(
+        page.querySelector<HTMLButtonElement>(
+          "#settings-profile-channel-identities button[type=submit]",
+        )?.disabled,
+      ).toBe(false),
+    );
+
+    const section = page.querySelector<HTMLFormElement>("#settings-profile-channel-identities")!;
+    for (const [label, value] of [
+      ["Channel ID", identity.channelId],
+      ["Configured account ID", identity.accountId],
+      ["Native sender ID", identity.senderId],
+    ] as const) {
+      const input = section.querySelector<HTMLInputElement>('input[aria-label="' + label + '"]')!;
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    flush();
+
+    const form = section;
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+
+    const linkCalls = request.mock.calls.filter(
+      ([method]) => method === "users.linkChannelIdentity",
+    );
+    expect(linkCalls).toHaveLength(1);
+    expect(linkCalls[0]).toEqual([
+      "users.linkChannelIdentity",
+      { profileId: modelAccountProfile.id, identity },
+    ]);
+
+    pendingLink.resolve({ profileId: modelAccountProfile.id, identity });
+    await waitForFast(() =>
+      expect(section.querySelector('[role="status"]')?.textContent).toContain(
+        "Channel account link added.",
+      ),
+    );
+  } finally {
+    pendingLink.resolve({ profileId: modelAccountProfile.id, identity });
+    await pendingLink.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+    flush();
+  }
+});
+
+it("reloads links after a stale mutation releases its guard without a view flush", async () => {
+  const pendingLink = createDeferred<{
+    profileId: string;
+    identity: { channelId: string; accountId: string; senderId: string };
+  }>();
+  const identity = { channelId: "telegram", accountId: "main", senderId: "refreshed" };
+  let links: Array<{ profileId: string; identity: typeof identity }> = [];
+  let listCalls = 0;
+  let selfCalls = 0;
+  let preferenceCalls = 0;
+  const request = vi.fn(async (method: string, params?: unknown) => {
+    if (method === "users.self") {
+      selfCalls += 1;
+      return { profile: modelAccountProfile };
+    }
+    if (method === "users.listModelAccounts") {
+      return { profileId: modelAccountProfile.id, accounts: [], links: [] };
+    }
+    if (method === "users.prefs.get") {
+      preferenceCalls += 1;
+      return { status: "no_durable_identity" };
+    }
+    if (method === "users.listChannelIdentities") {
+      expect(params).toEqual({ profileId: modelAccountProfile.id });
+      listCalls += 1;
+      return { links };
+    }
+    if (method === "users.linkChannelIdentity") {
+      links = [params as { profileId: string; identity: typeof identity }];
+      return pendingLink.promise;
+    }
+    throw new Error("unexpected method: " + method);
+  });
+  const harness = createChannelIdentityHarness(request as GatewayBrowserClient["request"]);
+  const page = mountProfilePage(harness.context);
+  try {
+    await waitForFast(() =>
+      expect(
+        page.querySelector<HTMLButtonElement>(
+          "#settings-profile-channel-identities button[type=submit]",
+        )?.disabled,
+      ).toBe(false),
+    );
+    expect(listCalls).toBe(1);
+    expect(selfCalls).toBe(1);
+
+    const section = page.querySelector<HTMLFormElement>("#settings-profile-channel-identities")!;
+    for (const [label, value] of [
+      ["Channel ID", identity.channelId],
+      ["Configured account ID", identity.accountId],
+      ["Native sender ID", identity.senderId],
+    ] as const) {
+      const input = section.querySelector<HTMLInputElement>('input[aria-label="' + label + '"]')!;
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    section.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await waitForFast(() =>
+      expect(request.mock.calls.some(([method]) => method === "users.linkChannelIdentity")).toBe(
+        true,
+      ),
+    );
+
+    harness.emitHello(
+      gatewayHelloForMethods(channelIdentityMethods, ["operator.admin", "operator.read"]),
+    );
+    await waitForFast(() => expect(preferenceCalls).toBe(2));
+    expect(selfCalls).toBe(2);
+    expect(listCalls).toBe(1);
+    flush();
+
+    pendingLink.resolve({ profileId: modelAccountProfile.id, identity });
+    await waitForFast(() => expect(listCalls).toBe(2));
+
+    await waitForFast(() => expect(section.textContent).toContain(identity.senderId));
+    expect(request).toHaveBeenCalledWith("users.listChannelIdentities", {
+      profileId: modelAccountProfile.id,
+    });
+  } finally {
+    pendingLink.resolve({ profileId: modelAccountProfile.id, identity });
+    await pendingLink.promise;
+    await Promise.resolve();
+    await Promise.resolve();
+    flush();
+  }
+});
+
 it("retires an in-flight channel identity list when negotiated grants change", async () => {
   const oldList = createDeferred<{
     links: Array<{

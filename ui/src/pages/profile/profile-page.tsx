@@ -46,7 +46,7 @@ import type { ModelAccountsTargetSource } from "./model-accounts-state.ts";
 import { ModelAccounts } from "./model-accounts.tsx";
 import { PersonalInstructions } from "./personal-instructions.tsx";
 import { userProfileAvatarUrl } from "./profile-avatar-url.ts";
-import type { ProfileChannelIdentityBusyState } from "./profile-channel-identities-controller.ts";
+import type { ProfileChannelIdentityBusyState } from "./profile-channel-identities-state.ts";
 import { ProfileChannelIdentities } from "./profile-channel-identities.tsx";
 import { ProfileHero } from "./profile-hero.tsx";
 
@@ -438,8 +438,8 @@ export function ProfilePage() {
   // Retire identity requests synchronously when connection authority changes.
   const stops = [
     context.gateway.subscribe((snapshot) => state.applyGatewaySnapshot(snapshot)),
-    context.agents.subscribe(state.publish),
-    context.agentIdentity.subscribe(state.publish),
+    context.agents.subscribe(() => state.publish()),
+    context.agentIdentity.subscribe(() => state.publish()),
     context.gateway.subscribeEvents((event) => {
       if (
         !state.identityBusy &&
