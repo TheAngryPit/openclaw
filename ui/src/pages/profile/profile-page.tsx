@@ -46,7 +46,13 @@ import type { ModelAccountsTargetSource } from "./model-accounts-state.ts";
 import { ModelAccounts } from "./model-accounts.tsx";
 import { PersonalInstructions } from "./personal-instructions.tsx";
 import { userProfileAvatarUrl } from "./profile-avatar-url.ts";
-import type { ProfileChannelIdentityBusyState } from "./profile-channel-identities-state.ts";
+import {
+  createProfileChannelIdentitiesState,
+  sameConnectionScopes,
+  type ProfileChannelIdentityBusyState,
+  type ProfileChannelIdentityInputs,
+  type ProfileChannelIdentitiesState,
+} from "./profile-channel-identities-state.ts";
 import { ProfileChannelIdentities } from "./profile-channel-identities.tsx";
 import { ProfileHero } from "./profile-hero.tsx";
 
@@ -55,20 +61,6 @@ registerEnglishCatalog(registerProfileEnglish);
 
 const PROFILE_DOCS_URL = "https://docs.openclaw.ai/concepts/user-model";
 
-function sameConnectionScopes(
-  left: readonly string[] | null,
-  right: readonly string[] | null,
-): boolean {
-  if (left === null || right === null) {
-    return left === right;
-  }
-  const leftScopes = new Set(left);
-  const rightScopes = new Set(right);
-  return (
-    leftScopes.size === rightScopes.size && [...leftScopes].every((scope) => rightScopes.has(scope))
-  );
-}
-
 type IdentityChange =
   | { kind: "display-name" }
   | { kind: "avatar"; file: File }
@@ -76,6 +68,9 @@ type IdentityChange =
 
 class ProfileState {
   private publishTarget?: () => void;
+  private latestGatewaySnapshot: ApplicationGatewaySnapshot;
+  private syncingChannelIdentityState = false;
+  channelIdentityState: ProfileChannelIdentitiesState | null = null;
   readonly modelAccountsTarget: ModelAccountsTargetSource = {
     read: () => ({
       gateway: this.context.gateway.snapshot,
@@ -114,13 +109,76 @@ class ProfileState {
   constructor(
     readonly context: ApplicationContext,
     private readonly invalidate: () => void,
-  ) {}
+  ) {
+    this.latestGatewaySnapshot = context.gateway.snapshot;
+  }
   publish() {
+    this.syncChannelIdentityState();
+    this.publishView();
+  }
+  private publishView() {
     this.invalidate();
     this.publishTarget?.();
   }
+  hasPresentation() {
+    return (
+      (this.connected && this.client !== null) ||
+      this.connectionScopes !== null ||
+      this.selfUser !== null
+    );
+  }
+  private channelIdentityInputs(): ProfileChannelIdentityInputs {
+    return {
+      profileId: this.channelIdentityProfileId,
+      visible: this.ownProfile !== null && this.ownProfile.id === this.channelIdentityProfileId,
+      profileReady: this.identityProfileReady,
+      identityBusy: this.identityLoading || this.identityBusy !== null,
+      identityGeneration: this.identityRequestId,
+      targetGeneration: this.channelIdentityGenerations.target,
+      generations: this.channelIdentityGenerations,
+    };
+  }
+  private syncChannelIdentityState() {
+    const hasPresentation = this.hasPresentation();
+    if (!hasPresentation && !this.channelIdentityState) {
+      return;
+    }
+
+    if (hasPresentation) {
+      this.channelIdentityState ??= createProfileChannelIdentitiesState((busyState) =>
+        this.onChannelIdentityBusyStateChange(busyState),
+      );
+    }
+    const identitiesState = this.channelIdentityState;
+    if (!identitiesState) {
+      return;
+    }
+    const wasSyncingChannelIdentityState = this.syncingChannelIdentityState;
+    this.syncingChannelIdentityState = true;
+    try {
+      identitiesState.update(this.channelIdentityInputs(), this.latestGatewaySnapshot);
+    } finally {
+      this.syncingChannelIdentityState = wasSyncingChannelIdentityState;
+    }
+  }
+  private onChannelIdentityBusyStateChange(busyState: ProfileChannelIdentityBusyState) {
+    this.channelIdentityBusy = busyState;
+    if (!this.syncingChannelIdentityState) {
+      this.publishView();
+    }
+  }
+  releaseChannelIdentityState(identitiesState: ProfileChannelIdentitiesState) {
+    if (this.channelIdentityState !== identitiesState) {
+      return;
+    }
+    identitiesState.dispose();
+    this.channelIdentityState = null;
+    this.channelIdentityBusy = { loading: false, mutation: false };
+  }
   dispose() {
     this.publishTarget = undefined;
+    this.channelIdentityState?.dispose();
+    this.channelIdentityState = null;
     this.advanceIdentityRequest(true);
     this.client = null;
     this.connected = false;
@@ -138,6 +196,7 @@ class ProfileState {
     return request;
   }
   applyGatewaySnapshot(snapshot: ApplicationGatewaySnapshot) {
+    this.latestGatewaySnapshot = snapshot;
     const clientChanged = snapshot.client !== this.client;
     const nextConnected = snapshot.phase === "connected";
     // Hello can precede users.self; unresolved identity is not a sign-out.
@@ -431,10 +490,6 @@ export function ProfilePage() {
     revision();
     return state;
   };
-  const handleChannelIdentityBusyChange = (busyState: ProfileChannelIdentityBusyState) => {
-    state.channelIdentityBusy = busyState;
-    state.publish();
-  };
   // Retire identity requests synchronously when connection authority changes.
   const stops = [
     context.gateway.subscribe((snapshot) => state.applyGatewaySnapshot(snapshot)),
@@ -458,9 +513,7 @@ export function ProfilePage() {
     stops.forEach((stop) => stop());
     state.dispose();
   });
-  const connected = () => view().connected && view().client !== null;
-  const hasPresentation = () =>
-    connected() || view().connectionScopes !== null || view().selfUser !== null;
+  const hasPresentation = () => view().hasPresentation();
   const agent = () => {
     const list = agents.read();
     const id = list?.defaultId ?? "main";
@@ -619,17 +672,10 @@ export function ProfilePage() {
               />
             </Show>
             <ProfileChannelIdentities
-              profileId={view().channelIdentityProfileId}
-              visible={
-                view().ownProfile !== null &&
-                view().ownProfile!.id === view().channelIdentityProfileId
+              identitiesState={view().channelIdentityState!}
+              onPresentationDisposed={(identitiesState) =>
+                state.releaseChannelIdentityState(identitiesState)
               }
-              profileReady={view().identityProfileReady}
-              identityBusy={view().identityLoading || view().identityBusy !== null}
-              identityGeneration={view().identityRequestId}
-              targetGeneration={view().channelIdentityGenerations.target}
-              generations={view().channelIdentityGenerations}
-              onBusyStateChange={handleChannelIdentityBusyChange}
             />
           </Show>
           <PersonalInstructions

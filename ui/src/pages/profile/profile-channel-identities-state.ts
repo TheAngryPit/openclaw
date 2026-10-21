@@ -87,7 +87,7 @@ function sameChannelIdentity(left: UserChannelIdentity, right: UserChannelIdenti
   );
 }
 
-function sameConnectionScopes(
+export function sameConnectionScopes(
   left: readonly string[] | null,
   right: readonly string[] | null,
 ): boolean {
@@ -101,9 +101,12 @@ function sameConnectionScopes(
   );
 }
 
-export function createProfileChannelIdentitiesState() {
+export function createProfileChannelIdentitiesState(
+  onBusyStateChange?: (busyState: ProfileChannelIdentityBusyState) => void,
+) {
   const projection = observeState({ view: { ...EMPTY_VIEW } });
   const view = projection.state.view;
+  let reportBusyStateChange = onBusyStateChange;
   let client: GatewayBrowserClient | null = null;
   let connected = false;
   let canManage = false;
@@ -116,10 +119,27 @@ export function createProfileChannelIdentitiesState() {
   let boundProfileReady = false;
   let listRequestId = 0;
   let mutationId = 0;
+  let lastReportedBusyState: ProfileChannelIdentityBusyState = { loading: false, mutation: false };
+
+  const reportBusyState = () => {
+    if (!reportBusyStateChange) {
+      return;
+    }
+    const busyState = { loading: view.loading, mutation: view.mutation !== null };
+    if (
+      busyState.loading === lastReportedBusyState.loading &&
+      busyState.mutation === lastReportedBusyState.mutation
+    ) {
+      return;
+    }
+    lastReportedBusyState = busyState;
+    reportBusyStateChange(busyState);
+  };
 
   const publish = (patch: Partial<ProfileChannelIdentityViewState>) => {
     Object.assign(view, patch);
     projection.invalidate();
+    reportBusyState();
   };
 
   const hasAdminGrant = () => connected && scopes?.includes("operator.admin") === true;
@@ -375,6 +395,7 @@ export function createProfileChannelIdentitiesState() {
       if (!targetChanged && !requestChanged && !grantChanged && !profileReadyChanged) {
         if (visibleChanged || identityBusyChanged) {
           projection.invalidate();
+          reportBusyState();
         }
         return;
       }
@@ -403,6 +424,7 @@ export function createProfileChannelIdentitiesState() {
       }
 
       projection.invalidate();
+      reportBusyState();
       if (canReadCurrentProfile() && !view.mutation) {
         void requestLinks();
       }
@@ -415,6 +437,7 @@ export function createProfileChannelIdentitiesState() {
       canManage = false;
       scopes = null;
       Object.assign(view, EMPTY_VIEW);
+      reportBusyStateChange = undefined;
       projection.dispose();
     },
     setDraft(field: "channelId" | "accountId" | "senderId", value: string) {
@@ -427,3 +450,5 @@ export function createProfileChannelIdentitiesState() {
     unlinkIdentity,
   };
 }
+
+export type ProfileChannelIdentitiesState = ReturnType<typeof createProfileChannelIdentitiesState>;

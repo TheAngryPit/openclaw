@@ -503,6 +503,104 @@ it("does not show or request channel identity links without the negotiated admin
   );
 });
 
+it("retires a hidden channel identity owner before a same-turn reconnect", async () => {
+  const request = vi.fn(async (method: string, params?: unknown) => {
+    if (method === "users.self") {
+      return { profile: modelAccountProfile };
+    }
+    if (method === "users.listModelAccounts") {
+      return { profileId: modelAccountProfile.id, accounts: [], links: [] };
+    }
+    if (method === "users.listChannelIdentities") {
+      return { links: [] };
+    }
+    if (method === "users.linkChannelIdentity") {
+      return params as {
+        profileId: string;
+        identity: { channelId: string; accountId: string; senderId: string };
+      };
+    }
+    throw new Error("unexpected method: " + method);
+  });
+  const harness = createChannelIdentityHarness(request as GatewayBrowserClient["request"]);
+  const connectedSnapshot = { ...harness.context.gateway.snapshot };
+  const page = mountProfilePage(harness.context);
+  await waitForFast(() =>
+    expect(
+      page.querySelector<HTMLButtonElement>(
+        "#settings-profile-channel-identities button[type=submit]",
+      )?.disabled,
+    ).toBe(false),
+  );
+
+  const section = page.querySelector<HTMLElement>("#settings-profile-channel-identities")!;
+  for (const [label, value] of [
+    ["Channel ID", "old-channel"],
+    ["Configured account ID", "old-account"],
+    ["Native sender ID", "old-target-draft"],
+  ] as const) {
+    const input = section.querySelector<HTMLInputElement>('input[aria-label="' + label + '"]')!;
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  const initialListCalls = request.mock.calls.filter(
+    ([method]) => method === "users.listChannelIdentities",
+  ).length;
+
+  harness.emitSnapshot({ client: null, phase: "reconnecting", hello: null, selfUser: null });
+  harness.emitSnapshot(connectedSnapshot);
+
+  await waitForFast(() =>
+    expect(
+      page.querySelector<HTMLButtonElement>(
+        "#settings-profile-channel-identities button[type=submit]",
+      )?.disabled,
+    ).toBe(false),
+  );
+  await waitForFast(() =>
+    expect(
+      request.mock.calls.filter(([method]) => method === "users.listChannelIdentities").length,
+    ).toBeGreaterThan(initialListCalls),
+  );
+  const reconnectedSection = page.querySelector<HTMLElement>(
+    "#settings-profile-channel-identities",
+  )!;
+  for (const label of ["Channel ID", "Configured account ID", "Native sender ID"]) {
+    expect(
+      reconnectedSection.querySelector<HTMLInputElement>('input[aria-label="' + label + '"]')
+        ?.value,
+    ).toBe("");
+  }
+
+  const identity = { channelId: "telegram", accountId: "main", senderId: "usable-after-reconnect" };
+  for (const [label, value] of [
+    ["Channel ID", identity.channelId],
+    ["Configured account ID", identity.accountId],
+    ["Native sender ID", identity.senderId],
+  ] as const) {
+    const input = reconnectedSection.querySelector<HTMLInputElement>(
+      'input[aria-label="' + label + '"]',
+    )!;
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  reconnectedSection.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
+  await waitForFast(() =>
+    expect(reconnectedSection.querySelector('[role="status"]')?.textContent).toContain(
+      "Channel account link added.",
+    ),
+  );
+  expect(request).toHaveBeenCalledWith("users.linkChannelIdentity", {
+    profileId: modelAccountProfile.id,
+    identity,
+  });
+
+  harness.emitSnapshot({ client: null, phase: "reconnecting", hello: null, selfUser: null });
+  await waitForFast(() =>
+    expect(page.querySelector("#settings-profile-channel-identities")).toBeNull(),
+  );
+});
+
 it("does not expose channel identity management for the shared Gateway Owner profile", async () => {
   const profile = { ...modelAccountProfile, id: GATEWAY_OWNER_PROFILE_ID, role: "owner" };
   const request = vi.fn(async (method: string) => {
