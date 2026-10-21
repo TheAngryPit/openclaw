@@ -118,6 +118,8 @@ it.each(["removed", "already absent", "ownership rejected"])(
       accountId: "workspace-2",
       senderId: "user-7",
     };
+    const submit = section.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    await waitForFast(() => expect(submit.disabled).toBe(false));
     for (const [label, value] of [
       ["Channel ID", entered.channelId],
       ["Configured account ID", entered.accountId],
@@ -127,7 +129,7 @@ it.each(["removed", "already absent", "ownership rejected"])(
       input.value = value;
       input.dispatchEvent(new Event("input", { bubbles: true }));
     }
-    section.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
+    submit.click();
     await waitForFast(() =>
       expect(section.querySelector('[role="status"]')?.textContent).toContain(
         "Channel account link added.",
@@ -142,7 +144,11 @@ it.each(["removed", "already absent", "ownership rejected"])(
       "",
     );
 
-    section.querySelector<HTMLButtonElement>('button[aria-label^="Remove link telegram"]')!.click();
+    const removeOriginal = section.querySelector<HTMLButtonElement>(
+      'button[aria-label^="Remove link telegram"]',
+    )!;
+    await waitForFast(() => expect(removeOriginal.disabled).toBe(false));
+    removeOriginal.click();
     if (outcome === "ownership rejected") {
       await waitForFast(() =>
         expect(section.querySelector('[role="alert"]')?.textContent).toContain(
