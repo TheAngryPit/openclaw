@@ -36,6 +36,7 @@ import {
   SIDEBAR_SESSION_PAGE_SIZE,
   storeSidebarSessionOwnerFilter,
 } from "./app-sidebar-session-types.ts";
+import { areSessionCatalogsSettled } from "./session-data-catalog.ts";
 import "./app-sidebar.tsx";
 
 const hint = "No active sessions match this filter";
@@ -364,6 +365,41 @@ describe("sidebar session feedback", () => {
     sidebar.invalidate();
     await settleLitElement(sidebar);
     expect(sidebar.textContent).not.toContain(hint);
+  });
+
+  it("settles hidden discovery after a catalog-pending page completes empty", async () => {
+    const { sidebar, request, enableCatalog } = await emptyCatalogFixture();
+    const pendingPage = catalogPage([]);
+    pendingPage.catalogs[0]!.pending = true;
+    pendingPage.catalogs[0]!.hosts = [];
+    const original = request.getMockImplementation()!;
+    let page = 0;
+    request.mockImplementation((method, ...args) =>
+      method === "sessions.catalog.list"
+        ? Promise.resolve(page++ === 0 ? catalogPage([], "fixture-next") : pendingPage)
+        : original(method, ...args),
+    );
+    enableCatalog();
+    await vi.waitFor(() => expect(sidebar.sessionData.sessionCatalogs[0]?.pending).toBe(true));
+    await vi.waitFor(() =>
+      expect(sidebar.sessionData.sessionCatalogLive.requestGeneration).toBeNull(),
+    );
+    expect(areSessionCatalogsSettled(sidebar.sessionData)).toBe(false);
+    expect(sidebar.sessionData.sessionCatalogs[0]?.hosts[0]?.nextCursor).toBe("fixture-next");
+    expect(sidebar.textContent).not.toContain(hint);
+
+    request.mockImplementation((method, ...args) =>
+      method === "sessions.catalog.list"
+        ? Promise.resolve(catalogPage([]))
+        : original(method, ...args),
+    );
+    await sidebar.sessionData.loadMoreSessionCatalog("codex");
+    await settleLitElement(sidebar);
+    expect(sidebar.sessionData.sessionCatalogs[0]?.pending).toBeUndefined();
+    expect(sidebar.sessionData.sessionCatalogs[0]?.hosts[0]?.pending).toBeUndefined();
+    expect(sidebar.sessionData.sessionCatalogs[0]?.hosts[0]?.nextCursor).toBeUndefined();
+    expect(areSessionCatalogsSettled(sidebar.sessionData)).toBe(true);
+    expect(sidebar.textContent).toContain(hint);
   });
 
   it("waits for a pending catalog host to publish its matching result", async () => {

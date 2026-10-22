@@ -44,21 +44,21 @@ function apply(
 it("retains failure status while pending and applies catalog pending changes", () => {
   const current = catalog("codex", 1);
   current.hosts[0]!.error = { code: "NODE_INVOKE_FAILED", message: "Fixture node failed" };
+  current.error = { code: "catalog_stale", message: "Last enumeration failed" };
   const pending = apply(
-    { ...current, pending: true, hosts: [{ ...current.hosts[0]!, pending: true }] },
+    { ...catalog("codex", 1), pending: true, hosts: [{ ...current.hosts[0]!, pending: true }] },
     [current],
   );
   expect(pending?.catalogs[0]?.pending).toBe(true);
+  expect(pending?.catalogs[0]?.error).toEqual(current.error);
   expect(pending?.catalogs[0]?.hosts[0]).toMatchObject({
     pending: true,
     error: { code: "NODE_INVOKE_FAILED" },
   });
 
-  const recovered = apply(
-    { ...current, hosts: [catalog("codex", 1).hosts[0]!] },
-    pending!.catalogs,
-  );
+  const recovered = apply(catalog("codex", 1), pending!.catalogs);
   expect(recovered?.catalogs[0]).not.toHaveProperty("pending");
+  expect(recovered?.catalogs[0]).not.toHaveProperty("error");
   expect(recovered?.catalogs[0]?.hosts[0]).not.toHaveProperty("error");
 });
 
@@ -137,3 +137,63 @@ it("compares a host event only with the catalog and host it can replace", () => 
 
   expect(apply(changed, [changed, unrelated])).toBeNull();
 });
+
+it("retains catalog-level pending hosts and failure until settled enumeration withdraws them", async () => {
+  const current = catalog("codex", 2);
+  current.error = { code: "catalog_stale", message: "Last enumeration failed" };
+  current.hosts[0]!.nextCursor = "expanded";
+  const incoming = { ...catalog("codex", 0), pending: true };
+  const request = vi.fn();
+  const refreshed = await refetchExpandedSessionCatalogPages({
+    catalogs: live.mergeFinal([incoming], [current]),
+    previousCatalogs: [current],
+    client: { request } as unknown as GatewayBrowserClient,
+    agentId: "main",
+    pageDepths: new Map([[sessionCatalogHostKey("codex", current.hosts[0]!.hostId), 1]]),
+    isCurrent: () => true,
+    canRequestPage: () => true,
+  });
+  expect(refreshed[0]?.error).toEqual(current.error);
+  expect(refreshed[0]?.hosts).toEqual(current.hosts.map((host) => ({ ...host, pending: true })));
+  expect(request).not.toHaveBeenCalled();
+  const withdrawn = { ...current.hosts[0]!, sessions: [], nextCursor: undefined };
+  const partial = await refetchExpandedSessionCatalogPages({
+    catalogs: [{ ...incoming, hosts: [withdrawn] }],
+    previousCatalogs: [current],
+    client: { request } as unknown as GatewayBrowserClient,
+    agentId: "main",
+    pageDepths: new Map([[sessionCatalogHostKey("codex", withdrawn.hostId), 1]]),
+    isCurrent: () => true,
+    canRequestPage: () => true,
+  });
+  expect(partial[0]?.hosts[0]?.sessions).toEqual([]);
+  expect(partial[0]?.hosts[0]?.pending).toBeUndefined();
+  expect(partial[0]?.hosts[1]).toEqual({ ...current.hosts[1], pending: true });
+  expect(request).not.toHaveBeenCalled();
+  expect(live.mergeFinal([catalog("codex", 0)], refreshed)).toEqual([catalog("codex", 0)]);
+});
+
+it.each([
+  { ids: [], truncated: false },
+  { ids: ["replacement"], truncated: false },
+  { ids: ["frontier"], truncated: true },
+])(
+  "applies an exhausted progressive host snapshot: $ids (truncated=$truncated)",
+  ({ ids, truncated }) => {
+    const current = catalog("codex", 1);
+    current.hosts[0]!.nextCursor = "expanded-next";
+    const fresh = catalog("codex", 1);
+    fresh.hosts[0]!.sessions = ids.map((threadId) => ({ ...idleSession, threadId }));
+    if (truncated) {
+      fresh.hosts[0]!.error = { code: "DISCOVERY_TRUNCATED", message: "Search by exact ID" };
+    }
+    const update = apply(
+      fresh,
+      [current],
+      new Map([[sessionCatalogHostKey("codex", fresh.hosts[0]!.hostId), 2]]),
+    );
+    expect(update?.catalogs).toEqual([fresh]);
+    const pendingFinal = { ...fresh, hosts: [{ ...fresh.hosts[0]!, pending: true, sessions: [] }] };
+    expect(live.mergeFinal([pendingFinal], update!.catalogs)).toEqual([fresh]);
+  },
+);

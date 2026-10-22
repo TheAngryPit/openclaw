@@ -317,7 +317,7 @@ export async function refreshSessionCatalogs(owner: SessionCatalogDataOwner): Pr
 function hiddenSessionCatalogPages(owner: SessionCatalogDataOwner) {
   const hiddenIds = new Set(owner.sessionCatalogIdsWithoutVisibleRows());
   return owner.sessionCatalogs.flatMap((catalog) => {
-    if (!hiddenIds.has(catalog.id) || catalog.error) {
+    if (!hiddenIds.has(catalog.id) || catalog.pending || catalog.error) {
       return [];
     }
     const hostIds = catalog.hosts

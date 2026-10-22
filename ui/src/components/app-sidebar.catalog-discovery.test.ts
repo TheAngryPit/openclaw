@@ -294,6 +294,44 @@ describe("AppSidebar hidden catalog discovery", () => {
     },
   );
 
+  it.each(["host", "catalog"] as const)(
+    "pauses hidden discovery on a pending %s page and recovers on refresh",
+    async (pendingScope) => {
+      let pending = true;
+      const request = createGatewayRequestMock((_method, params) => {
+        if (!catalogParams(params).cursors) {
+          return Promise.resolve(catalogPage([], "page-2"));
+        }
+        const result = catalogPage([{ threadId: "found", name: "Recovered pending discovery" }]);
+        if (pending) {
+          if (pendingScope === "catalog") {
+            result.catalogs[0]!.pending = true;
+            result.catalogs[0]!.hosts = [];
+          } else {
+            result.catalogs[0]!.hosts[0]!.pending = true;
+            result.catalogs[0]!.hosts[0]!.sessions = [];
+          }
+        }
+        return Promise.resolve(result);
+      });
+      const { sidebar } = await mountDiscovery(request);
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(sidebar.sessionData.sessionCatalogs[0]?.hosts[0]).toMatchObject({
+        pending: true,
+        nextCursor: "page-2",
+      });
+      expect(sidebar.sessionData.sessionCatalogs[0]?.hosts[0]?.error).toBeUndefined();
+      expect(sidebar.sessionData.sessionCatalogPageDepths.size).toBe(0);
+      await vi.advanceTimersByTimeAsync(119_999);
+      expect(request).toHaveBeenCalledTimes(2);
+      pending = false;
+      await vi.advanceTimersByTimeAsync(1);
+      await settle(sidebar);
+      expect(requestedCursors(request)).toEqual([undefined, "page-2", undefined, "page-2"]);
+      expect(sidebar.textContent).toContain("Recovered pending discovery");
+    },
+  );
+
   it("stops a two-page cursor cycle without a request loop", async () => {
     let revealed = false;
     const request = createGatewayRequestMock((_method, params) => {
