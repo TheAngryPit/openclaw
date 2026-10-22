@@ -192,6 +192,20 @@ describe("findOcPaths — JSONC", () => {
 
 describe("quoted union targets", () => {
   it.each([
+    { key: "a,b", pattern: '{"a,b",plain}' },
+    { key: 'a,,"b', pattern: '{"a,,\\"b",plain}' },
+    { key: 'a,,"b', pattern: '{{"a,,\\"b",missing},plain}' },
+    { key: "{a,,b}", pattern: '{"{a,,b}",plain}' },
+  ])("keeps commas inside the quoted union key $key", ({ key, pattern }) => {
+    const ast = parseJsonc(JSON.stringify({ [key]: "selected", plain: "sibling" }));
+    const out = findOcPaths(ast, parseOcPath("oc://f.json/" + pattern));
+    expect(leafValues(out)).toEqual(["selected", "sibling"]);
+    for (const { path, match } of out) {
+      expect(resolveOcPath(ast, parseOcPath(formatOcPath(path)))).toEqual(match);
+    }
+  });
+
+  it.each([
     { file: "f.json", parse: parseJsonc, raw: '{"a.b":1}' },
     { file: "f.yaml", parse: parseYaml, raw: "a.b: 1\n" },
   ])("resolves either ordering of literal key aliases in $file", ({ file, parse, raw }) => {
@@ -492,8 +506,87 @@ describe("numeric predicates", () => {
 describe("findOcPaths — Markdown", () => {
   const md = parseMd("## Tools\n\n- foo: a\n- foo: b\n- bar: c\n");
 
+  it("quotes empty Markdown slugs in reusable expanded paths", () => {
+    const raw = "## 日本語\n- !!!: old\n- plain: keep\n";
+    const ast = parseMd(raw);
+    const address = 'oc://notes.md/""/""/!!!';
+    for (const pattern of [
+      'oc://notes.md/""/""/*',
+      'oc://notes.md/""/*/!!!',
+      'oc://notes.md/*/""/!!!',
+      "oc://notes.md/*/*/!!!",
+    ]) {
+      const out = findOcPaths(ast, parseOcPath(pattern));
+      expect(out.map(({ path }) => formatOcPath(path))).toEqual([address]);
+      expect(leafValues(out)).toEqual(["old"]);
+      for (const { path, match } of out) {
+        const concrete = parseOcPath(formatOcPath(path));
+        expect(resolveOcPath(ast, concrete)).toEqual(match);
+        expect(setOcPath(ast, concrete, "changed").raw).toBe(
+          raw.replace("!!!: old", "!!!: changed"),
+        );
+      }
+      expect(ast.raw).toBe(raw);
+    }
+  });
+
+  it("keeps quoted Markdown field paths usable after expansion and formatting", () => {
+    for (const key of ["model name", "model.id", "a/b", 'say "hi"', "a\\b", "*", "$last", "+"]) {
+      const raw = `## Settings\n- ${key}: old\n- plain: keep\n`;
+      const ast = parseMd(raw);
+      const address = `oc://notes.md/settings/#0/${JSON.stringify(key)}`;
+      for (const field of ["*", JSON.stringify(key), `{${JSON.stringify(key)},absent}`]) {
+        const out = findOcPaths(ast, parseOcPath(`oc://notes.md/settings/#0/${field}`));
+        expect(out.map(({ path }) => formatOcPath(path))).toEqual([address]);
+        expect(leafValues(out)).toEqual(["old"]);
+      }
+      const concrete = parseOcPath(address);
+      expect(resolveOcPath(ast, concrete)).toMatchObject({ kind: "leaf", valueText: "old" });
+      expect(setOcPath(ast, concrete, "changed").raw).toBe(
+        `## Settings\n- ${key}: changed\n- plain: keep\n`,
+      );
+      expect(ast.raw).toBe(raw);
+    }
+  });
+
+  it("decodes quoted Markdown containers without treating quoted selectors as syntax", () => {
+    const raw = "---\nname: sample\n---\n## Settings\n- first: old\n- plain: keep\n";
+    const ast = parseMd(raw);
+    for (const address of [
+      'oc://notes.md/"settings"/"plain"/plain',
+      'oc://notes.md/"settings"/*/plain',
+      'oc://notes.md/settings/"plain"/*',
+      'oc://notes.md/{settings,"settings"}/plain/plain',
+      'oc://notes.md/settings/{plain,"plain"}/plain',
+      'oc://notes.md/settings/plain/{plain,"plain"}',
+    ]) {
+      expect(leafValues(findOcPaths(ast, parseOcPath(address)))).toEqual(["keep"]);
+    }
+    expect(
+      setOcPath(ast, parseOcPath('oc://notes.md/"settings"/"plain"/plain'), "changed").raw,
+    ).toBe(raw.replace("plain: keep", "plain: changed"));
+    const frontmatter = parseOcPath('oc://notes.md/[frontmatter]/"name"');
+    expect(resolveOcPath(ast, frontmatter)).toMatchObject({ kind: "leaf", valueText: "sample" });
+    expect(setOcPath(ast, frontmatter, "changed").raw).toBe(
+      raw.replace("name: sample", "name: changed"),
+    );
+    const insertion = parseOcPath('oc://notes.md/"settings"/+');
+    expect(resolveOcPath(ast, insertion)).toMatchObject({ kind: "insertion-point" });
+    expect(setOcPath(ast, insertion, "extra: added").raw).toBe(raw + "- extra: added\n");
+    expect(setOcPath(ast, parseOcPath("oc://notes.md/settings/$last/plain"), "changed").raw).toBe(
+      raw.replace("plain: keep", "plain: changed"),
+    );
+    for (const selector of ["#0", "$first", "$last"]) {
+      const address = parseOcPath(`oc://notes.md/settings/"${selector}"`);
+      expect(resolveOcPath(ast, address)).toBeNull();
+      expect(findOcPaths(ast, address)).toEqual([]);
+    }
+    expect(resolveOcPath(ast, parseOcPath('oc://notes.md/"[frontmatter]"/name'))).toBeNull();
+    expect(ast.raw).toBe(raw);
+  });
+
   it("uses ordinals to distinguish duplicate slugs", () => {
-    const out = findOcPaths(md, parseOcPath("oc://AGENTS.md/tools/*/foo"));
+    const out = findOcPaths(md, parseOcPath('oc://AGENTS.md/{tools,"tools"}/*/foo'));
     expect(out.map(({ path }) => path.item)).toEqual(["#0", "#1"]);
     expect(leafValues(out)).toEqual(["a", "b"]);
   });
