@@ -1,5 +1,5 @@
 {
-  "startupJsGzipBytes": 315737,
-  "reason": "Narrow New Session metadata imports after header deferral; preserve the stricter startup baseline",
+  "startupJsGzipBytes": 315696,
+  "reason": "Keep the stricter startup baseline after runtime English deferrals; measured head 315926 B",
   "updatedAt": "2026-10-22"
 }
