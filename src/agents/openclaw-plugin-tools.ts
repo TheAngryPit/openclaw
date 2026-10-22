@@ -6,6 +6,7 @@ import {
   selectMessageActionRequesterIdentity,
 } from "../gateway/message-action-turn-capability.js";
 import { resolveAgentScopedOutboundMediaAccess } from "../media/read-capability.js";
+import { resolveProviderAuthScope } from "../plugins/provider-auth-scope.js";
 import { getActivePluginRegistry, getActivePluginRegistryVersion } from "../plugins/runtime.js";
 import {
   getPluginRuntimeGatewayRequestScope,
@@ -13,7 +14,7 @@ import {
 } from "../plugins/runtime/gateway-request-scope.js";
 import { getPluginRuntimeLoadContext } from "../plugins/runtime/load-context.js";
 import type { OpenClawPluginToolDelivery } from "../plugins/tool-types.js";
-import { resolvePluginTools } from "../plugins/tools.js";
+import { resolvePluginTools, resolvePluginToolsSteps } from "../plugins/tools.js";
 import type { OpenClawPluginToolContext } from "../plugins/types.js";
 import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
 import { resolveApiKeyForProfile, resolveAuthProfileOrder } from "./auth-profiles.js";
@@ -29,17 +30,18 @@ import {
   resolveOpenClawPluginToolInputs,
   type OpenClawPluginToolOptions,
 } from "./openclaw-tools.plugin-context.js";
+import { preparePluginToolExecutionCapabilities } from "./plugin-tool-execution.js";
 import type { PreparedModelRuntimeSnapshot } from "./prepared-model-runtime.types.js";
 import { resolveAgentRuntimeToolConfig } from "./tool-runtime-config.js";
 import type { AnyAgentTool } from "./tools/common.js";
 import { captureGatewayToolCallerAssertion } from "./tools/gateway-caller-context.js";
 import { hasProviderAuthForTool } from "./tools/model-config.helpers.js";
+import { captureAgentWorkspaceReadiness } from "./workspace-readiness.js";
 
 type ResolveOpenClawPluginToolsOptions = OpenClawPluginToolOptions & {
   preparedModelRuntime?: PreparedModelRuntimeSnapshot;
   pluginToolAllowlist?: string[];
   pluginToolDenylist?: string[];
-  disablePluginTools?: boolean;
   clientCaps?: string[];
   authProfileStore?: AuthProfileStore;
 };
@@ -61,6 +63,9 @@ function createPluginToolDelivery(params: {
   const senderIsOwner = params.context.senderIsOwner;
   const conversationReadOrigin = params.context.conversationReadOrigin;
   const runId = params.options?.runId;
+  const workspaceReadiness = captureAgentWorkspaceReadiness(
+    params.options?.runSessionKey ?? params.options?.agentSessionKey,
+  );
   const token = params.options?.messageActionTurnCapability;
   const activeRegistry = getActivePluginRegistry();
   const activeRegistryVersion = getActivePluginRegistryVersion();
@@ -172,6 +177,7 @@ function createPluginToolDelivery(params: {
           runId,
           agentId,
           mediaAccess,
+          workspaceReadiness,
           onPlatformSendDispatch: async () => {
             resolveAuthorization();
           },
@@ -185,15 +191,37 @@ function createPluginToolDelivery(params: {
   };
 }
 
-export function resolveOpenClawPluginToolsForOptions(params: {
+type PluginToolOptions = {
   options?: ResolveOpenClawPluginToolsOptions;
   resolvedConfig?: OpenClawConfig;
   existingToolNames?: Set<string>;
-}): AnyAgentTool[] {
-  if (params.options?.disablePluginTools) {
-    return [];
-  }
+};
 
+export async function resolveOpenClawPluginToolsForOptionsAsync(
+  params: PluginToolOptions,
+): Promise<AnyAgentTool[]> {
+  const steps = resolveOpenClawPluginToolSteps(params);
+  let step = steps.next();
+  while (!step.done) {
+    await step.value;
+    step = steps.next();
+  }
+  return step.value;
+}
+
+export function resolveOpenClawPluginToolsForOptions(params: PluginToolOptions): AnyAgentTool[] {
+  const steps = resolveOpenClawPluginToolSteps(params);
+  const step = steps.next();
+  if (!step.done) {
+    void step.value.catch(() => {});
+    throw new Error("Workspace preparation is pending; use asynchronous tool construction.");
+  }
+  return step.value;
+}
+
+function* resolveOpenClawPluginToolSteps(
+  params: PluginToolOptions,
+): Generator<Promise<void>, AnyAgentTool[], void> {
   const inputConfig = params.resolvedConfig ?? params.options?.config;
   const availabilityConfig = resolveAgentRuntimeToolConfig(inputConfig);
   // Bind ownership before reload replaces the source snapshot. Explicit run
@@ -245,6 +273,13 @@ export function resolveOpenClawPluginToolsForOptions(params: {
   const resolveApiKeyForProvider = authProfileStore
     ? async (providerId: string): Promise<string | undefined> => {
         const cfg = resolveCurrentRuntimeConfig();
+        const workspaceDir = pluginToolInputs.context.workspaceDir;
+        // This preparation excludes plugin auth, including agent-profile substitutes.
+        if (
+          resolveProviderAuthScope({ provider: providerId, config: cfg, workspaceDir }) === "plugin"
+        ) {
+          return undefined;
+        }
         for (const profileId of resolveAuthProfileOrder({
           cfg,
           store: authProfileStore,
@@ -261,7 +296,6 @@ export function resolveOpenClawPluginToolsForOptions(params: {
             return resolved.apiKey;
           }
         }
-        const workspaceDir = pluginToolInputs.context.workspaceDir;
         const runtimeLookup = createRuntimeProviderAuthLookup({
           cfg,
           workspaceDir,
@@ -307,8 +341,20 @@ export function resolveOpenClawPluginToolsForOptions(params: {
   const metadataSnapshot = preparedModelRuntime?.metadataSnapshot ?? loadContext?.metadataSnapshot;
   const assertCallerCurrent = captureGatewayToolCallerAssertion();
   const assertRequestCurrent = params.options?.assertInvocationCurrent;
-  const pluginTools = resolvePluginTools({
+  const resolution = {
     ...pluginToolInputs,
+    bindExecutionCapabilities: preparePluginToolExecutionCapabilities({
+      sandbox: params.options?.sandbox?.enabled ? params.options.sandbox : undefined,
+      skillsSnapshot: params.options?.pluginExecutionSkillsSnapshot,
+      signal: params.options?.abortSignal,
+      authority: params.options?.pluginExecutionAuthority,
+      modelContextWindowTokens: params.options?.modelContextWindowTokens,
+      preparedModelRuntime,
+      config: availabilityConfig,
+      agentId: pluginToolInputs.context.agentId,
+      sessionKey: pluginToolInputs.context.sessionKey,
+      sessionId: pluginToolInputs.context.sessionId,
+    }),
     context: {
       ...pluginToolInputs.context,
       ...(delivery ? { delivery } : {}),
@@ -338,7 +384,10 @@ export function resolveOpenClawPluginToolsForOptions(params: {
           },
         }
       : {}),
-  });
+  };
+  const pluginTools = captureAgentWorkspaceReadiness(pluginToolInputs.context.sessionKey)
+    ? yield* resolvePluginToolsSteps(resolution)
+    : resolvePluginTools(resolution);
   for (const tool of pluginTools) {
     existingToolNames.add(tool.name);
   }

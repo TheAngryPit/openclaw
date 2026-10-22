@@ -1,10 +1,18 @@
 import { expect } from "vitest";
-import type { CronJob } from "../../api/types.ts";
+import type { CronJob, CronRunLogEntry } from "../../api/types.ts";
 import { DEFAULT_CRON_FORM } from "../../test-helpers/cron.ts";
 import { mountSolid } from "../../test-helpers/mount-solid.ts";
-import { flush } from "../../test-helpers/solid-settle.ts";
+import { flush, waitForSolid } from "../../test-helpers/solid-settle.ts";
 import type { CronProps } from "./view-types.ts";
 import { CronView } from "./view.tsx";
+
+export function createCronViewRun(overrides: Partial<CronRunLogEntry> = {}): CronRunLogEntry {
+  return { ts: 1, jobId: "job-1", action: "finished", status: "ok", ...overrides };
+}
+
+export function cronRunsResponse(entries: CronRunLogEntry[] = []) {
+  return { entries, total: entries.length, offset: 0, hasMore: false };
+}
 
 export function createCronViewJob(id: string, overrides: Partial<CronJob> = {}): CronJob {
   return {
@@ -21,12 +29,26 @@ export function createCronViewJob(id: string, overrides: Partial<CronJob> = {}):
   } as CronJob;
 }
 
+export function scheduledJob(id: string, overrides: Partial<CronJob> = {}): CronJob {
+  return createCronViewJob(id, {
+    name: "Nightly digest",
+    schedule: { kind: "every", everyMs: 60_000 },
+    sessionTarget: "isolated",
+    wakeMode: "now",
+    payload: { kind: "agentTurn", message: "digest" },
+    state: {},
+    ...overrides,
+  });
+}
+
 export function createCronViewProps(overrides: Partial<CronProps> = {}): CronProps {
+  const retired = new Promise<void>(() => {});
   return {
     loading: false,
     hasLoaded: true,
     listError: null,
     canManage: true,
+    connected: true,
     jobsLoadingMore: false,
     status: {
       enabled: true,
@@ -46,7 +68,8 @@ export function createCronViewProps(overrides: Partial<CronProps> = {}): CronPro
     error: null,
     busy: false,
     form: { ...DEFAULT_CRON_FORM },
-    heartbeatScratch: "",
+    gateway: null,
+    getActionRetired: () => retired,
     fieldErrors: {},
     canSubmit: true,
     editingJob: null,
@@ -82,7 +105,7 @@ export function createCronViewProps(overrides: Partial<CronProps> = {}): CronPro
     onClone: () => undefined,
     onToggle: () => undefined,
     onRun: () => undefined,
-    onRemove: () => undefined,
+    onRemove: async () => undefined,
     onLoadMoreJobs: () => undefined,
     onJobsFiltersChange: () => undefined,
     onJobsFiltersReset: () => undefined,
@@ -93,10 +116,19 @@ export function createCronViewProps(overrides: Partial<CronProps> = {}): CronPro
 }
 
 export function renderCronView(overrides: Partial<CronProps> = {}) {
-  const container = document.createElement("div");
-  mountSolid(() => CronView(createCronViewProps(overrides)), { container });
+  const { container } = mountSolid(() => CronView(createCronViewProps(overrides)));
   flush();
   return container;
+}
+
+export async function openCronMenu(container: Element, selector: string) {
+  const trigger = getElement(container, `${selector} .oc-menu-trigger`, HTMLButtonElement);
+  trigger.click();
+  await waitForSolid(() => {
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(trigger.getAttribute("data-state")).toBe("open");
+  });
+  return trigger;
 }
 
 export function getButtonByText(container: Element, text: string): HTMLButtonElement {

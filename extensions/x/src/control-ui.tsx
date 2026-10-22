@@ -128,10 +128,7 @@ const mountXReplies: ControlUiView = (container, initialContext) => {
                 <select
                   value={view.accountId ?? ""}
                   disabled={view.busy || !view.snapshot}
-                  onChange={(event: Event) => {
-                    if (!(event.currentTarget instanceof HTMLSelectElement)) {
-                      return;
-                    }
+                  onChange={(event) => {
                     accountId = event.currentTarget.value;
                     snapshot = undefined;
                     void request("x.allowlist.list");
@@ -173,11 +170,9 @@ const mountXReplies: ControlUiView = (container, initialContext) => {
                     required
                     value={view.username}
                     disabled={view.busy}
-                    onInput={(event: Event) => {
-                      if (event.currentTarget instanceof HTMLInputElement) {
-                        username = event.currentTarget.value;
-                        publish();
-                      }
+                    onInput={(event) => {
+                      username = event.currentTarget.value;
+                      publish();
                     }}
                   />
                 </label>
@@ -235,19 +230,9 @@ const mountXReplies: ControlUiView = (container, initialContext) => {
                     </div>
                   </dl>
                   <p class="x-replies__hint">
-                    {view.snapshot.guests.helpersAvailable ? (
-                      <>
-                        Applies to the selected bot account. Guests get repository answers with
-                        hidden helpers of the same agent. No writes, commands, visible work
-                        sessions, or other agents. Maintainers keep their normal access.
-                      </>
-                    ) : (
-                      <>
-                        Applies to the selected bot account. Guests can read the repository without
-                        starting helpers. Upgrade OpenClaw to enable hidden helpers safely.
-                        Maintainers keep their normal access.
-                      </>
-                    )}{" "}
+                    Applies to the selected bot account. Guests get repository answers with hidden
+                    helpers of the same agent. No writes, commands, visible work sessions, or other
+                    agents. Maintainers keep their normal access.{" "}
                     <a
                       href="https://docs.openclaw.ai/channels/x#guest-mode"
                       target="_blank"
