@@ -75,8 +75,31 @@ it.each([
       });
       expect(result?.hosts[0]?.sessions.map((row) => row.threadId)).toEqual(["first", "expanded"]);
     }
-    const recovered = mergeSessionCatalogPage({
+    const failed = catalog([], pendingScope === "host" ? { error } : {});
+    if (pendingScope === "catalog") {
+      failed.error = error;
+      failed.hosts = [];
+    }
+    const rejected = mergeSessionCatalogPage({
       current: merged.catalog,
+      page: failed,
+      cursors: { "gateway:local": "retry" },
+    });
+    expect(rejected.catalog.hosts[0]?.pending).not.toBe(true);
+    expect(rejected.catalog.pending).not.toBe(true);
+    expect(rejected.catalog.hosts[0]?.sessions).toEqual(previous.hosts[0]?.sessions);
+    const retrying = mergeSessionCatalogPage({
+      current: rejected.catalog,
+      page:
+        pendingScope === "host"
+          ? catalog([], { error, pending: true })
+          : { ...failed, pending: true },
+      cursors: { "gateway:local": "retry" },
+    });
+    expect(retrying.catalog.hosts[0]?.pending).toBe(true);
+    expect(retrying.catalog.error ?? retrying.catalog.hosts[0]?.error).toEqual(error);
+    const recovered = mergeSessionCatalogPage({
+      current: retrying.catalog,
       page: catalog([...recoveredIds]),
       cursors: { "gateway:local": "retry" },
     });

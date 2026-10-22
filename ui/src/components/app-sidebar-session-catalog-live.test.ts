@@ -105,27 +105,30 @@ it("does not replace a settled progressive host with its pending final response"
   ]);
 });
 
-it("clears unavailable native readiness without losing another host or expanded rows", () => {
-  const current = catalog("codex", 2);
-  current.capabilities.startTerminal = true;
-  current.hosts.forEach((host) => {
-    host.canStartTerminal = true;
-  });
-  const changed = {
-    ...current.hosts[0]!,
-    canStartTerminal: false,
-    sessions: [],
-    error: { code: "offline", message: "Offline" },
-  };
-  const result = apply(
-    { ...current, hosts: [changed] },
-    [current],
-    new Map([[sessionCatalogHostKey("codex", changed.hostId), 1]]),
-  );
-  expect(result?.catalogs[0]?.hosts.map((host) => host.canStartTerminal)).toEqual([false, true]);
-  expect(result?.catalogs[0]?.hosts[1]).toEqual(current.hosts[1]);
-  expect(result?.catalogs[0]?.hosts[0]?.sessions).toEqual(current.hosts[0]?.sessions);
-});
+it.each([0, 1])(
+  "retains failed hosts without losing another host (expanded pages: %s)",
+  (depth) => {
+    const current = catalog("codex", 2);
+    current.capabilities.startTerminal = true;
+    current.hosts.forEach((host) => {
+      host.canStartTerminal = true;
+    });
+    const changed = {
+      ...current.hosts[0]!,
+      canStartTerminal: false,
+      sessions: [],
+      error: { code: "offline", message: "Offline" },
+    };
+    const result = apply(
+      { ...current, hosts: [changed] },
+      [current],
+      new Map([[sessionCatalogHostKey("codex", changed.hostId), depth]]),
+    );
+    expect(result?.catalogs[0]?.hosts.map((host) => host.canStartTerminal)).toEqual([false, true]);
+    expect(result?.catalogs[0]?.hosts[1]).toEqual(current.hosts[1]);
+    expect(result?.catalogs[0]?.hosts[0]?.sessions).toEqual(current.hosts[0]?.sessions);
+  },
+);
 it("compares a host event only with the catalog and host it can replace", () => {
   const changed = catalog("changed", 1);
   const unrelated = catalog("unrelated", 100);

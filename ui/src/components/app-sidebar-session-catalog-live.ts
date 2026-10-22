@@ -278,6 +278,7 @@ export class SessionCatalogLiveState {
       const mergedHost =
         !completeHost &&
         (freshHost.pending ||
+          sessionCatalogPageFailed(freshHost) ||
           (params.pageDepths.get(hostKey) ?? 0) > 0 ||
           this.discoveryPages.has(hostKey))
           ? preserveExpandedCatalogHost(freshHost, currentHost)
