@@ -1,4 +1,4 @@
-import { createMemo, For, Match, onCleanup, onSettled, Show, Switch } from "solid-js";
+import { createMemo, For, Match, onSettled, Show, Switch } from "solid-js";
 import { pathForRoute } from "../app-route-paths.ts";
 import type { ApplicationContext } from "../app/context-types.ts";
 import type { ExecApprovalDecision } from "../app/exec-approval.ts";
@@ -52,6 +52,7 @@ export type SidebarAttentionPanelPosition = { left: number } & (
 );
 export type SidebarAttentionPanelParams = {
   entries: readonly SidebarInboxEntry[];
+  approvalPending?: boolean;
   onApprovalDecision: (event: Event, approvalId: string, decision: ExecApprovalDecision) => void;
   onClose: () => void;
   onDismiss: (dismissal: SidebarAttentionDismissal) => void;
@@ -140,6 +141,7 @@ function SidebarInboxItem(props: {
         {(entry) => (
           <SidebarApprovalItem
             approval={entry().approval}
+            pending={props.panel.approvalPending}
             context={props.readContext()}
             onNavigate={(route, options) => props.panel.onNavigate(route, options)}
             onDecision={props.panel.onApprovalDecision}
@@ -235,13 +237,13 @@ export function SidebarAttentionPanel(
   context: ApplicationContext = useApplication(),
   mentionSource: MentionsCapability = context.sidebarAttention.activate(SidebarAttentionStoreOwner),
 ) {
-  onCleanup(() => props.listRef?.(null));
   let panel!: HTMLElement;
   const focus = createSidebarAttentionFocus(() => panel);
   onSettled(() => {
     const releaseModal = registerModalSurface(panel);
     props.focusRef?.(focus);
     return () => {
+      props.listRef?.(null);
       props.focusRef?.(null);
       releaseModal();
     };
