@@ -249,7 +249,7 @@ struct CLIInstallerTests {
         try FileManager().setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
         let node = executable.deletingLastPathComponent().appendingPathComponent("node")
         try makeExecutableForTests(at: node)
-        try "#!/bin/sh\nprintf 'v24.16.0\\n'\n".write(to: node, atomically: false, encoding: .utf8)
+        try "#!/bin/sh\nprintf 'v24.22.1\\n'\n".write(to: node, atomically: false, encoding: .utf8)
         let config = root.appendingPathComponent("openclaw.json")
         try "{}".write(to: config, atomically: false, encoding: .utf8)
         try await TestIsolation.withIsolatedState(
