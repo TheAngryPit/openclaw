@@ -1,4 +1,3 @@
-// Gateway boot lifecycle tests cover restart-loop breaker accounting.
 import { constants, DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { observeHostDataSql } from "../../test/helpers/sqlite-statement-execution-counter.js";
@@ -406,7 +405,7 @@ describe("gateway crash-loop breaker", () => {
       startupReason?: string;
       reason: string;
     }) => {
-      const bootId = recordGatewayBootStart(db.env, params.startedAtMs);
+      const bootId = (await beginGatewayBootLifecycle(db.env, params.startedAtMs)).id;
       if (!bootId) {
         throw new Error("expected Gateway boot to be recorded");
       }
@@ -439,7 +438,7 @@ describe("gateway crash-loop breaker", () => {
       reason: "gateway startup cleanup failed",
     });
 
-    expect(inspectGatewayCrashLoopBreaker(db.env, nowMs + 2)).toMatchObject({
+    expect(await inspectGatewayCrashLoopBreakerAsync(db.env, nowMs + 2)).toMatchObject({
       tripped: false,
       uncleanBoots: 2,
     });
@@ -463,7 +462,7 @@ describe("gateway crash-loop breaker", () => {
       completedAtMs: nowMs + 3,
       reason: "unknown startup error",
     });
-    expect(inspectGatewayCrashLoopBreaker(db.env, nowMs + 4)).toMatchObject({
+    expect(await inspectGatewayCrashLoopBreakerAsync(db.env, nowMs + 4)).toMatchObject({
       tripped: true,
       uncleanBoots: GATEWAY_BOOT_LOOP_UNCLEAN_THRESHOLD,
     });
@@ -472,14 +471,18 @@ describe("gateway crash-loop breaker", () => {
   it("keeps an unfinished boot in breaker accounting even when its startup reason is known", async () => {
     const db = createLifecycleDb();
     const nowMs = 1_000_000;
-    expect(
-      recordGatewayBootStart(db.env, nowMs - 3, TAILSCALE_BACKEND_AUTH_REQUIRED_REASON),
-    ).toBeDefined();
+    insertBootRows(db, [
+      {
+        bootId: "unfinished-auth-prerequisite",
+        startedAtMs: nowMs - 3,
+        startupReason: TAILSCALE_BACKEND_AUTH_REQUIRED_REASON,
+      },
+    ]);
     for (const [startedAtMs, completedAtMs, reason] of [
       [nowMs - 2, nowMs - 1, "EADDRINUSE"],
       [nowMs - 1, nowMs, "gateway startup cleanup failed"],
     ] as const) {
-      const recordedBootId = recordGatewayBootStart(db.env, startedAtMs);
+      const recordedBootId = (await beginGatewayBootLifecycle(db.env, startedAtMs)).id;
       if (!recordedBootId) {
         throw new Error("expected Gateway boot to be recorded");
       }
@@ -491,7 +494,7 @@ describe("gateway crash-loop breaker", () => {
       );
     }
 
-    expect(inspectGatewayCrashLoopBreaker(db.env, nowMs + 1)).toMatchObject({
+    expect(await inspectGatewayCrashLoopBreakerAsync(db.env, nowMs + 1)).toMatchObject({
       tripped: true,
       uncleanBoots: GATEWAY_BOOT_LOOP_UNCLEAN_THRESHOLD,
     });

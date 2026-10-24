@@ -1,5 +1,5 @@
 import { expect, it, vi } from "vitest";
-import { awaitGateBeforeSettlement, withTestTimeout } from "../../../test/helpers/promise.js";
+import { awaitGateBeforeSettlement, withinTest } from "../../../test/helpers/promise.js";
 import { GATEWAY_STARTUP_MAINTENANCE_REQUIRED_REASON } from "../../infra/startup-maintenance-required.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { setTestEnvValue } from "../../test-utils/env.js";
@@ -116,7 +116,7 @@ export function registerGatewayStartupFailureSettlementTests(
     });
   });
 
-  it.each([
+  it.for([
     { cleanup: "clean", supervised: false, platform: "linux" },
     { cleanup: "failed", supervised: false, platform: "linux" },
     { cleanup: "maintenance", supervised: false, platform: "linux" },
@@ -128,7 +128,7 @@ export function registerGatewayStartupFailureSettlementTests(
     { cleanup: "unavailable", supervised: true, platform: "win32" },
   ] as const)(
     "$cleanup restart cleanup ($supervised supervised, $platform)",
-    async ({ cleanup, supervised, platform }) => {
+    async ({ cleanup, supervised, platform }, { signal }) => {
       const repairFailed = cleanup === "unrepaired" || cleanup === "repair-failed";
       setPlatform(platform);
       vi.clearAllMocks();
@@ -200,21 +200,31 @@ export function registerGatewayStartupFailureSettlementTests(
         const loopSettled = loop.catch(loopRejected);
         let stop: (() => void) | undefined;
         try {
-          await Promise.race([firstStarted.promise, loopSettled]);
+          await withinTest(
+            awaitGateBeforeSettlement(firstStarted.promise, loop, "Gateway settled before startup"),
+            signal,
+          );
           expect(start).toHaveBeenCalledOnce();
           const restart = captureSignal("SIGUSR2");
           stop = captureSignal("SIGTERM");
           restart();
-          await Promise.race([loopSettled, triageStarted.promise]);
+          await withinTest(Promise.race([loopSettled, triageStarted.promise]), signal);
           if (cleanup === "clean") {
             expect(onRestartStartupFailure).toHaveBeenCalledOnce();
             expect(loopRejected).not.toHaveBeenCalled();
-            await withTestTimeout(thirdStarted.promise, 1_000, "triage did not restart Gateway");
+            await withinTest(
+              awaitGateBeforeSettlement(
+                thirdStarted.promise,
+                loop,
+                "triage did not restart Gateway",
+              ),
+              signal,
+            );
             expect(start).toHaveBeenCalledTimes(3);
             stop();
             await expect(exited).resolves.toBe(0);
           } else if (supervised && repairFailed) {
-            await withTestTimeout(loopSettled, 1_000, "startup refusal did not settle");
+            await withinTest(loopSettled, signal);
             const error = cleanup === "unrepaired" ? retryError : startupError;
             expect(loopRejected).toHaveBeenCalledExactlyOnceWith(error);
             expect(onRestartStartupFailure).toHaveBeenCalledOnce();
@@ -224,10 +234,13 @@ export function registerGatewayStartupFailureSettlementTests(
               reason: error.message,
             });
           } else if (cleanup === "unavailable" || repairFailed) {
-            await withTestTimeout(
-              Promise.race([manualRecovery.promise, loopSettled]),
-              1_000,
-              "missing recovery guidance",
+            await withinTest(
+              awaitGateBeforeSettlement(
+                manualRecovery.promise,
+                loop,
+                "Gateway settled without recovery guidance",
+              ),
+              signal,
             );
             expectCallCount(0, loopRejected, runtime.exit);
             expect(onRestartStartupFailure).toHaveBeenCalledOnce();
@@ -248,7 +261,14 @@ export function registerGatewayStartupFailureSettlementTests(
                 return createGatewayServer(closeThird);
               });
               restart();
-              await withTestTimeout(recovered.promise, 1_000, "operator reload did not restart");
+              await withinTest(
+                awaitGateBeforeSettlement(
+                  recovered.promise,
+                  loop,
+                  "operator reload did not restart",
+                ),
+                signal,
+              );
             }
             stop();
             await expect(exited).resolves.toBe(0);

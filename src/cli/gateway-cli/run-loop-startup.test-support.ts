@@ -452,6 +452,7 @@ export function registerGatewayStartupFailureTests(
           .mockImplementationOnce(async () =>
             createGatewayServer(secondClose, secondStartup.promise),
           );
+        const beginBoot = vi.fn();
         const completeBoot = vi.fn();
         const onRestartStartupFailure = vi.fn(async (error: unknown, signal: AbortSignal) => {
           expect(error).toBe(startupError);
@@ -464,7 +465,7 @@ export function registerGatewayStartupFailureTests(
           await allowRecovery.promise;
           return "completed" as const;
         });
-        const loop = runGatewayLoop({ start, completeBoot, onRestartStartupFailure });
+        const loop = runGatewayLoop({ start, beginBoot, completeBoot, onRestartStartupFailure });
         let loopFinished = false;
         void loop.then(
           () => {
@@ -492,7 +493,16 @@ export function registerGatewayStartupFailureTests(
             () => start.mock.calls.length === 2,
             "expected exactly one retry after the backend recovery handler completed",
           );
-          expect(completeBoot).toHaveBeenCalledOnce();
+          // The restart request is separate from the failed boot. run.ts retires its
+          // active boot ID before persistence, so that request cannot overwrite the failure.
+          expect(completeBoot.mock.calls.map(([completion]) => completion.outcome)).toEqual([
+            "startup_failed",
+            "planned_restart",
+          ]);
+          expect(beginBoot).toHaveBeenCalledTimes(2);
+          expect(completeBoot.mock.invocationCallOrder[1]).toBeLessThan(
+            beginBoot.mock.invocationCallOrder[1]!,
+          );
           expect(completeBoot).toHaveBeenCalledWith(
             expect.objectContaining({
               outcome: "startup_failed",
