@@ -257,7 +257,7 @@ it("offers an accessible retry after a failed list and renders the empty state",
   expect(page.querySelector('#settings-profile-channel-identities [role="alert"]')).toBeNull();
 });
 
-it("admits only one channel identity link before the reactive view flushes", async () => {
+it("renders first-link and last-unlink transitions with single-flight mutation admission", async () => {
   const pendingLink = createDeferred<{
     profileId: string;
     identity: { channelId: string; accountId: string; senderId: string };
@@ -275,6 +275,9 @@ it("admits only one channel identity link before the reactive view flushes", asy
     }
     if (method === "users.linkChannelIdentity") {
       return pendingLink.promise;
+    }
+    if (method === "users.unlinkChannelIdentity") {
+      return { removed: true };
     }
     if (method === "users.prefs.get") {
       return { status: "no_durable_identity" };
@@ -323,6 +326,24 @@ it("admits only one channel identity link before the reactive view flushes", asy
         "Channel account link added.",
       ),
     );
+    await waitForFast(() => expect(section.textContent).toContain(identity.senderId));
+    expect(section.querySelector(".settings-empty")).toBeNull();
+
+    const remove = section.querySelector<HTMLButtonElement>(
+      'button[aria-label="Remove link telegram, main, same-turn"]',
+    )!;
+    await waitForFast(() => expect(remove.disabled).toBe(false));
+    remove.click();
+    await waitForFast(() =>
+      expect(section.querySelector(".settings-empty")?.textContent).toContain(
+        "No channel accounts are linked to your profile.",
+      ),
+    );
+    expect(request).toHaveBeenCalledWith("users.unlinkChannelIdentity", {
+      profileId: modelAccountProfile.id,
+      identity,
+    });
+    expect(section.textContent).not.toContain(identity.senderId);
   } finally {
     pendingLink.resolve({ profileId: modelAccountProfile.id, identity });
     await pendingLink.promise;
