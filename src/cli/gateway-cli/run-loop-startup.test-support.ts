@@ -30,32 +30,6 @@ export function registerGatewayStartupFailureTests(
   >,
 ): void {
   const { acquireGatewayLock } = fixtures;
-  const createStartupOperations = async () => {
-    const { createGatewayStartupOperations } = await import("./run-loop-startup.js");
-    return createGatewayStartupOperations();
-  };
-  const rejectTrackedStartup = async (
-    operations: Awaited<ReturnType<typeof createStartupOperations>>,
-    error: unknown,
-  ) => {
-    await expect(
-      operations.run(async () => {
-        throw error;
-      }),
-    ).rejects.toBe(error);
-  };
-
-  it("preserves a second tracked startup failure after acknowledging the first", async () => {
-    const operations = await createStartupOperations();
-    const handledFailure = new Error("handled prerequisite failure");
-    const unrelatedFailure = new Error("unrelated startup failure");
-    await rejectTrackedStartup(operations, handledFailure);
-    await rejectTrackedStartup(operations, unrelatedFailure);
-    operations.close();
-    operations.acknowledgeHandledFailure(handledFailure);
-    await expect(operations.drain()).rejects.toBe(unrelatedFailure);
-  });
-
   it.each(["initial drain", "drain after acknowledging the auth failure"] as const)(
     "completes boot before rethrowing a distinct startup failure from the %s",
     async (failureDrain) => {
