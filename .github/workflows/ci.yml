@@ -3,12 +3,17 @@ run-name: PR164607 current Solid Profile qualification
 
 on:
   workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full product candidate commit to qualify
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: pr164607-solid-proof-${{ github.sha }}
+  group: pr164607-solid-proof-${{ github.workflow }}-${{ inputs.candidate_sha }}
   cancel-in-progress: false
 
 jobs:
@@ -22,9 +27,9 @@ jobs:
       matrix:
         include:
           - variant: baseline
-            product_sha: bcd41d1aae8d60336fbf5466f22eb665ee353e4f
+            product_sha: d79ab6195d8d0566b285008bcc30c01a6ce368e2
           - variant: candidate
-            product_sha: 9ad01b19b3282fecc9f8670662d2ec09f18b5b36
+            product_sha: ${{ inputs.candidate_sha }}
     defaults:
       run:
         shell: bash
@@ -32,20 +37,23 @@ jobs:
     env:
       CI: "true"
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-      NODE_VERSION: "24.21.0"
+      NODE_VERSION: "24.22.1"
       PNPM_CONFIG_FROZEN_LOCKFILE: "true"
       OPENCLAW_CAPTURE_UI_PROOF: "1"
       OPENCLAW_PROFILE_QA_VARIANT: ${{ matrix.variant }}
       OPENCLAW_PROFILE_QA_PRODUCT_SHA: ${{ matrix.product_sha }}
-      OPENCLAW_PROFILE_QA_HARNESS_SHA: ${{ github.workflow_sha }}
+      OPENCLAW_PROFILE_QA_CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+      OPENCLAW_PROFILE_QA_BASELINE_SHA: d79ab6195d8d0566b285008bcc30c01a6ce368e2
+      OPENCLAW_PROFILE_QA_OLD_QA_SHA: ceba1804295df7407fbd42241163d70dcda35d11
+      OPENCLAW_PROFILE_QA_HARNESS_SHA: ${{ github.sha }}
     steps:
-      - name: Checkout reviewed QA child
+      - name: Checkout reviewed QA integration
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.workflow_sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
-          fetch-depth: 2
-      - name: Checkout exact product
+          fetch-depth: 3
+      - name: Checkout exact product source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: TheAngryPit/openclaw
@@ -53,31 +61,49 @@ jobs:
           path: product
           persist-credentials: false
           fetch-depth: 1
-      - name: Verify exact source and harness scope
+      - name: Verify exact source and overlay ancestry
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$OPENCLAW_PROFILE_QA_PRODUCT_SHA"
-          test "$(git -C .. rev-parse HEAD)" = "$OPENCLAW_PROFILE_QA_HARNESS_SHA"
-          test "$(git -C .. rev-parse HEAD^1)" = 9ad01b19b3282fecc9f8670662d2ec09f18b5b36
+          [[ "$OPENCLAW_PROFILE_QA_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$OPENCLAW_PROFILE_QA_PRODUCT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$OPENCLAW_PROFILE_QA_BASELINE_SHA" = d79ab6195d8d0566b285008bcc30c01a6ce368e2
+          test "$OPENCLAW_PROFILE_QA_OLD_QA_SHA" = ceba1804295df7407fbd42241163d70dcda35d11
+          test "$OPENCLAW_PROFILE_QA_HARNESS_SHA" = "$(git -C .. rev-parse HEAD)"
+          test "$OPENCLAW_PROFILE_QA_PRODUCT_SHA" = "$(git rev-parse HEAD)"
+          test "$OPENCLAW_PROFILE_QA_CANDIDATE_SHA" = "$(git -C .. rev-parse HEAD^1)"
+          test "$OPENCLAW_PROFILE_QA_OLD_QA_SHA" = "$(git -C .. rev-parse HEAD^2^1)"
+          git -C .. diff --exit-code "$OPENCLAW_PROFILE_QA_OLD_QA_SHA" HEAD^2 -- . ':(exclude).github/workflows/ci.yml' ':(exclude)qa/pr164607-owner61-proof-20261012'
+          git -C .. diff --exit-code "$OPENCLAW_PROFILE_QA_CANDIDATE_SHA" HEAD -- . ':(exclude).github/workflows/ci.yml' ':(exclude)qa/pr164607-owner61-proof-20261012'
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
-          git -C .. diff --exit-code HEAD^1 HEAD -- . ':(exclude).github/workflows/ci.yml' ':(exclude)qa/pr164607-owner61-proof-20261012'
-          test "$(git hash-object .github/actions/setup-node-env/action.yml)" = "$(git -C .. rev-parse HEAD:.github/actions/setup-node-env/action.yml)"
-          test "$(git hash-object .github/actions/setup-pnpm-store-cache/action.yml)" = "$(git -C .. rev-parse HEAD:.github/actions/setup-pnpm-store-cache/action.yml)"
+          test "$(git hash-object .github/actions/setup-node-env/action.yml)" = "$(git rev-parse HEAD:.github/actions/setup-node-env/action.yml)"
+          test "$(git hash-object .github/actions/setup-pnpm-store-cache/action.yml)" = "$(git rev-parse HEAD:.github/actions/setup-pnpm-store-cache/action.yml)"
           printf 'OPENCLAW_UI_E2E_ARTIFACT_DIR=%s\nOPENCLAW_UI_E2E_DIAGNOSTIC_DIR=%s\n' "$RUNNER_TEMP/pr164607-$OPENCLAW_PROFILE_QA_VARIANT" "$RUNNER_TEMP/pr164607-$OPENCLAW_PROFILE_QA_VARIANT-diagnostics" >> "$GITHUB_ENV"
-      - name: Select exact Node24.21.0
+      - name: Select exact Node 24.22.1
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           package-manager-cache: false
       - name: Setup source-owned Node and dependencies
         uses: ./.github/actions/setup-node-env
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           install-bun: "false"
           install-deps: "false"
           cache-mode: "off"
           dependency-cache: "false"
           frozen-lockfile: "true"
+      - name: Verify candidate-pinned package manager and browser package
+        run: |
+          set -euo pipefail
+          test "$(node -p 'process.versions.node')" = "$NODE_VERSION"
+          package_manager="$(node -p 'JSON.parse(require("node:fs").readFileSync("package.json", "utf8")).packageManager')"
+          [[ "$package_manager" =~ ^pnpm@[0-9]+\.[0-9]+\.[0-9]+\+sha512\.[0-9a-f]{128}$ ]]
+          package_manager_version="${package_manager#pnpm@}"
+          package_manager_version="${package_manager_version%%+*}"
+          test "$(corepack pnpm --version)" = "$package_manager_version"
+          test "$(pnpm --version)" = "$package_manager_version"
+          playwright_version="$(node -p 'require("./ui/package.json").devDependencies.playwright')"
+          printf 'OPENCLAW_PROFILE_QA_PACKAGE_MANAGER=%s\nOPENCLAW_PROFILE_QA_PNPM_VERSION=%s\nOPENCLAW_PROFILE_QA_PLAYWRIGHT_VERSION=%s\n' "$package_manager" "$package_manager_version" "$playwright_version" >> "$GITHUB_ENV"
       - name: Install exact product dependencies through source owner
         working-directory: product
         env:
@@ -87,11 +113,11 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$OPENCLAW_PROFILE_QA_PRODUCT_SHA"
-          test "$(node -p 'process.versions.node')" = 24.21.0
-          test "$(pnpm --version)" = 12.9.0
+          test "$(node -p 'process.versions.node')" = "$NODE_VERSION"
+          test "$(pnpm --version)" = "$OPENCLAW_PROFILE_QA_PNPM_VERSION"
           bash .github/actions/setup-node-env/install-dependencies.sh
           test -s node_modules/tsx/package.json
-          test "$(node -p 'require("./ui/node_modules/playwright/package.json").version')" = 1.63.0
+          test "$(node -p 'require("./ui/node_modules/playwright/package.json").version')" = "$OPENCLAW_PROFILE_QA_PLAYWRIGHT_VERSION"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
       - name: Setup exact product Chromium through source owner
         working-directory: product

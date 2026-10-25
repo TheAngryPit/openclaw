@@ -1,28 +1,56 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-product_sha="$OPENCLAW_PROFILE_QA_PRODUCT_SHA"
-variant="$OPENCLAW_PROFILE_QA_VARIANT"
-harness_sha="$OPENCLAW_PROFILE_QA_HARNESS_SHA"
+product_sha="${OPENCLAW_PROFILE_QA_PRODUCT_SHA:?}"
+candidate_sha="${OPENCLAW_PROFILE_QA_CANDIDATE_SHA:?}"
+baseline_sha="${OPENCLAW_PROFILE_QA_BASELINE_SHA:?}"
+old_qa_sha="${OPENCLAW_PROFILE_QA_OLD_QA_SHA:?}"
+variant="${OPENCLAW_PROFILE_QA_VARIANT:?}"
+harness_sha="${OPENCLAW_PROFILE_QA_HARNESS_SHA:?}"
 qa_root="$GITHUB_WORKSPACE/qa/pr164607-owner61-proof-20261012"
-proof_root="$OPENCLAW_UI_E2E_ARTIFACT_DIR"
+proof_root="${OPENCLAW_UI_E2E_ARTIFACT_DIR:?}"
 browser_fixture=ui/src/e2e/profile-current.qa.real-gateway.e2e.test.ts
 storage_fixture=src/gateway/channel-identities-final-effect.qa.test.ts
 config=.artifacts/pr164607-owner61-proof-20261012/vitest.profile-current.config.ts
 
 [[ "$product_sha" =~ ^[0-9a-f]{40}$ ]]
+[[ "$candidate_sha" =~ ^[0-9a-f]{40}$ ]]
+[[ "$baseline_sha" =~ ^[0-9a-f]{40}$ ]]
+[[ "$old_qa_sha" =~ ^[0-9a-f]{40}$ ]]
 [[ "$harness_sha" =~ ^[0-9a-f]{40}$ ]]
-case "$variant" in baseline|candidate) ;; *) exit 2 ;; esac
+test "$baseline_sha" = d79ab6195d8d0566b285008bcc30c01a6ce368e2
+test "$old_qa_sha" = ceba1804295df7407fbd42241163d70dcda35d11
+test "$candidate_sha" != "$baseline_sha"
+case "$variant" in
+  baseline) test "$product_sha" = "$baseline_sha" ;;
+  candidate) test "$product_sha" = "$candidate_sha" ;;
+  *) exit 2 ;;
+esac
 test "$(git rev-parse HEAD)" = "$product_sha"
 test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$harness_sha"
-test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD^1)" = 9ad01b19b3282fecc9f8670662d2ec09f18b5b36
+test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD^1)" = "$candidate_sha"
+test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD^2^1)" = "$old_qa_sha"
+git -C "$GITHUB_WORKSPACE" diff --exit-code "$old_qa_sha" HEAD^2 -- . ':(exclude).github/workflows/ci.yml' ':(exclude)qa/pr164607-owner61-proof-20261012'
+git -C "$GITHUB_WORKSPACE" diff --exit-code "$candidate_sha" HEAD -- . ':(exclude).github/workflows/ci.yml' ':(exclude)qa/pr164607-owner61-proof-20261012'
 test -z "$(git status --porcelain=v1 --untracked-files=all)"
-git -C "$GITHUB_WORKSPACE" diff --exit-code 9ad01b19b3282fecc9f8670662d2ec09f18b5b36 HEAD -- . ':(exclude).github/workflows/ci.yml' ':(exclude)qa/pr164607-owner61-proof-20261012'
+
+package_manager="$(node -p 'JSON.parse(require("node:fs").readFileSync("package.json", "utf8")).packageManager')"
+[[ "$package_manager" =~ ^pnpm@[0-9]+\.[0-9]+\.[0-9]+\+sha512\.[0-9a-f]{128}$ ]]
+package_manager_version="${package_manager#pnpm@}"
+package_manager_version="${package_manager_version%%+*}"
+test "$package_manager" = "$OPENCLAW_PROFILE_QA_PACKAGE_MANAGER"
+test "$package_manager_version" = "$OPENCLAW_PROFILE_QA_PNPM_VERSION"
+test "$(node -p 'process.versions.node')" = "$NODE_VERSION"
+test "$(corepack pnpm --version)" = "$package_manager_version"
+test "$(pnpm --version)" = "$package_manager_version"
+playwright_version="$(node -p 'require("./ui/package.json").devDependencies.playwright')"
+test "$playwright_version" = "$OPENCLAW_PROFILE_QA_PLAYWRIGHT_VERSION"
+test "$(node -p 'require("./ui/node_modules/playwright/package.json").version')" = "$playwright_version"
+
 mkdir "$proof_root"
-printf 'product_sha=%s\nharness_sha=%s\nvariant=%s\n' "$product_sha" "$harness_sha" "$variant" > "$proof_root/receipt.txt"
-node -p 'JSON.parse(require("node:fs").readFileSync("package.json", "utf8")).packageManager' >> "$proof_root/receipt.txt"
-test "$(node -p 'process.versions.node')" = 24.21.0
-test "$(pnpm --version)" = 12.9.0
+printf 'candidate_sha=%s\nproduct_sha=%s\nharness_sha=%s\nvariant=%s\nnode=%s\npackage_manager=%s\npnpm_version=%s\nplaywright_version=%s\n' \
+  "$candidate_sha" "$product_sha" "$harness_sha" "$variant" "$NODE_VERSION" "$package_manager" "$package_manager_version" "$playwright_version" \
+  > "$proof_root/receipt.txt"
 test ! -e "$browser_fixture"
 test ! -e "$storage_fixture"
 test ! -e "$config"
@@ -50,6 +78,10 @@ verify_final_inputs() {
   local source_ok=1
   test "$(git rev-parse HEAD)" = "$product_sha" || source_ok=0
   test "$(git status --porcelain=v1 --untracked-files=all)" = "$expected_status" || source_ok=0
+  test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" = "$harness_sha" || source_ok=0
+  test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD^1)" = "$candidate_sha" || source_ok=0
+  test "$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD^2^1)" = "$old_qa_sha" || source_ok=0
+  git -C "$GITHUB_WORKSPACE" diff --exit-code "$candidate_sha" HEAD -- . ':(exclude).github/workflows/ci.yml' ':(exclude)qa/pr164607-owner61-proof-20261012' >/dev/null || source_ok=0
   sha256sum --check "$proof_root/qa-digests.txt" >/dev/null || source_ok=0
   sha256sum --check "$proof_root/build-digests.txt" >/dev/null || source_ok=0
   printf 'proof_exit=%s\ninputs_unchanged=%s\n' "$result" "$source_ok" >> "$proof_root/receipt.txt"

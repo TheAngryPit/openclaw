@@ -1,8 +1,8 @@
 # Current Solid Profile qualification
 
-This QA branch is a direct child of frozen product `9ad01b19b3282fecc9f8670662d2ec09f18b5b36`. It changes only the registered fork `CI` workflow and this QA directory. Product source must match that parent exactly. The public workflow has one manual run with two standard Ubuntu24.04 cells. Baseline is main `bcd41d1aae8d60336fbf5466f22eb665ee353e4f`. Candidate is product9ad01b19. Node24.21.0 and the source-owned pnpm12.9.0 lock are exact. No secrets, personal runtime, paid runner, private image or new policy is used.
+The QA overlay remains a descendant of its existing fork tip `ceba1804295df7407fbd42241163d70dcda35d11`. The integration commit uses the exact product candidate as its first parent and the updated overlay as its second parent. The hosted workflow verifies both parent relationships and checks that the candidate-to-integration diff changes only this QA directory and its workflow. It runs only from the registered fork, with a manually supplied full candidate SHA. Baseline is pinned to upstream main `d79ab6195d8d0566b285008bcc30c01a6ce368e2`; the candidate job checks out the supplied SHA. Node is pinned to 24.22.1. For each exact product checkout, the workflow verifies the full `packageManager` integrity pin through Corepack, compares pnpm to the version before `+`, and checks the installed Playwright version against that source's `ui/package.json`. No user credentials or personal runtime are used.
 
-Root must review the product and QA commits before publication. Root owns source and QA pushes, enable/dispatch/finally-disable/readback, actual artifact collection, visual inspection, publication and subsequent reviewer consumption. Neither these instructions nor successful static checks establish a hosted pass.
+Review the product and QA diffs before publication. A successful dispatch acknowledgement or local static check does not establish a hosted pass; verify the exact workflow inputs, both matrix jobs, retained artifacts and actual screenshot contents.
 
 ## Product and overlay identities
 
@@ -16,9 +16,9 @@ The final-effect fixture covers registered Gateway, worker and storage. It uses 
 
 ## Retained proof inventory
 
-Each cell retains product/harness SHA, exact package-manager pin, QA fixture/config digests, unchanged compiled runtime digests and after-run source checks. `served-assets.json` records SHA256 of the actual UI asset responses consumed by the browser. The canonical ordinary E2E owner builds its UI in an isolated temporary directory; compiled runtime digests alone are not the served UI identity.
+Each cell retains candidate/product/harness SHAs, Node, the full package-manager integrity pin, pnpm and Playwright versions, QA fixture/config digests, unchanged compiled runtime digests and after-run source checks. `served-assets.json` records the runner image/OS/architecture, actual Chromium version, exact browser package version and SHA256 of the UI asset responses consumed by the browser. The canonical ordinary E2E owner builds its UI in an isolated temporary directory; compiled runtime digests alone are not the served UI identity.
 
-Both cells must produce `06-current-profile-desktop.png` and `06-current-profile-mobile.png`. The same synthetic personal identity and current Profile are in those before/after views. Candidate additionally requires these stages at1280x900 and390x844.
+Both cells must produce `06-current-profile-desktop.png` and `06-current-profile-mobile.png`. The same synthetic personal identity and current Profile are in those before/after views. Candidate additionally requires these stages at 1280x900 and 390x844.
 
 - `07-current-channel-form` shows the current empty Solid form.
 - `08-link-added` shows the exact saved link.
@@ -28,7 +28,7 @@ Both cells must produce `06-current-profile-desktop.png` and `06-current-profile
 - `12-disconnecting-draft` shows entered identifiers before transport loss.
 - `13-disconnected` shows the unavailable Profile after transport loss.
 
-The current screenshot helper settles semantic content, fonts, images and viewport geometry. It retains complete viewport PNGs. It performs ordinary scrolling and canonical animation settling without replacing DOM, styles or screenshot pixels. Original existing five incumbent captures are also retained. Root must inspect the actual image contents before claiming the form or identity is visible.
+The current screenshot helper settles semantic content, fonts, images and viewport geometry. It retains complete viewport PNGs. It performs ordinary scrolling and canonical animation settling without replacing DOM, styles or screenshot pixels. The five incumbent filenames are retained and now use the same helper, with the profile hero, linked row or empty state framed as appropriate. Inspect the actual images before claiming the form or identity is visible.
 
 Candidate must retain `browser-final-storage.json` and four `final-storage-*.json` receipts. Storage receipt outcomes derive from observed production replies and exact binding reads after independent assertions. JSON contains synthetic scenario labels and no credentials, raw profile IDs, IPs or endpoints. Canonical public timeout diagnostics remain retained if the run fails. Required media and receipt checks cannot be skipped to pass the run.
 

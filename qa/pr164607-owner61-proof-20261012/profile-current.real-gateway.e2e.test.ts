@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 // Control UI proof against an isolated real Gateway and trusted user identity.
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import type { Locator } from "playwright";
 import { createServer, type ViteDevServer } from "vite";
 import { expect, it } from "vitest";
 import type { GatewayServer } from "../../../src/gateway/server-public.ts";
@@ -165,12 +166,37 @@ suite.define(() => {
           const saveServedAssets = async () => {
             await Promise.all(assetReads);
             expect(servedAssets.size).toBeGreaterThan(0);
+            const packageManager = JSON.parse(
+              await readFile("package.json", "utf8"),
+            ).packageManager;
+            const playwrightVersion = JSON.parse(
+              await readFile("ui/node_modules/playwright/package.json", "utf8"),
+            ).version;
+            expect(packageManager).toBe(process.env.OPENCLAW_PROFILE_QA_PACKAGE_MANAGER);
+            expect(playwrightVersion).toBe(process.env.OPENCLAW_PROFILE_QA_PLAYWRIGHT_VERSION);
+            const browserVersion = page.context().browser()?.version();
+            expect(browserVersion).toMatch(/^\d+\.\d+/);
             await writeFile(
               path.join(proofDir, "served-assets.json"),
               JSON.stringify(
                 {
                   source: process.env.OPENCLAW_PROFILE_QA_PRODUCT_SHA,
+                  candidate: process.env.OPENCLAW_PROFILE_QA_CANDIDATE_SHA,
+                  harness: process.env.OPENCLAW_PROFILE_QA_HARNESS_SHA,
                   variant,
+                  runtime: {
+                    node: process.version,
+                    packageManager,
+                    pnpm: process.env.OPENCLAW_PROFILE_QA_PNPM_VERSION,
+                    playwright: playwrightVersion,
+                    browser: browserVersion,
+                    runner: {
+                      os: process.env.RUNNER_OS ?? process.platform,
+                      image: process.env.ImageOS ?? null,
+                      imageVersion: process.env.ImageVersion ?? null,
+                      arch: process.arch,
+                    },
+                  },
                   assets: Object.fromEntries([...servedAssets.entries()].sort()),
                 },
                 null,
@@ -189,6 +215,19 @@ suite.define(() => {
               });
               await writeFile(path.join(proofDir, `${stage}-${viewport.name}.png`), frame.png);
             }
+          };
+          const captureNamedFrame = async (
+            filename: string,
+            surface: Locator,
+            content: readonly Locator[],
+            scrollTo: Locator,
+          ) => {
+            const frame = await takeControlUiScreenshotFrame(page, surface, content, {
+              viewport: { width: 1280, height: 800 },
+              scrollTo,
+              animations: "disabled",
+            });
+            await writeFile(path.join(proofDir, filename), frame.png);
           };
           await page.addInitScript((key) => {
             window.localStorage.setItem(key, JSON.stringify({ dismissedAtMs: 1770000000000 }));
@@ -211,12 +250,13 @@ suite.define(() => {
           await expect
             .poll(() => page.locator(".profile-hero").textContent())
             .not.toContain("Clipper");
-          if (proofDir) {
-            await page.screenshot({
-              animations: "disabled",
-              path: path.join(proofDir, "01-real-gateway-authenticated-profile.png"),
-            });
-          }
+          const profileHero = page.locator(".profile-hero");
+          await captureNamedFrame(
+            "01-real-gateway-authenticated-profile.png",
+            profileHero,
+            [profileHero],
+            profileHero,
+          );
           await expect.poll(() => page.locator(".community-invite-card").count()).toBe(0);
           await expect.poll(() => page.locator(".profile-refresh").isEnabled()).toBe(true);
           if (variant === "baseline") {
@@ -259,12 +299,12 @@ suite.define(() => {
           await expect
             .poll(() => page.locator(".identity-name-control input").inputValue())
             .toBe("Local draft");
-          if (proofDir) {
-            await page.screenshot({
-              animations: "disabled",
-              path: path.join(proofDir, "02-real-gateway-cleared-profile.png"),
-            });
-          }
+          await captureNamedFrame(
+            "02-real-gateway-cleared-profile.png",
+            profileHero,
+            [profileHero],
+            profileHero,
+          );
 
           if (variant === "baseline") {
             await saveServedAssets();
@@ -319,12 +359,13 @@ suite.define(() => {
           await expect.poll(() => identityRow.count()).toBe(1);
           await expect.poll(() => identityRow.textContent()).toContain(channelIdentity.senderId);
           await expectIdentitySectionInFrame(".settings-row", channelIdentity.senderId);
-          if (proofDir) {
-            await page.screenshot({
-              animations: "disabled",
-              path: path.join(proofDir, "03-real-gateway-channel-link-added.png"),
-            });
-          }
+          const identityHeading = identitySection.locator(".settings-section__heading");
+          await captureNamedFrame(
+            "03-real-gateway-channel-link-added.png",
+            identitySection,
+            [identityHeading, identityRow],
+            identityRow,
+          );
 
           expect(await listCanonicalUserChannelIdentities(profile.id)).toEqual([
             { profileId: profile.id, identity: channelIdentity },
@@ -343,12 +384,12 @@ suite.define(() => {
           await expect.poll(() => identityRow.count()).toBe(1);
           await expect.poll(() => identityRow.textContent()).toContain(channelIdentity.senderId);
           await expectIdentitySectionInFrame(".settings-row", channelIdentity.senderId);
-          if (proofDir) {
-            await page.screenshot({
-              animations: "disabled",
-              path: path.join(proofDir, "04-real-gateway-channel-link-reloaded.png"),
-            });
-          }
+          await captureNamedFrame(
+            "04-real-gateway-channel-link-reloaded.png",
+            identitySection,
+            [identityHeading, identityRow],
+            identityRow,
+          );
 
           await capture(
             "09-link-reloaded",
@@ -382,12 +423,13 @@ suite.define(() => {
             ".settings-empty",
             "No channel accounts are linked to your profile.",
           );
-          if (proofDir) {
-            await page.screenshot({
-              animations: "disabled",
-              path: path.join(proofDir, "05-real-gateway-channel-link-removed-reloaded.png"),
-            });
-          }
+          const identityEmptyState = identitySection.locator(".settings-empty");
+          await captureNamedFrame(
+            "05-real-gateway-channel-link-removed-reloaded.png",
+            identitySection,
+            [identityHeading, identityEmptyState],
+            identityEmptyState,
+          );
           expect(await listCanonicalUserChannelIdentities(profile.id)).toEqual([]);
           await capture(
             "10-link-removed",
