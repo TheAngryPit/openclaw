@@ -19,35 +19,59 @@ struct SessionDashboardScreen: View {
             config: config,
             storedOperatorToken: storedOperatorToken,
             authorizationRevision: authorization?.revision)
+        let url = Self.dashboardURL(config: config, sessionKey: self.sessionKey, agentId: self.agentId)
+        let authScript: String?
+        let authScriptProvider: (@MainActor () async -> String?)?
+        let accessNativeAuthProvider: IOSDashboardNativeGatewayAuthProvider?
+        let nativeAuth: ControlUINativeGatewayAuthHandler?
+        if authorization != nil {
+            authScript = AuthenticatedControlUI.authUserScript(
+                config: config,
+                pageURL: url,
+                usesNativeNavigationChrome: true)
+            authScriptProvider = {
+                let credentials = await nativeAuthProvider?.legacyCredentials()
+                return AuthenticatedControlUI.authUserScript(
+                    config: config,
+                    pageURL: url,
+                    legacyCredentials: credentials,
+                    usesNativeNavigationChrome: true)
+            }
+            accessNativeAuthProvider = nativeAuthProvider
+            nativeAuth = nil
+        } else {
+            authScript = AuthenticatedControlUI.authUserScript(
+                config: config,
+                pageURL: url,
+                storedOperatorToken: storedOperatorToken,
+                usesNativeNavigationChrome: true)
+            authScriptProvider = nil
+            accessNativeAuthProvider = nil
+            nativeAuth = AuthenticatedControlUI.nativeAuthHandler(
+                config: config,
+                storedOperatorToken: storedOperatorToken,
+                appModel: self.appModel)
+        }
         ZStack {
             OpenClawProBackground()
-            if let url = Self.dashboardURL(
-                config: config,
-                sessionKey: self.sessionKey,
-                agentId: self.agentId),
+            if let url,
                 authorization == nil || authorization?.dashboardCookie(url) != nil,
                 self.failedAccessBoundaryIdentity != webContentIdentity
             {
                 AuthenticatedControlUIWebView(
                     url: url,
-                    authScript: AuthenticatedControlUI.authUserScript(
-                        config: config,
-                        pageURL: url,
-                        usesNativeNavigationChrome: true),
+                    authScript: authScript,
                     tls: config?.tls,
-                    authScriptProvider: {
-                        let credentials = await nativeAuthProvider?.legacyCredentials()
-                        return AuthenticatedControlUI.authUserScript(
-                            config: config,
-                            pageURL: url,
-                            legacyCredentials: credentials,
-                            usesNativeNavigationChrome: true)
+                    authScriptProvider: authScriptProvider,
+                    nativeGatewayAuthProvider: accessNativeAuthProvider,
+                    basicProxyCredentialProvider: {
+                        AuthenticatedControlUI.basicProxyCredential(config: config)
                     },
-                    nativeGatewayAuthProvider: nativeAuthProvider,
                     allowedMainFramePathPrefix: Self.dashboardPathPrefix(config: config),
                     onMainFrameNavigationOutsideScope: {
                         self.dismiss()
                     },
+                    nativeAuth: nativeAuth,
                     accessCookie: authorization?.dashboardCookie(url),
                     accessAdmissionIsCurrent: authorization.map { authorization in
                         { authorization.isCurrent() }

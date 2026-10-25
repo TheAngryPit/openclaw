@@ -208,23 +208,50 @@ struct EmbeddedDashboardContent: View {
         let config = self.config
         let url = self.url
         let nativeAuthProvider = IOSDashboardNativeGatewayAuthProvider(appModel: self.appModel, config: self.config)
-        return AuthenticatedControlUIWebView(
-            url: url,
-            authScript: AuthenticatedControlUI.authUserScript(
+        let storedOperatorToken = AuthenticatedControlUI.storedOperatorToken(config: config)
+        let authScript: String?
+        let authScriptProvider: (@MainActor () async -> String?)?
+        let accessNativeAuthProvider: IOSDashboardNativeGatewayAuthProvider?
+        let nativeAuth: ControlUINativeGatewayAuthHandler?
+        if authorization != nil {
+            authScript = AuthenticatedControlUI.authUserScript(
                 config: config,
                 pageURL: url,
-                usesNativeNavigationChrome: true),
-            tls: config?.tls,
-            authScriptProvider: {
+                usesNativeNavigationChrome: true)
+            authScriptProvider = {
                 let credentials = await nativeAuthProvider?.legacyCredentials()
                 return AuthenticatedControlUI.authUserScript(
                     config: config,
                     pageURL: url,
                     legacyCredentials: credentials,
                     usesNativeNavigationChrome: true)
+            }
+            accessNativeAuthProvider = nativeAuthProvider
+            nativeAuth = nil
+        } else {
+            authScript = AuthenticatedControlUI.authUserScript(
+                config: config,
+                pageURL: url,
+                storedOperatorToken: storedOperatorToken,
+                usesNativeNavigationChrome: true)
+            authScriptProvider = nil
+            accessNativeAuthProvider = nil
+            nativeAuth = AuthenticatedControlUI.nativeAuthHandler(
+                config: config,
+                storedOperatorToken: storedOperatorToken,
+                appModel: self.appModel)
+        }
+        return AuthenticatedControlUIWebView(
+            url: url,
+            authScript: authScript,
+            tls: config?.tls,
+            authScriptProvider: authScriptProvider,
+            nativeGatewayAuthProvider: accessNativeAuthProvider,
+            basicProxyCredentialProvider: {
+                AuthenticatedControlUI.basicProxyCredential(config: config)
             },
-            nativeGatewayAuthProvider: nativeAuthProvider,
             deviceSettingsBridge: self.bridge,
+            nativeAuth: nativeAuth,
             usesNativeEmbed: true,
             embedCompatibility: self.embedCompatibility,
             accessCookie: accessCookie,

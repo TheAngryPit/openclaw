@@ -46,6 +46,14 @@ enum ControlUIHubPage {
             legacyCredentials: legacyCredentials)
     }
 
+    @MainActor
+    func authUserScript(config: GatewayConnectConfig?, storedOperatorToken: String?) -> String? {
+        AuthenticatedControlUI.authUserScript(
+            config: config,
+            pageURL: self.url(config: config),
+            storedOperatorToken: storedOperatorToken)
+    }
+
     func webContentIdentity(config: GatewayConnectConfig?, storedOperatorToken: String?) -> Int {
         let identity = AuthenticatedControlUI.webContentIdentity(
             config: config,
@@ -91,21 +99,44 @@ struct ControlUIHubScreen: View {
         let authorization = config?.ingressAuthorization
         let webContentIdentity = self.page.webContentIdentity(
             config: config, storedOperatorToken: storedOperatorToken)
+        let url = self.page.url(config: config)
+        let authScript: String?
+        let authScriptProvider: (@MainActor () async -> String?)?
+        let accessNativeAuthProvider: IOSDashboardNativeGatewayAuthProvider?
+        let nativeAuth: ControlUINativeGatewayAuthHandler?
+        if authorization != nil {
+            authScript = self.page.authUserScript(config: config)
+            authScriptProvider = {
+                let credentials = await nativeAuthProvider?.legacyCredentials()
+                return self.page.authUserScript(config: config, legacyCredentials: credentials)
+            }
+            accessNativeAuthProvider = nativeAuthProvider
+            nativeAuth = nil
+        } else {
+            authScript = self.page.authUserScript(config: config, storedOperatorToken: storedOperatorToken)
+            authScriptProvider = nil
+            accessNativeAuthProvider = nil
+            nativeAuth = AuthenticatedControlUI.nativeAuthHandler(
+                config: config,
+                storedOperatorToken: storedOperatorToken,
+                appModel: self.appModel)
+        }
         ZStack {
             OpenClawProBackground()
-            if let url = self.page.url(config: config),
+            if let url,
                authorization == nil || authorization?.dashboardCookie(url) != nil,
                self.failedAccessBoundaryIdentity != webContentIdentity
             {
                 AuthenticatedControlUIWebView(
                     url: url,
-                    authScript: self.page.authUserScript(config: config),
+                    authScript: authScript,
                     tls: config?.tls,
-                    authScriptProvider: {
-                        let credentials = await nativeAuthProvider?.legacyCredentials()
-                        return self.page.authUserScript(config: config, legacyCredentials: credentials)
+                    authScriptProvider: authScriptProvider,
+                    nativeGatewayAuthProvider: accessNativeAuthProvider,
+                    basicProxyCredentialProvider: {
+                        AuthenticatedControlUI.basicProxyCredential(config: config)
                     },
-                    nativeGatewayAuthProvider: nativeAuthProvider,
+                    nativeAuth: nativeAuth,
                     accessCookie: authorization?.dashboardCookie(url),
                     accessAdmissionIsCurrent: authorization.map { authorization in
                         { authorization.isCurrent() }
