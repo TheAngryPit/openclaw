@@ -701,8 +701,8 @@ it("retires the prior personal identity and channel form on principal change", a
   harness.emitSnapshot({
     selfUser: {
       id: nextProfile.id,
-      email: nextProfile.emails[0] ?? undefined,
-      name: nextProfile.displayName,
+      email: nextProfile.emails[0],
+      name: nextProfile.displayName ?? undefined,
     },
   });
   flush();
