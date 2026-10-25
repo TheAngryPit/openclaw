@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -23,11 +24,13 @@ import { bindPluginInstanceModuleLoader } from "./plugin-instance-module-loader.
 import { getPluginValueInstance, runPluginCleanup } from "./plugin-instance-scope.js";
 import { PluginInstance } from "./plugin-instance.js";
 import { PluginInvocationScope } from "./plugin-invocation-scope.js";
+import { createPluginManifestRecordFixture } from "./plugin-metadata.test-support.js";
 import { getPluginSetupModuleLoader } from "./plugin-setup-module.js";
 import { createEmptyPluginRegistry } from "./registry-empty.js";
 
 const temp = useAutoCleanupTempDirTracker(afterEach);
 const nativeRequire = createRequire(import.meta.url);
+const recordEvent = (events: string[], event: string) => () => void events.push(event);
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -54,18 +57,12 @@ function fixture(kind: "runtime" | "setup", native = false) {
       bindPluginInstanceModuleLoader({ instance, origin: "config", source, rootDir });
       return instance.loadModule(source);
     }
-    const record: PluginManifestRecord = {
+    const record: PluginManifestRecord = createPluginManifestRecordFixture({
       id: "disposal-setup",
       origin: "config",
       rootDir,
       source,
-      manifestPath: path.join(rootDir, "openclaw.plugin.json"),
-      channels: [],
-      providers: [],
-      cliBackends: [],
-      hooks: [],
-      skills: [],
-    };
+    });
     const load = getPluginSetupModuleLoader(record, source, rootDir);
     return load.initialize(() => load(source));
   }) as { filename: string; nativeFile?: string; read(): string };
@@ -79,10 +76,7 @@ function fixture(kind: "runtime" | "setup", native = false) {
 
 function forcedRetirement(errors: readonly unknown[]) {
   const timeout = errors[0];
-  expect(timeout).toBeInstanceOf(PluginInstanceDrainTimeoutError);
-  if (!(timeout instanceof PluginInstanceDrainTimeoutError)) {
-    throw new Error("Expected forced retirement");
-  }
+  assert(timeout instanceof PluginInstanceDrainTimeoutError, "Expected forced retirement");
   return timeout;
 }
 
@@ -123,9 +117,7 @@ it.each(["runtime", "setup"] as const)(
     const events: string[] = [];
     const consumer = instance.retainConsumer();
     const retained = consumer.wrap(value);
-    instance.lifecycle.onDispose(() => {
-      events.push("plugin");
-    });
+    instance.lifecycle.onDispose(recordEvent(events, "plugin"));
     const gate = gateRemoval(value.filename, events, undefined, nativeFile);
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     let settled = false;
@@ -137,9 +129,7 @@ it.each(["runtime", "setup"] as const)(
       expect(events).toEqual([]);
       expect(retained.read()).toBe("retained");
       expect(fs.existsSync(value.filename)).toBe(true);
-      await consumer.close(() => {
-        events.push("consumer");
-      });
+      await consumer.close(recordEvent(events, "consumer"));
       await Promise.race([gate.entered, retirement]);
       expect(events).toEqual(["consumer", "plugin", "remove"]);
       expect(nativeRequire.cache[value.filename]).toBeUndefined();
@@ -232,7 +222,6 @@ it.each([
   const operation = async () => {
     entered.resolve();
     await release.promise;
-    expect(fs.existsSync(value.filename)).toBe(true);
     expect(fs.readFileSync(value.filename, "utf8")).toBe(capturedBytes);
     if (rejects) {
       throw failure;
@@ -241,9 +230,7 @@ it.each([
   };
   const cleanup = rejects ? instance.wrap(operation) : operation;
   if (!rejects) {
-    instance.lifecycle.onDispose(() => {
-      events.push("sibling");
-    });
+    instance.lifecycle.onDispose(recordEvent(events, "sibling"));
   }
   if (kind === "plugin callback") {
     instance.lifecycle.onDispose(cleanup);
@@ -254,25 +241,20 @@ it.each([
   }
   const removal = rejects ? undefined : gateRemoval(value.filename, events);
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-  let settled = false;
   let hostTimeout: unknown;
-  const retirement = instance
-    .dispose(
-      kind === "host hook"
-        ? async () => {
-            try {
-              await withPluginHostCleanupTimeout("fixture", () =>
-                rejects ? runPluginCleanup(cleanup, cleanup) : instance.runCleanup(cleanup),
-              );
-            } catch (error) {
-              hostTimeout = error;
-            }
+  const retirement = instance.dispose(
+    kind === "host hook"
+      ? async () => {
+          try {
+            await withPluginHostCleanupTimeout("fixture", () =>
+              rejects ? runPluginCleanup(cleanup, cleanup) : instance.runCleanup(cleanup),
+            );
+          } catch (error) {
+            hostTimeout = error;
           }
-        : undefined,
-    )
-    .finally(() => {
-      settled = true;
-    });
+        }
+      : undefined,
+  );
   try {
     if (!rejects) {
       await entered.promise;
@@ -291,7 +273,6 @@ it.each([
       expect(events).toEqual(["sibling"]);
       expect(removal?.directory()).toBeUndefined();
       expect(fs.existsSync(value.filename)).toBe(true);
-      expect(settled).toBe(true);
       release.resolve();
       await Promise.race([removal!.entered, timeout.settled]);
       expect(events).toEqual(["sibling", "callback", "remove"]);

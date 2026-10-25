@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { buildOpenAIImageGenerationProvider } from "./image-generation-provider.js";
 import {
   createCodexOAuthAuthStore,
+  createOpenAIOAuthProfile,
   openAIImageConfig,
 } from "./image-generation-provider.test-support.js";
 
@@ -112,6 +113,11 @@ describe("OpenAI image generation auth availability", () => {
       true,
     );
 
+    expect(ensureAuthProfileStoreAsyncMock).toHaveBeenCalledTimes(1);
+    expect(isProviderApiKeyConfiguredAsyncMock).toHaveBeenCalledWith(
+      expect.objectContaining({ store: authStore }),
+    );
+
     await expectConfigured(
       {
         agentDir: "/tmp/agent",
@@ -124,35 +130,12 @@ describe("OpenAI image generation auth availability", () => {
     );
   });
 
-  it("reuses the worker-loaded profile store for custom-route readiness", async () => {
-    const store = createCodexOAuthAuthStore();
-    authStore = store;
-    authConfigured = true;
-
-    expect(
-      await provider.isConfiguredAsync?.({
-        agentDir: "/tmp/agent",
-        cfg: openAIImageConfig({ baseUrl: "https://chatgpt.com/backend-api/codex" }),
-      }),
-    ).toBe(true);
-    expect(ensureAuthProfileStoreAsyncMock).toHaveBeenCalledTimes(1);
-    expect(isProviderApiKeyConfiguredAsyncMock).toHaveBeenCalledWith(
-      expect.objectContaining({ store }),
-    );
-  });
-
   it("does not report OpenAI OAuth image auth as configured for custom OpenAI endpoints", async () => {
     authConfigured = true;
     authStore = {
       version: 1,
       profiles: {
-        "openai:chatgpt": {
-          type: "oauth",
-          provider: "openai",
-          access: "chatgpt-access",
-          refresh: "chatgpt-refresh",
-          expires: Date.now() + 60_000,
-        },
+        "openai:chatgpt": createOpenAIOAuthProfile("chatgpt-access", "chatgpt-refresh"),
       },
     };
 

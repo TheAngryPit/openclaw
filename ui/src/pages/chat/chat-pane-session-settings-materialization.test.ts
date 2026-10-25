@@ -1,7 +1,6 @@
 /* @vitest-environment jsdom */
 
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
-import { render } from "lit";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import type {
@@ -10,7 +9,9 @@ import type {
   SessionsPatchResult,
 } from "../../api/types.ts";
 import { sessionsResult } from "../../lib/sessions/session-capability.test-support.ts";
+import { withSessionMutationOperations } from "../../lib/sessions/session-mutation-operations.ts";
 import type { GatewayRequestHandler } from "../../test-helpers/gateway-client.ts";
+import { renderPaneModelControl } from "./chat-pane-model-control.test-support.ts";
 import { createMountedPanes, refreshPane } from "./chat-pane-mounted.test-support.ts";
 import {
   readChatPaneMutationAccess,
@@ -109,6 +110,10 @@ it.each([
       expect(previousTail).toBeDefined();
       queued = switchChatSetting(pane.state, { kind: "thinkingLevel", value: "low" });
       expect(getPendingChatPickerPatch(pane.state, placeholder.key, "main")).not.toBe(previousTail);
+      expect(sessions.settingsPreview(placeholder.key, "main")).toMatchObject({
+        thinkingLevel: "low",
+      });
+      await withSessionMutationOperations(() => undefined);
       expect(patch).toHaveBeenCalledOnce();
       expect(patch.mock.calls[0]?.[1]).toMatchObject({
         key: placeholder.key,
@@ -143,7 +148,6 @@ it.each([
           sessionId: materialized.sessionId,
           thinkingLevel: "low",
         });
-        expect(pane.state.chatThinkingLevel).toBe("low");
       } else {
         expect(rows[0]).toEqual(unrelated);
         expect(selectedChatSessionRow(pane.state)).toMatchObject(unrelated);
@@ -252,6 +256,8 @@ it.each(["unbound", "materialized"] as const)(
       expect(middleReady).toBeDefined();
       expect(lastReady).toBeDefined();
       expect(lastReady).not.toBe(middleReady);
+      expect(sessions.settingsPreview(key, "main")).toMatchObject({ thinkingLevel: "medium" });
+      await withSessionMutationOperations(() => undefined);
       expect(patch).toHaveBeenCalledOnce();
 
       if (lastTarget === "unbound") {
@@ -304,7 +310,7 @@ it.each(["unbound", "materialized"] as const)(
         onModelSetup: vi.fn(),
       });
       const container = document.createElement("div");
-      render(controls.composerControls, container);
+      renderPaneModelControl(controls.composerControls, container);
       expect
         .soft(
           container.querySelector<HTMLElement>("[data-chat-thinking-select]")?.dataset
@@ -312,8 +318,8 @@ it.each(["unbound", "materialized"] as const)(
         )
         .toBe("medium");
       expect
-        .soft(container.querySelector("[data-chat-thinking-preview-committed]")?.textContent)
-        .toBe("Medium");
+        .soft(container.querySelector(".chat-controls__effort-picker summary")?.textContent)
+        .toContain("Medium");
       middleReply.reject(new Error("Synthetic rejection of the middle settings choice"));
       await expect(Promise.all([first, middle, last])).resolves.toEqual([true, false, true]);
       await expect(middleReady).resolves.toBe(false);
@@ -327,7 +333,6 @@ it.each(["unbound", "materialized"] as const)(
         sessionId: materialized.sessionId,
         thinkingLevel: "medium",
       });
-      expect(pane.state.chatThinkingLevel).toBe("medium");
       expect(getPendingChatPickerPatch(pane.state, key, "main")).toBeUndefined();
     } finally {
       stopManaged?.();
@@ -410,8 +415,6 @@ it.each([
       queued.push(switchChatSetting(pane.state, { kind: "thinkingLevel", value: "low" }));
       queued.push(switchChatSetting(pane.state, { kind: "fastMode", value: "on" }));
       queued.push(switchChatSetting(pane.state, { kind: "contextWindow", value: "128k" }));
-      expect(patch).toHaveBeenCalledOnce();
-      expect(patch.mock.calls[0]?.[1]).toEqual({ key, thinkingLevel: "high" });
       const pendingPreview = {
         thinkingLevel: "low",
         fastMode: true,
@@ -419,6 +422,9 @@ it.each([
         contextWindow: "128k",
       };
       expect(sessions.settingsPreview(key, "main")).toEqual(pendingPreview);
+      await withSessionMutationOperations(() => undefined);
+      expect(patch).toHaveBeenCalledOnce();
+      expect(patch.mock.calls[0]?.[1]).toEqual({ key, thinkingLevel: "high" });
 
       if (initialState === "published placeholder") {
         rows.push(placeholder);

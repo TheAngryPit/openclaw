@@ -224,9 +224,7 @@ export async function startPhoneProofServer(buildId: string) {
   }
 }
 
-export async function observePhoneProofServiceWorker(
-  page: Page,
-): Promise<ServiceWorkerObservation> {
+async function observePhoneProofServiceWorker(page: Page): Promise<ServiceWorkerObservation> {
   return page.evaluate(async () => {
     if (!("serviceWorker" in navigator)) {
       return {
@@ -425,7 +423,7 @@ export async function renderLoginGate(
   return gateway;
 }
 
-export async function mountLoginGate(page: Page, lastError: string | null): Promise<void> {
+async function mountLoginGate(page: Page, lastError: string | null): Promise<void> {
   await page.waitForFunction(() => window.openclawControlUi?.snapshot().booted === true);
   await page.evaluate(async (failureMessage) => {
     await customElements.whenDefined("openclaw-login-gate");

@@ -34,7 +34,7 @@ import type {
   ToolExecutionMode,
 } from "../../runtime/index.js";
 import type { BashResult } from "../bash-executor.js";
-import type { CompactionPreparation, CompactionResult } from "../compaction/index.js";
+import type { CompactionPreparation, CompactionResult } from "../compaction/compaction.js";
 import type { EventBus } from "../event-bus.js";
 import type { ExecOptions, ExecResult } from "../exec.js";
 import type { ReadonlyFooterDataProvider } from "../footer-data-provider.js";
@@ -391,9 +391,6 @@ export interface ToolRenderContext<
   cwd: string;
   executionStarted: boolean;
   argsComplete: boolean;
-  /** Whether the tool result is partial/streaming. */
-  isPartial: boolean;
-  expanded: boolean;
   /** Whether inline images are currently shown in the TUI. */
   showImages: boolean;
   isError: boolean;
@@ -449,21 +446,6 @@ export interface ToolDefinition<
     ],
     Component
   >;
-}
-
-type AnyToolDefinition = ToolDefinition;
-
-/**
- * Preserve parameter inference for standalone tool definitions.
- *
- * Use this when assigning a tool to a variable or passing it through arrays such
- * as `customTools`, where contextual typing would otherwise widen params to
- * `unknown`.
- */
-export function defineTool<TParams extends TSchema, TDetails = unknown, TState = unknown>(
-  tool: ToolDefinition<TParams, TDetails, TState>,
-): ToolDefinition<TParams, TDetails, TState> & AnyToolDefinition {
-  return tool as ToolDefinition<TParams, TDetails, TState> & AnyToolDefinition;
 }
 
 /** Fired after session_start to allow extensions to provide additional resource paths. */
@@ -744,81 +726,6 @@ export type ToolResultEvent =
   | LsToolResultEvent
   | CustomToolResultEvent;
 
-export function isBashToolResult(e: ToolResultEvent): e is BashToolResultEvent {
-  return e.toolName === "bash";
-}
-export function isReadToolResult(e: ToolResultEvent): e is ReadToolResultEvent {
-  return e.toolName === "read";
-}
-export function isEditToolResult(e: ToolResultEvent): e is EditToolResultEvent {
-  return e.toolName === "edit";
-}
-export function isWriteToolResult(e: ToolResultEvent): e is WriteToolResultEvent {
-  return e.toolName === "write";
-}
-export function isGrepToolResult(e: ToolResultEvent): e is GrepToolResultEvent {
-  return e.toolName === "grep";
-}
-export function isFindToolResult(e: ToolResultEvent): e is FindToolResultEvent {
-  return e.toolName === "find";
-}
-export function isLsToolResult(e: ToolResultEvent): e is LsToolResultEvent {
-  return e.toolName === "ls";
-}
-
-/**
- * Type guard for narrowing ToolCallEvent by tool name.
- *
- * Built-in tools narrow automatically (no type params needed):
- * ```ts
- * if (isToolCallEventType("bash", event)) {
- *   event.input.command;  // string
- * }
- * ```
- *
- * Custom tools require explicit type parameters:
- * ```ts
- * if (isToolCallEventType<"my_tool", MyToolInput>("my_tool", event)) {
- *   event.input.action;  // typed
- * }
- * ```
- *
- * Note: Direct narrowing via `event.toolName === "bash"` doesn't work because
- * CustomToolCallEvent.toolName is `string` which overlaps with all literals.
- */
-export function isToolCallEventType(
-  toolName: "bash",
-  event: ToolCallEvent,
-): event is BashToolCallEvent;
-export function isToolCallEventType(
-  toolName: "read",
-  event: ToolCallEvent,
-): event is ReadToolCallEvent;
-export function isToolCallEventType(
-  toolName: "edit",
-  event: ToolCallEvent,
-): event is EditToolCallEvent;
-export function isToolCallEventType(
-  toolName: "write",
-  event: ToolCallEvent,
-): event is WriteToolCallEvent;
-export function isToolCallEventType(
-  toolName: "grep",
-  event: ToolCallEvent,
-): event is GrepToolCallEvent;
-export function isToolCallEventType(
-  toolName: "find",
-  event: ToolCallEvent,
-): event is FindToolCallEvent;
-export function isToolCallEventType(toolName: "ls", event: ToolCallEvent): event is LsToolCallEvent;
-export function isToolCallEventType<TName extends string, TInput extends Record<string, unknown>>(
-  toolName: TName,
-  event: ToolCallEvent,
-): event is ToolCallEvent & { toolName: TName; input: TInput };
-export function isToolCallEventType(toolName: string, event: ToolCallEvent): boolean {
-  return event.toolName === toolName;
-}
-
 export type ExtensionEvent =
   | ResourcesDiscoverEvent
   | SessionEvent
@@ -1018,13 +925,13 @@ export interface ExtensionAPI {
     options?: { deliverAs?: "steer" | "followUp" },
   ): void;
 
-  /** @deprecated Await appendEntryAsync. Supported through 2026-12-31. */
+  /** @deprecated Await appendEntryAsync. Supported through 2026-12-31. Removal in the first January 2027 stable release. */
   appendEntry(customType: string, data?: unknown): void;
 
   /** Persist a custom entry and return its id after the worker commits. */
   appendEntryAsync(customType: string, data?: unknown): Promise<string>;
 
-  /** @deprecated Await setSessionNameAsync. Supported through 2026-12-31. */
+  /** @deprecated Await setSessionNameAsync. Supported through 2026-12-31. Removal in the first January 2027 stable release. */
   setSessionName(name: string): void;
 
   /** Set the display name and publish the change after the worker commits. */
@@ -1032,7 +939,7 @@ export interface ExtensionAPI {
 
   getSessionName(): string | undefined;
 
-  /** @deprecated Await setLabelAsync. Supported through 2026-12-31. */
+  /** @deprecated Await setLabelAsync. Supported through 2026-12-31. Removal in the first January 2027 stable release. */
   setLabel(entryId: string, label: string | undefined): void;
 
   /** Set or clear an entry label after the worker commits. */
@@ -1190,7 +1097,7 @@ export interface ExtensionRuntimeState {
 /**
  * Action implementations for ExtensionAPI methods.
  * Provided to runner.initialize(), copied into the shared runtime.
- * @deprecated Use ExtensionActionsV2. Supported through 2026-12-31.
+ * @deprecated Use ExtensionActionsV2. Supported through 2026-12-31. Removal in the first January 2027 stable release.
  */
 export interface ExtensionActions extends Pick<
   ExtensionAPI,
@@ -1241,7 +1148,7 @@ export interface ExtensionCommandContextActions extends Pick<
 /**
  * Full runtime = state + actions.
  * Created by loader with throwing action stubs, completed by runner.initialize().
- * @deprecated Use ExtensionRuntimeV2. Supported through 2026-12-31.
+ * @deprecated Use ExtensionRuntimeV2. Supported through 2026-12-31. Removal in the first January 2027 stable release.
  */
 export interface ExtensionRuntime
   extends
@@ -1254,7 +1161,6 @@ export interface ExtensionRuntime
 /** Host runtime with required worker-backed persistence capabilities. */
 export interface ExtensionRuntimeV2 extends ExtensionRuntimeState, ExtensionActionsV2 {}
 
-/** Loaded extension with all registered items. */
 export interface Extension {
   path: string;
   resolvedPath: string;

@@ -12,45 +12,49 @@ import {
   surface,
   trigger,
 } from "../../test-helpers/solid-menu.tsx";
-import { Menu, type MenuEntry, type MenuItem, type MenuProps } from "./menu.tsx";
+import {
+  createMenuControls,
+  Menu,
+  type MenuEntry,
+  type MenuItem,
+  type MenuProps,
+} from "./menu.tsx";
 
 afterEach(cleanup);
 
 describe("Solid menu navigation", () => {
-  it("keeps submenu icons and details in the visible trigger", async () => {
-    let icon!: HTMLSpanElement;
-    let details!: HTMLSpanElement;
-    render(() => (
-      <Menu
-        id="people"
-        label="People"
-        items={[
-          {
-            id: "view",
-            label: "View",
-            icon: <span ref={(node) => (icon = node)}>Eye</span>,
-            details: <span ref={(node) => (details = node)}>V</span>,
-            children: [{ id: "reasoning", label: "Reasoning" }],
-          },
-        ]}
-      />
-    ));
+  it("releases transient rows on close and restores current rows with keyboard focus", async () => {
+    const [label, setLabel] = createSignal("First");
+    const view = mountMenu({
+      lazy: "while-open",
+      get items() {
+        return [{ id: "current", label: label() }];
+      },
+    });
+    expect(surface().querySelector("[role=menuitem]")).toBeNull();
+    trigger().focus();
+    await userEvent.keyboard("{ArrowDown}");
+    await phase(surface(), "open");
+    expect(document.activeElement).toBe(item("First"));
+    expect(document.querySelectorAll(":popover-open")).toHaveLength(1);
+    await userEvent.keyboard("{Escape}");
+    await phase(surface(), "hidden");
+    expect(surface().querySelector("[role=menuitem]")).toBeNull();
+    setLabel("Second");
     flush();
-    await openMenu();
-    const view = item("View");
-    expect(view.contains(icon)).toBe(true);
-    expect(view.contains(details)).toBe(true);
-    await userEvent.click(view);
-    await phase(surface("people-view"), "open");
-    expect(view.contains(icon)).toBe(true);
-    expect(view.contains(details)).toBe(true);
+    expect(view.handle.open()).toBe(true);
+    expect(document.activeElement).toBe(item("Second"));
   });
 
   it("materializes lazy content at first keyboard admission and retains it when reopened", async () => {
     let itemReads = 0;
     let childrenReads = 0;
+    const [placement, setPlacement] = createSignal<"bottom-start" | "top-end">("bottom-start");
     const view = mountMenu({
       lazy: true,
+      get placement() {
+        return placement();
+      },
       get items() {
         itemReads += 1;
         return [{ id: "ready", label: "Ready" }];
@@ -62,18 +66,31 @@ describe("Solid menu navigation", () => {
     });
     expect(itemReads).toBe(0);
     expect(childrenReads).toBe(0);
+    const button = trigger();
+    const panel = surface();
+    expect(button.style.getPropertyValue("anchor-name")).toBe("");
+    expect(panel.style.getPropertyValue("position-anchor")).toBe("");
+    setPlacement("top-end");
+    flush();
     trigger().focus();
     await userEvent.keyboard("{ArrowDown}");
     await phase(surface(), "open");
     const ready = item("Ready");
     expect(document.activeElement).toBe(ready);
     expect(childrenReads).toBe(1);
+    const anchorName = button.style.getPropertyValue("anchor-name");
+    expect(anchorName).toMatch(/^--oc-overlay-/);
+    expect(panel.style.getPropertyValue("position-anchor")).toBe(anchorName);
+    expect(panel.dataset.placement).toBe("top-end");
     await userEvent.keyboard("{Escape}");
     await phase(surface(), "hidden");
     expect(view.handle.open()).toBe(true);
     await phase(surface(), "open");
     expect(item("Ready")).toBe(ready);
     expect(childrenReads).toBe(1);
+    expect(button.style.getPropertyValue("anchor-name")).toBe(anchorName);
+    view.unmount();
+    expect(button.style.getPropertyValue("anchor-name")).toBe("");
   });
 
   it.each([false, true])("refuses lazy admission without active effects (veto %s)", (veto) => {
@@ -97,47 +114,57 @@ describe("Solid menu navigation", () => {
     const selected: string[] = [];
     let pins = 0;
     const [revision, setRevision] = createSignal(0);
-    mountMenu({
-      get items(): MenuEntry[] {
-        revision();
-        return [
-          { kind: "content", id: "search", content: <input data-search aria-label="Find agent" /> },
-          {
-            kind: "group",
-            id: "agents",
-            class: "agent-list",
-            items: [
-              {
-                id: "alpha",
-                label: "Alpha",
-                as: "div",
-                content: (
-                  <>
-                    Alpha
-                    <button
-                      data-form-control
-                      tabindex="-1"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        pins += 1;
-                      }}
-                    >
-                      Pin Alpha
-                    </button>
-                  </>
-                ),
-              },
-              { id: "beta", label: "Beta" },
-            ],
-          },
-          {
-            id: "footer",
-            label: "Footer",
-            render: (attributes) => <button {...attributes}>Footer</button>,
-          },
-        ];
-      },
-      onSelect: (entry) => selected.push(entry.id),
+    mountMenu(() => {
+      const controls = createMenuControls();
+      const agentItems = (): MenuEntry[] => [
+        {
+          id: "alpha",
+          label: "Alpha",
+          as: "div",
+          content: (
+            <>
+              Alpha
+              <button
+                ref={controls.ref()}
+                data-form-control
+                tabindex="-1"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  pins += 1;
+                }}
+              >
+                Pin Alpha
+              </button>
+            </>
+          ),
+        },
+        { id: "beta", label: revision() ? "Beta refreshed" : "Beta" },
+      ];
+      return {
+        controls,
+        get items(): MenuEntry[] {
+          revision();
+          return [
+            {
+              kind: "content",
+              id: "search",
+              content: <input ref={controls.ref()} data-search aria-label="Find agent" />,
+            },
+            {
+              kind: "group",
+              id: "agents",
+              render: (renderItems) => <div class="agent-list">{renderItems(agentItems)}</div>,
+              items: agentItems(),
+            },
+            {
+              id: "footer",
+              label: "Footer",
+              render: (attributes) => <button {...attributes}>Footer</button>,
+            },
+          ];
+        },
+        onSelect: (entry) => selected.push(entry.id),
+      };
     });
     await openMenu();
     const group = surface().querySelector(".agent-list");
@@ -160,11 +187,12 @@ describe("Solid menu navigation", () => {
     await userEvent.keyboard("{ArrowUp}");
     expect(document.activeElement).toBe(search);
     await userEvent.keyboard("{ArrowDown}{ArrowDown}");
-    expect(document.activeElement).toBe(item("Beta"));
+    expect(document.activeElement).toBe(item("Beta refreshed"));
     await userEvent.click(surface().querySelector<HTMLButtonElement>("[data-form-control]")!);
     expect(pins).toBe(1);
     expect(selected).toEqual([]);
-    item("Beta").focus();
+    await userEvent.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(item("Beta refreshed"));
     await userEvent.keyboard("{Enter}");
     await phase(surface(), "hidden");
     expect(selected).toEqual(["beta"]);
@@ -400,7 +428,7 @@ describe("Solid menu navigation", () => {
     trigger("people-move").focus();
     await userEvent.keyboard(dir === "ltr" ? "{ArrowRight}" : "{ArrowLeft}");
     await phase(surface("people-move"), "open");
-    expect(surface("people-assign").matches(":popover-open")).toBe(false);
+    await phase(surface("people-assign"), "hidden");
     expect(document.activeElement).toBe(item("Engineering", "people-move"));
     await userEvent.keyboard(dir === "ltr" ? "{ArrowLeft}" : "{ArrowRight}");
     expect(document.activeElement).toBe(trigger("people-move"));
@@ -472,15 +500,26 @@ describe("Solid menu navigation", () => {
   );
 
   it("clears search before closing the deepest branch and restores each trigger", async () => {
-    mountMenu({
-      items: [
-        {
-          id: "search",
-          label: "Find person",
-          children: [{ id: "ada", label: "Ada" }],
-          content: <input aria-label="Search people" data-search="" data-initial-focus="" />,
-        },
-      ],
+    mountMenu(() => {
+      const controls = createMenuControls();
+      return {
+        controls,
+        items: [
+          {
+            id: "search",
+            label: "Find person",
+            children: [{ id: "ada", label: "Ada" }],
+            content: (
+              <input
+                ref={controls.ref()}
+                aria-label="Search people"
+                data-search=""
+                data-initial-focus=""
+              />
+            ),
+          },
+        ],
+      };
     });
     await openMenu();
     await openMenu("people-search");
@@ -500,32 +539,43 @@ describe("Solid menu navigation", () => {
   });
 
   it("skips ineligible controls while preserving editing and native Tab exit", async () => {
-    const view = mountMenu({
-      children: (
-        <>
-          <button data-form-control="">Default</button>
-          <button data-form-control="" disabled>
-            Disabled
-          </button>
-          <button data-form-control="" aria-disabled="true">
-            Unavailable
-          </button>
-          <input aria-label="Hidden attribute" data-form-control="" hidden />
-          <input type="hidden" data-form-control="" />
-          <span style={{ visibility: "hidden" }}>
-            <input aria-label="Invisible" data-form-control="" />
-          </span>
-          <span data-form-control="">Not focusable</span>
-          <button data-form-control="" tabindex={-1}>
-            Not sequential
-          </button>
-          <div inert>
-            <input aria-label="Inert control" data-form-control="" />
-          </div>
-          <button data-form-control="">Coral</button>
-          <input aria-label="Custom icon" data-form-control="" />
-        </>
-      ),
+    const view = mountMenu(() => {
+      const controls = createMenuControls();
+      return {
+        controls,
+        items: [],
+        children: (
+          <>
+            <button ref={controls.ref()} data-form-control="">
+              Default
+            </button>
+            <button ref={controls.ref()} data-form-control="" disabled>
+              Disabled
+            </button>
+            <button ref={controls.ref()} data-form-control="" aria-disabled="true">
+              Unavailable
+            </button>
+            <input ref={controls.ref()} aria-label="Hidden attribute" data-form-control="" hidden />
+            <input ref={controls.ref()} type="hidden" data-form-control="" />
+            <span style={{ visibility: "hidden" }}>
+              <input ref={controls.ref()} aria-label="Invisible" data-form-control="" />
+            </span>
+            <span ref={controls.ref()} data-form-control="">
+              Not focusable
+            </span>
+            <button ref={controls.ref()} data-form-control="" tabindex={-1}>
+              Not sequential
+            </button>
+            <div inert>
+              <input ref={controls.ref()} aria-label="Inert control" data-form-control="" />
+            </div>
+            <button ref={controls.ref()} data-form-control="">
+              Coral
+            </button>
+            <input ref={controls.ref()} aria-label="Custom icon" data-form-control="" />
+          </>
+        ),
+      };
     });
     await openMenu();
     const first = view.getByRole("button", { name: "Default" });
@@ -554,33 +604,52 @@ describe("Solid menu navigation", () => {
   });
 
   it("moves between menu rows and embedded settings with Tab", async () => {
-    const view = mountMenu({
-      items: [
-        { id: "before", label: "Before settings" },
-        {
-          kind: "content",
-          id: "settings",
-          content: (
-            <>
-              <button data-form-control="">Send always</button>
-              <button data-form-control="">Receive always</button>
-            </>
-          ),
-        },
-        { id: "after", label: "After settings" },
-      ],
+    const view = mountMenu(() => {
+      const controls = createMenuControls();
+      return {
+        controls,
+        items: [
+          { id: "before", label: "Before settings" },
+          {
+            kind: "content",
+            id: "settings",
+            content: (
+              <>
+                <input ref={controls.ref()} aria-label="Filter settings" data-search="" />
+                <button ref={controls.ref()} data-form-control="">
+                  Send always
+                </button>
+                <button ref={controls.ref()} data-form-control="">
+                  Receive always
+                </button>
+              </>
+            ),
+          },
+          { id: "after", label: "After settings" },
+        ],
+      };
     });
     await openMenu();
     const before = item("Before settings");
+    const after = item("After settings");
+    const search = view.getByRole("textbox", { name: "Filter settings" });
     const send = view.getByRole("button", { name: "Send always" });
     const receive = view.getByRole("button", { name: "Receive always" });
     before.focus();
     await userEvent.tab();
+    expect(document.activeElement).toBe(search);
+    await userEvent.tab();
     expect(document.activeElement).toBe(send);
     await userEvent.tab();
     expect(document.activeElement).toBe(receive);
+    await userEvent.tab();
+    expect(document.activeElement).toBe(after);
+    await userEvent.tab({ shift: true });
+    expect(document.activeElement).toBe(receive);
     await userEvent.tab({ shift: true });
     expect(document.activeElement).toBe(send);
+    await userEvent.tab({ shift: true });
+    expect(document.activeElement).toBe(search);
     await userEvent.tab({ shift: true });
     expect(document.activeElement).toBe(before);
     expect(surface().matches(":popover-open")).toBe(true);
@@ -588,27 +657,31 @@ describe("Solid menu navigation", () => {
 
   it("keeps Tab in the current menu when a descendant menu has visible controls", async () => {
     let veto = true;
-    const view = render(() => (
-      <>
-        <Menu id="people" label="People" items={[]}>
-          <input aria-label="First control" data-form-control="" />
-          <Menu
-            id="nested-controls"
-            label="Nested controls"
-            items={[]}
-            onBeforeHide={(event) => {
-              if (veto) {
-                event.preventDefault();
-              }
-            }}
-          >
-            <input aria-label="Descendant control" data-form-control="" />
+    const view = render(() => {
+      const controls = createMenuControls();
+      return (
+        <>
+          <Menu id="people" label="People" items={[]} controls={controls}>
+            <input ref={controls.ref()} aria-label="First control" data-form-control="" />
+            <Menu
+              id="nested-controls"
+              label="Nested controls"
+              items={[]}
+              controls={controls}
+              onBeforeHide={(event) => {
+                if (veto) {
+                  event.preventDefault();
+                }
+              }}
+            >
+              <input ref={controls.ref()} aria-label="Descendant control" data-form-control="" />
+            </Menu>
+            <input ref={controls.ref()} aria-label="Last control" data-form-control="" />
           </Menu>
-          <input aria-label="Last control" data-form-control="" />
-        </Menu>
-        <button>After menu</button>
-      </>
-    ));
+          <button tabindex={0}>After menu</button>
+        </>
+      );
+    });
     flush();
     await openMenu();
     await openMenu("nested-controls");

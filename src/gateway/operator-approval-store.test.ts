@@ -28,9 +28,11 @@ import {
   listTerminalOperatorApprovals,
   OPERATOR_APPROVAL_MAX_AUDIENCE_SESSION_KEYS,
   OperatorApprovalHistoryCursorError,
+  prepareOperatorApprovalReplay,
   recoverOperatorApprovalsOnStartup,
   resolveOperatorApproval,
 } from "./operator-approval-store.js";
+import { createOperatorApproval as approval } from "./operator-approval-store.test-support.js";
 import { operatorApprovalOperations } from "./operator-approval-store.worker.js";
 
 type OperatorApprovalDatabase = Pick<OpenClawStateKyselyDatabase, "operator_approvals">;
@@ -58,57 +60,6 @@ function createDatabaseOptions(): OpenClawStateDatabaseOptions {
 
 function getSuiteDatabaseOptions(): OpenClawStateDatabaseOptions {
   return (suiteDatabaseOptions ??= createDatabaseOptions());
-}
-
-function approval(id: string, overrides: Partial<NewOperatorApproval> = {}): NewOperatorApproval {
-  const kind = overrides.kind ?? overrides.presentation?.kind ?? "exec";
-  const presentation: NewOperatorApproval["presentation"] =
-    overrides.presentation ??
-    (kind === "exec"
-      ? {
-          kind: "exec" as const,
-          commandText: `echo ${id}`,
-          commandPreview: `echo ${id}`,
-          warningText: null,
-          host: "gateway",
-          nodeId: null,
-          agentId: "main",
-          allowedDecisions: ["allow-once", "allow-always", "deny"],
-        }
-      : {
-          kind: "plugin" as const,
-          title: "Approve plugin action",
-          description: `Allow the plugin action for ${id}.`,
-          severity: "warning" as const,
-          pluginId: "test-plugin",
-          toolName: "test-tool",
-          agentId: "main",
-          allowedDecisions: ["allow-once", "allow-always", "deny"],
-        });
-  return {
-    id,
-    kind,
-    presentation,
-    requester: {
-      deviceId: "request-device",
-      clientId: "request-client",
-      deviceTokenAuth: true,
-    },
-    reviewerDeviceIds: ["reviewer-b", "reviewer-a", "reviewer-b"],
-    source: {
-      agentId: "main",
-      sessionKey: "agent:main:child",
-      sessionId: "session-1",
-      runId: "run-1",
-      toolCallId: "tool-call-1",
-      toolName: "exec",
-    },
-    audienceSessionKeys: ["agent:main:child", "agent:main:parent"],
-    runtimeEpoch: "runtime-a",
-    createdAtMs: 1_000,
-    expiresAtMs: 10_000,
-    ...overrides,
-  };
 }
 
 function rawApprovalRow(options: OpenClawStateDatabaseOptions, id: string) {
@@ -284,10 +235,23 @@ describe("operator approval store", () => {
     ).toMatchObject([{ id: "authorized-after-first-page" }]);
   });
 
-  it.each([undefined, "agent:main:child"])(
-    "repairs corrupt pending rows and releases a limited replay scan (audience=%s)",
-    async (audienceSessionKey) => {
+  it.each([
+    ["pending", undefined],
+    ["pending", "agent:main:child"],
+    ["replay", undefined],
+    ["replay", "agent:main:child"],
+  ] as const)(
+    "repairs corrupt pending rows before later decisions (%s, audience=%s)",
+    async (operation, audienceSessionKey) => {
       const databaseOptions = getSuiteDatabaseOptions();
+      const list =
+        operation === "pending"
+          ? listPendingOperatorApprovals
+          : async (params: Parameters<typeof listPendingOperatorApprovals>[0]) => {
+              const prepared = await prepareOperatorApprovalReplay(params);
+              expect(prepared.outcome).toBe("pending");
+              return prepared.records;
+            };
       for (const id of ["a-corrupt", "b-match", "c-match"]) {
         await insertOperatorApproval({ approval: approval(id), databaseOptions });
       }
@@ -301,7 +265,7 @@ describe("operator approval store", () => {
           .where("approval_id", "=", "a-corrupt"),
       );
 
-      const listing = listPendingOperatorApprovals({
+      const listing = list({
         audienceSessionKey,
         limit: 1,
         nowMs: 2_000,
@@ -324,7 +288,7 @@ describe("operator approval store", () => {
       });
       expect(
         (
-          await listPendingOperatorApprovals({
+          await list({
             audienceSessionKey,
             limit: 1,
             nowMs: 2_000,
@@ -758,6 +722,19 @@ describe("operator approval store", () => {
     ).toMatchObject({
       status: "pending",
     });
+    expect(
+      (await prepareOperatorApprovalReplay({ nowMs: 2_000, databaseOptions })).records.map(
+        (record) => record.id,
+      ),
+    ).toEqual(["current"]);
+    expect(
+      await consumeOperatorApprovalAllowOnce({
+        id: "orphan",
+        consumerId: "restarted-consumer",
+        nowMs: 2_000,
+        databaseOptions,
+      }),
+    ).toMatchObject({ outcome: "not-allow-once" });
   });
 
   it("terminalizes a corrupt pending row and never returns it as approvable", async () => {

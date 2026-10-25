@@ -365,7 +365,7 @@ function readPr(
     readMetadata(pr, ["state", "mergeable", "headRefOid"], () => ghReadOptions(readDeadline)),
   );
 }
-export const buildFindRunArgs = (repo: string, sha: string) =>
+const buildFindRunArgs = (repo: string, sha: string) =>
   workflowRunsApiArgs(repo, sha, "pull_request", 20);
 export const selectRunAfter = (runs: RunListItem[], after?: number) =>
   runs.find((run) => run.conclusion !== "skipped" && (after === undefined || run.id > after));
@@ -554,7 +554,7 @@ export function classifyRunAttachment(runId: number, run: RunStatus, after?: num
   };
 }
 
-export function classifyAttachedCiRun(run: RunStatus) {
+function classifyAttachedCiRun(run: RunStatus) {
   if (run.status !== "completed") {
     return { verdict: "PENDING" };
   }

@@ -3,6 +3,7 @@ import path from "node:path";
 import { isMissingPathError } from "../../infra/errors.js";
 import { withContentGitSlot } from "../../infra/git-content-budget.js";
 import { enqueueGitRefMutation, requireGitCommandOutput } from "../../infra/git-exec.js";
+import { lstatIfExists } from "../../infra/path-existence.js";
 import { runtimeProcessEntrypoints } from "../../infra/runtime-process-entrypoints.js";
 import {
   resolveRuntimeWorkerArgv,
@@ -23,6 +24,8 @@ const log = createSubsystemLogger("agents/worktrees");
 const operation: GitProcessOperation = "worktree.maintenance";
 const WORKTREE_GIT_MAINTENANCE_TIMEOUT_MS = 30 * 60 * 1000;
 const PACK_BATCH_BYTES = 512 * 1024 * 1024;
+// Index size bounds object metadata even when many tiny blobs compress well.
+const PACK_BATCH_INDEX_BYTES = 32 * 1024 * 1024;
 const PACK_BATCH_COUNT = 1024;
 const PACK_BATCH_TIMEOUT_MS = 5 * 60 * 1000;
 const TEMP_PACK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
@@ -163,25 +166,37 @@ async function maintainWorktreePacks(
     operation,
     signal: params.signal,
     beforeRun: assertCurrent,
+    timeoutMs: WORKTREE_GIT_MAINTENANCE_TIMEOUT_MS,
     killProcessTree: true,
     lowerPriority: true,
     env: { GIT_NO_LAZY_FETCH: "1", GIT_ALLOW_PROTOCOL: "" },
   };
+  const packDirectory = await withContentGitSlot(
+    () => resolveGitMetadataPath(repoRoot, "objects/pack", options),
+    params.signal,
+  );
+  // Git rejects an empty pack directory; inspect only this shallow metadata directory.
+  const readPacks = () =>
+    fs.readdir(packDirectory).catch((error: unknown) => {
+      if (isMissingPathError(error)) {
+        return [];
+      }
+      throw error;
+    });
+  if ((await readPacks()).length === 0) {
+    // Packs arriving after this inventory can wait until the next maintenance pass.
+    assertCurrent();
+    await report(0, 0);
+    return;
+  }
   const commonDir = await requireGit(repoRoot, ["rev-parse", "--git-common-dir"], options);
-  // Fetch must not replace the MIDX between batch publication and expiry.
+  // Serialize pack publication and retirement with managed fetches.
   await enqueueGitRefMutation(
     repoRoot,
     commonDir,
     () =>
       withContentGitSlot(async () => {
-        const packDirectory = await resolveGitMetadataPath(repoRoot, "objects/pack", options);
-        // Git rejects an empty pack directory; inspect only this shallow metadata directory.
-        const packs = await fs.readdir(packDirectory).catch((error: unknown) => {
-          if (isMissingPathError(error)) {
-            return [];
-          }
-          throw error;
-        });
+        const packs = await readPacks();
         assertCurrent();
         const before = packs.filter((name) => name.endsWith(".pack")).length;
         await report(before);
@@ -251,6 +266,12 @@ async function consolidatePacks(
   names: string[],
   options: NonNullable<Parameters<typeof requireGit>[2]>,
 ) {
+  // MIDX is optional lookup metadata. Invalidate both entry points, including
+  // stale indexes, without enumerating every object to rebuild the whole repo.
+  for (const name of ["multi-pack-index", "multi-pack-index.d/multi-pack-index-chain"]) {
+    options.beforeRun?.();
+    await fs.rm(path.join(directory, name), { force: true });
+  }
   const present = new Set(names);
   const packs = [];
   for (const name of names) {
@@ -267,24 +288,45 @@ async function consolidatePacks(
     }
     options.beforeRun?.();
     const stat = await fs.stat(path.join(directory, name));
-    packs.push({ name, size: stat.size, promisor: present.has(`${stem}.promisor`) });
+    const index = await fs.stat(path.join(directory, `${stem}.idx`));
+    packs.push({
+      name,
+      size: stat.size,
+      indexBytes: index.size,
+      promisor: present.has(`${stem}.promisor`),
+    });
   }
   packs.sort((a, b) => a.size - b.size || a.name.localeCompare(b.name));
   let objectFormat: string | undefined;
   for (const promisor of [true, false]) {
     const candidates = packs.filter((pack) => pack.promisor === promisor);
-    const selected = [];
+    const batch = [];
     let bytes = 0;
+    let indexBytes = 0;
     for (const pack of candidates) {
-      if (bytes + pack.size > PACK_BATCH_BYTES || selected.length >= PACK_BATCH_COUNT) {
+      if (pack.indexBytes > PACK_BATCH_INDEX_BYTES) {
+        continue;
+      }
+      if (
+        bytes + pack.size > PACK_BATCH_BYTES ||
+        indexBytes + pack.indexBytes > PACK_BATCH_INDEX_BYTES ||
+        batch.length >= PACK_BATCH_COUNT
+      ) {
         break;
       }
-      selected.push(pack.name);
+      batch.push(pack);
       bytes += pack.size;
+      indexBytes += pack.indexBytes;
     }
-    if (selected.length < 2) {
+    // Leave a dominant pack alone until the smaller inputs together reach its
+    // size; bounded batches can still make progress below a fixed pack count.
+    while (batch.length > 1 && bytes < 2 * batch.at(-1)!.size) {
+      bytes -= batch.pop()!.size;
+    }
+    if (batch.length < 2) {
       continue;
     }
+    const selected = batch.map((pack) => pack.name);
     // Validate only the packs this pass may retire, without walking refs or
     // missing partial-clone objects. The streaming writer does not check source CRCs.
     objectFormat ??= await requireGit(repoRoot, ["rev-parse", "--show-object-format"], options);
@@ -313,24 +355,8 @@ async function consolidatePacks(
         },
       );
     }
-    await requireGit(
-      repoRoot,
-      ["multi-pack-index", "write", "--stdin-packs", `--preferred-pack=${selected.at(-1)!}`],
-      {
-        ...options,
-        input: `${selected.map((name) => name.replace(/\.pack$/, ".idx")).join("\n")}\n`,
-      },
-    );
-    await requireGit(repoRoot, ["multi-pack-index", "expire"], options);
-    const presentAfterExpiry = new Set(await fs.readdir(directory));
-    const remainingBatch = selected.filter((name) => presentAfterExpiry.has(name));
-    // The rewrite threshold applies to the inventory, not the byte-limited batch.
-    const remainingCount = candidates.length - selected.length + remainingBatch.length;
-    if (remainingCount < 16 || remainingBatch.length < 2) {
-      continue;
-    }
-    // A static Git alias streams between native children without buffering packs in the Gateway.
-    // index-pack publishes the promisor marker before the index; geometric repack cannot do this on older Git.
+    // index-pack publishes the promisor marker and verified index before returning
+    // the hash. Plain --stdin-packs copies every object, including unreachable ones.
     const alias =
       "!if command -v ionice >/dev/null 2>&1; then ionice -c 3 -p $$ >/dev/null 2>&1; fi; git pack-objects --stdin-packs --stdout --window=0 --threads=1 | git index-pack --stdin --threads=1" +
       (promisor ? " --promisor" : "");
@@ -340,37 +366,35 @@ async function consolidatePacks(
       {
         ...options,
         timeoutMs: PACK_BATCH_TIMEOUT_MS,
-        input: `${remainingBatch.join("\n")}\n`,
+        input: `${selected.join("\n")}\n`,
       },
     );
     const hash = /^pack\s+([a-f0-9]{40}|[a-f0-9]{64})$/.exec(result)?.[1];
     if (!hash) {
       throw new Error("Git pack consolidation returned an invalid pack identity");
     }
-    const replacement = `pack-${hash}.pack`;
-    // Expire only this homogeneous batch: a full MIDX could retire an unrelated promisor pack.
-    await requireGit(
-      repoRoot,
-      ["multi-pack-index", "write", "--stdin-packs", `--preferred-pack=${replacement}`],
-      {
-        ...options,
-        input: `${[...new Set([...remainingBatch, replacement])].map((name) => name.replace(/\.pack$/, ".idx")).join("\n")}\n`,
-      },
-    );
-    await requireGit(repoRoot, ["multi-pack-index", "expire"], options);
+    for (const name of selected) {
+      const stem = path.join(directory, name.slice(0, -5));
+      // The union can already be one of the inputs. Never retire the output or
+      // a pack another Git writer has since pinned or marked as cruft.
+      if (
+        name === `pack-${hash}.pack` ||
+        (await lstatIfExists(`${stem}.keep`)) ||
+        (await lstatIfExists(`${stem}.mtimes`))
+      ) {
+        continue;
+      }
+      for (const extension of ["idx", "pack", "rev", "bitmap", "promisor"]) {
+        options.beforeRun?.();
+        await fs.rm(`${stem}.${extension}`, { force: true });
+      }
+    }
   }
   const remainingNames = await fs.readdir(directory);
-  const remaining = remainingNames.filter((name) => /^pack-[a-f0-9]+\.idx$/.test(name));
-  if (remaining.length > 0) {
-    await requireGit(repoRoot, ["multi-pack-index", "write", "--stdin-packs"], {
-      ...options,
-      input: `${remaining.join("\n")}\n`,
-    });
-  }
   return remainingNames.filter((name) => name.endsWith(".pack")).length;
 }
 
-export function createWorktreeGitMaintenance(env: NodeJS.ProcessEnv, now = Date.now) {
+export function createWorktreeGitMaintenance(env: NodeJS.ProcessEnv) {
   // Suspend failed tasks without letting graph failures stop bounded pack convergence.
   const failed = new Map<string, "objects" | "packs" | "maintenance">();
   const nextRunAt = new Map<string, number>();
@@ -416,12 +440,12 @@ export function createWorktreeGitMaintenance(env: NodeJS.ProcessEnv, now = Date.
         await report("suspended");
         continue;
       }
-      if (!params.retryDeferred && now() < (nextRunAt.get(repoRoot) ?? 0)) {
+      if (!params.retryDeferred && Date.now() < (nextRunAt.get(repoRoot) ?? 0)) {
         await report("throttled");
         continue;
       }
       // Archive notifications also run cleanup; repository housekeeping stays hourly.
-      nextRunAt.set(repoRoot, now() + 60 * 60_000);
+      nextRunAt.set(repoRoot, Date.now() + 60 * 60_000);
       let stage: "objects" | "packs" | "maintenance" = "packs";
       try {
         await report(stage);

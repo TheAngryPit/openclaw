@@ -1,8 +1,8 @@
-import { For, createMemo, createSignal } from "solid-js";
+import { Errored, For, Loading, Show, createMemo, createSignal, latest } from "solid-js";
 import { SESSION_COMMUNICATION_MODES } from "../../../packages/gateway-protocol/src/session-communication.js";
+import { registerSessionOrganizationEnglish } from "../i18n/locales/en-session-organization.ts";
 import { formatUiError } from "../lib/format-error.ts";
 import { t } from "../lib/reactive/i18n.ts";
-import type { SessionOwnerOption } from "../lib/session-owner.ts";
 import { nativeListener } from "../lib/solid-native-listener.ts";
 import type {
   SessionMenuActions,
@@ -10,27 +10,18 @@ import type {
   SessionMenuActionsState as MenuState,
 } from "./session-menu-actions.ts";
 import { Icon } from "./solid/icon.tsx";
-import type { MenuEntry } from "./solid/menu.tsx";
+import type { MenuControls, MenuEntry } from "./solid/menu.tsx";
 import { SessionOwnerAvatar } from "./solid/session-owner-chip.tsx";
 
-function OwnerAvatar(props: { owner: SessionOwnerOption }) {
-  return (
-    <span class="session-menu__avatar" aria-hidden="true">
-      <SessionOwnerAvatar owner={props.owner} />
-    </span>
-  );
-}
+registerSessionOrganizationEnglish();
 
 export function useSessionMenuDetails(
   actions: SessionMenuActions,
   readState: () => MenuState,
   disabled: (kind: SessionManagementActionKind) => boolean,
-  revision: () => number,
+  controls?: MenuControls,
 ) {
-  const ownerSnapshot = createMemo(() => {
-    revision();
-    return actions.ownerMenu.snapshot;
-  });
+  const ownerSnapshot = actions.ownerMenu.snapshot;
   const ownerStatus = (): MenuEntry[] => {
     const status = ownerSnapshot();
     if (!status.connected) {
@@ -64,7 +55,7 @@ export function useSessionMenuDetails(
     searchGeneration();
     return "";
   });
-  const owners = () => {
+  const owners = createMemo(() => {
     const state = ownerSnapshot();
     const options = [...state.owners];
     const currentOwner = readState().currentOwner;
@@ -90,28 +81,28 @@ export function useSessionMenuDetails(
           .includes(term),
       ),
     );
-  };
-  const ownerSearch = (
-    <div
-      class="people-menu__search"
-      ref={nativeListener("click", (event) => event.stopPropagation())}
-    >
-      <input
-        type="search"
-        data-search
-        data-form-control
-        autocomplete="off"
-        aria-label={t("sessionsView.searchPeople")}
-        placeholder={t("sessionsView.searchPeople")}
-        value={query()}
-        onInput={(event) => setQuery(event.currentTarget.value)}
-      />
-    </div>
-  );
+  });
   const ownerSearchEntry: MenuEntry = {
     kind: "content",
     id: "owners-search",
-    content: ownerSearch,
+    content: (
+      <div
+        class="people-menu__search"
+        ref={nativeListener("click", (event) => event.stopPropagation())}
+      >
+        <input
+          ref={controls?.ref()}
+          type="search"
+          data-search
+          data-form-control
+          autocomplete="off"
+          aria-label={t("sessionsView.searchPeople")}
+          placeholder={t("sessionsView.searchPeople")}
+          value={query()}
+          onInput={(event) => setQuery(event.currentTarget.value)}
+        />
+      </div>
+    ),
   };
   const ownerOptions = (): MenuEntry[] => {
     const current = readState().currentOwner;
@@ -131,7 +122,11 @@ export function useSessionMenuDetails(
           checked,
           disabled: actions.actionDisabled("assign-owner") || checked,
           attributes: { title: readState().actionDisabledReasons["assign-owner"] },
-          icon: <OwnerAvatar owner={owner} />,
+          icon: (
+            <span class="session-menu__avatar" aria-hidden="true">
+              <SessionOwnerAvatar owner={owner} />
+            </span>
+          ),
           content: <span class="session-menu__text">{label}</span>,
           details: checked ? (
             <span class="session-menu__check" aria-hidden="true">
@@ -156,10 +151,7 @@ export function useSessionMenuDetails(
       ...ownerStatus(),
     ];
   };
-  const communicationSnapshot = createMemo(() => {
-    revision();
-    return actions.advanced.communicationState();
-  });
+  const communicationSnapshot = createMemo(() => actions.advanced.communicationState());
   const policy = () => communicationSnapshot().session.communication;
   const effective = () => communicationSnapshot().session.effectiveCommunication;
   const reason = () => readState().actionDisabledReasons["set-communication"];
@@ -203,10 +195,7 @@ export function useSessionMenuDetails(
                             ? t("sessionsView.communication.default")
                             : undefined)
                         }
-                        ref={(element) => {
-                          click(element);
-                          keydown(element);
-                        }}
+                        ref={[controls?.ref(), click, keydown]}
                       >
                         {t(
                           mode === "always"
@@ -253,9 +242,39 @@ export function useSessionMenuDetails(
       : []),
     communicationEnd,
   ];
-  const error = createMemo(() => {
-    revision();
-    return actions.advanced.error;
-  });
-  return { ownerStatus, ownerOptions, communication, error };
+  const ReadStatus = () => {
+    return <>{(latest(actions.advanced.read), null)}</>;
+  };
+  const readStatus: MenuEntry = {
+    id: "reload-settings",
+    get label() {
+      return t("common.retry");
+    },
+    render: (attributes) => (
+      <Show when={actions.advanced.readKey()} keyed>
+        <Errored
+          fallback={(error) => (
+            <>
+              <div class="session-menu__info" role="alert">
+                {formatUiError(error())}
+              </div>
+              <button
+                {...attributes}
+                class="oc-menu-item session-menu__item"
+                type="button"
+                value="reload-settings"
+              >
+                {t("common.retry")}
+              </button>
+            </>
+          )}
+        >
+          <Loading fallback={null} on={actions.advanced.readKey()}>
+            <ReadStatus />
+          </Loading>
+        </Errored>
+      </Show>
+    ),
+  };
+  return { ownerStatus, ownerOptions, communication, readStatus };
 }

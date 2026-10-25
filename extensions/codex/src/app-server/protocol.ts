@@ -357,7 +357,7 @@ export type CodexThread = {
   turns?: CodexTurn[];
 };
 
-export type CodexThreadStatus =
+type CodexThreadStatus =
   | { type: "notLoaded" }
   | { type: "idle" }
   | { type: "systemError" }
@@ -383,13 +383,23 @@ export type CodexThreadItem = {
   text: string;
   delivery?: "async" | null;
   contentItems?: CodexDynamicToolCallOutputContentItem[] | null;
-  changes: Array<{ path: string; kind: string }>;
+  changes: Array<{
+    path: string;
+    kind: string | { type: "add" | "delete" } | { type: "update"; move_path?: string | null };
+    diff?: string;
+  }>;
   [key: string]: unknown;
 };
 
 export type CodexServerNotification = {
   method: string;
   params?: JsonValue;
+};
+
+export type CodexPreparedServerNotification = CodexServerNotification & {
+  threadId?: string;
+  turnId?: string;
+  completedTurn: CodexTurn | undefined;
 };
 
 export type CodexDynamicToolCallParams = {
@@ -449,7 +459,7 @@ export type CodexModel = {
   description?: string | null;
   hidden: boolean;
   isDefault: boolean;
-  inputModalities: string[];
+  inputModalities?: string[];
   serviceTiers?: { id: string; name: string; description: string }[];
   supportedReasoningEfforts: CodexReasoningEffortOption[];
   defaultReasoningEffort?: string | null;
@@ -472,7 +482,6 @@ export type CodexGetAccountResponse = {
 };
 
 type CodexModelProviderCapabilitiesReadResponse = {
-  namespaceTools: boolean;
   imageGeneration: boolean;
   webSearch: boolean;
 };

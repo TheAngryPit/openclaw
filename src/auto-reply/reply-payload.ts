@@ -11,6 +11,7 @@ import type {
   RestartRecoveryTerminalDeliveryEvidence,
 } from "../config/sessions/restart-recovery-types.js";
 import type { ReplyToMode } from "../config/types.base.js";
+import type { AgentAssistantSourceReceipt } from "../infra/agent-events.types.js";
 import { hasReplyPayloadContent } from "../interactive/payload.js";
 import type { AssistantDeliveryTtsFacts } from "../llm/types.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
@@ -151,8 +152,15 @@ export function stripReplyMediaFailureFallback(
 
 function hasReplyPayloadMedia(payload: Pick<ReplyPayload, "mediaUrl" | "mediaUrls">): boolean {
   return Boolean(
-    readNonBlankString(payload.mediaUrl) ||
-    (Array.isArray(payload.mediaUrls) && payload.mediaUrls.some(readNonBlankString)),
+    readNonBlankString(payload.mediaUrl) || payload.mediaUrls?.some(readNonBlankString),
+  );
+}
+
+export function shouldKeepPayloadDuringSilentTurn(payload: ReplyPayload): boolean {
+  return (
+    payload.isError === true ||
+    getReplyPayloadMetadata(payload)?.deliverDespiteSourceReplySuppression === true ||
+    (payload.audioAsVoice === true && hasReplyPayloadMedia(payload))
   );
 }
 
@@ -248,6 +256,8 @@ export type ReplyPayloadMetadata = {
   /** The model failed after a committed recovery compaction in the same turn. */
   postCompactionModelFailure?: true;
   assistantMessageIndex?: number;
+  /** Shares the occurrence receipt so deferred delivery observes its eventual commit. */
+  assistantTranscriptSource?: Readonly<AgentAssistantSourceReceipt>;
   /** First index of this block's physical assistant message; each content item advances the index. */
   assistantMessageStartIndex?: number;
   /** Answer to a preceding user input in the same run. */
@@ -272,6 +282,8 @@ export type ReplyPayloadMetadata = {
   assistantMediaFailures?: ReplyMediaFailure[];
   /** The runtime owns the transcript decision for this assistant payload. */
   assistantTranscriptOwned?: boolean;
+  /** The local source observer confirmed this model reply in committed chat history. */
+  localTranscriptDeliveryConfirmed?: true;
   /** Exact decoration added by normalization, not model-authored text. */
   responsePrefix?: string;
   /** Exact usage footer appended by the host. */
@@ -288,8 +300,6 @@ export type ReplyPayloadMetadata = {
   contextFreeCommand?: true;
   /** Host-owned acknowledgement after this final payload is confirmed delivered. */
   onFinalDeliverySuccess?: () => void;
-  /** Host-projected monitoring final; notification policy already normalized its text. */
-  heartbeatReply?: true;
   /** Exact key for replacing a runtime-owned assistant row after media materialization. */
   assistantTranscriptIdempotencyKey?: string;
   /** Original session-writer claim that must still hold at final delivery. */
@@ -367,12 +377,8 @@ export type ReplyPayloadMetadata = {
   nonTerminalToolErrorWarning?: boolean;
   /** Host label or status about the run (truncation, restart, compaction); not the answer. */
   hostNotice?: true;
-  /** Unresolved mutating tool failure that makes a heartbeat run terminally failed. */
-  heartbeatTerminalToolFailure?: {
-    toolName: string;
-  };
-  /** Private scratch must survive reply copies without becoming serializable channel data. */
-  heartbeatScratchProposal?: string;
+  /** Runtime acknowledgment of a committed queue decision, independent of active reply delivery. */
+  queueAdmissionNotice?: true;
 };
 
 // Source Gateways and native plugin SDK chunks must share the same payload identity.
@@ -432,12 +438,11 @@ export function readReplyPayloadSourceOccurrence(
   const sourceText = metadata?.blockSourceText;
   const sourceRange = metadata?.blockSourceRange;
   if (
-    typeof assistantMessageIndex !== "number" ||
+    assistantMessageIndex === undefined ||
     !Number.isSafeInteger(assistantMessageIndex) ||
     assistantMessageIndex < 0 ||
-    typeof sourceText !== "string" ||
-    !Array.isArray(sourceRange) ||
-    sourceRange.length !== 2
+    sourceText === undefined ||
+    !sourceRange
   ) {
     return undefined;
   }
@@ -512,6 +517,31 @@ export function isReplyPayloadNonTerminalToolErrorWarning(payload: object): bool
 export function copyReplyPayloadMetadata<T extends object>(source: object, payload: T): T {
   const metadata = getReplyPayloadMetadata(source);
   return metadata ? setReplyPayloadMetadata(payload, metadata) : payload;
+}
+
+export function retainSilentFinalPayloads(payloads: readonly ReplyPayload[]): ReplyPayload[] {
+  return payloads.flatMap((payload) => {
+    if (payload.isError) {
+      return [payload];
+    }
+    const nonTextPayload = { ...payload, text: undefined };
+    return hasReplyPayloadContent(nonTextPayload)
+      ? [copyReplyPayloadMetadata(payload, nonTextPayload)]
+      : [];
+  });
+}
+
+/** Structured no_change suppresses unsent content; ordinary silence retains its media contract. */
+export function selectAutomationReplyPayloads(
+  payloads: ReplyPayload[],
+  noChange: boolean,
+  quiet: boolean,
+): ReplyPayload[] {
+  return noChange
+    ? payloads.filter((payload) => payload.isError)
+    : quiet
+      ? retainSilentFinalPayloads(payloads)
+      : payloads;
 }
 
 /** Marks a host-owned payload as deliverable even when normal source replies are suppressed. */

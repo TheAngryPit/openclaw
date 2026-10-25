@@ -10,16 +10,8 @@ import {
   type FixtureReceiptChannel,
 } from "openclaw/plugin-sdk/test-fixtures";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { isProcessAlive } from "../../test-support/process.test-support.js";
 import { startTunnel } from "./tunnel.js";
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 let receipts: FixtureReceiptChannel;
 beforeAll(async () => {
@@ -47,15 +39,6 @@ async function waitForProcessExit(pid: number, signal: AbortSignal): Promise<boo
     }
   } catch (cause) {
     throw new Error(`ngrok process ${pid} did not exit`, { cause });
-  }
-}
-
-async function waitForRescueProcessExit(pid: number): Promise<boolean> {
-  try {
-    await expect.poll(() => isProcessAlive(pid), { timeout: 1_000, interval: 20 }).toBe(false);
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -98,7 +81,10 @@ async function withNgrok(
           const pid = Number.parseInt(await fs.readFile(paths.pidPath, "utf8").catch(() => ""), 10);
           if (Number.isInteger(pid) && pid > 0 && isProcessAlive(pid)) {
             process.kill(pid, "SIGKILL");
-            await waitForRescueProcessExit(pid);
+            await expect
+              .poll(() => isProcessAlive(pid), { timeout: 1_000, interval: 20 })
+              .toBe(false)
+              .catch(() => {});
           }
         }
       },

@@ -2,6 +2,7 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { isMainThread, threadId, type Worker } from "node:worker_threads";
 import { toStringifiedError } from "@openclaw/normalization-core/error-coercion";
+import { getDatabaseEngineSelection } from "../../infra/database-engine/context.js";
 import { runtimeProcessEntrypoints } from "../../infra/runtime-process-entrypoints.js";
 import {
   resolveRuntimeWorkerThreadExecArgv,
@@ -16,7 +17,11 @@ import { KeyedAsyncQueue } from "../../plugin-sdk/keyed-async-queue.js";
 import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
 import { resolveQuarantineStorePath } from "../../state/openclaw-state-db.paths.js";
 import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
-import { runScopedSqliteArchiveOperation } from "./session-accessor.sqlite-archive-session.js";
+import {
+  runScopedSqliteArchiveOperation,
+  runScopedSqliteArchiveMutation,
+  withSqliteTranscriptArchiveSession,
+} from "./session-accessor.sqlite-archive-session.js";
 import type {
   MaterializedSessionStateDeletePlan,
   SessionHistoryEvictionArchivePlan,
@@ -65,7 +70,11 @@ export function createSqliteTranscriptArchiveWorker(
   try {
     worker = createCpuTrackedWorker(workerUrl, {
       resourceLimits: { maxOldGenerationSizeMb: 512 },
-      workerData: { ...workerData, databaseAdmissionPort: admission.port },
+      workerData: {
+        ...workerData,
+        databaseAdmissionPort: admission.port,
+        databaseEngineSelection: getDatabaseEngineSelection(),
+      },
       transferList: [admission.port],
       execArgv: resolveRuntimeWorkerThreadExecArgv(workerUrl),
     });
@@ -94,90 +103,13 @@ type TranscriptArchiveWorkerOperation<Result> = {
 );
 
 function spawnSqliteTranscriptArchiveWorkerOperation<Result>(
-  input: TranscriptArchiveWorkerOperation<Result>,
+  params: Exclude<TranscriptArchiveWorkerOperation<Result>, { expectedMessageType: "reclaimed" }>,
 ): Promise<Result[]> {
-  const params =
-    input.expectedMessageType === "reclaimed"
-      ? {
-          ...input,
-          stateContext: captureOpenClawStateWorkerContext({
-            env: input.workerData.plan.databaseOptions.env,
-          }),
-        }
-      : input;
   let worker: Worker;
   try {
-    worker = createSqliteTranscriptArchiveWorker(
-      params.workerData,
-      params.expectedMessageType === "reclaimed"
-        ? [params.workerData.plan.databaseOptions.path, params.stateContext.admission.databasePath]
-        : [],
-    );
+    worker = createSqliteTranscriptArchiveWorker(params.workerData);
   } catch (error) {
     return Promise.reject(toStringifiedError(error));
-  }
-
-  if (params.expectedMessageType === "reclaimed") {
-    const startedAt = performance.now();
-    const workerThreadId = worker.threadId;
-    let exitCode: number | undefined;
-    if (params.diagnostics) {
-      params.diagnostics.workerThreadId = workerThreadId;
-    }
-    // Cold mutations retain their one-shot cleanup/exit lifetime, never a sweep connection.
-    const operation = withSqliteMutationWorkerCoordination(
-      params.stateContext,
-      { kind: "dedicated", channel: worker },
-      0,
-      (coordination) =>
-        runSqliteMutationWorkerRequest<Result>({
-          transport: { kind: "dedicated", channel: worker },
-          operationId: 0,
-          completion: "exit",
-          databaseAuthority: {
-            databasePath: params.stateContext.admission.databasePath,
-            maintenanceScope: params.stateContext.maintenanceScope,
-            creationPaths: [
-              params.workerData.plan.databaseOptions.path,
-              params.stateContext.admission.databasePath,
-              resolveQuarantineStorePath(params.stateContext.environment),
-            ],
-            assertCurrent() {
-              params.stateContext.admission.assertCurrent();
-              params.assertCurrent?.();
-            },
-          },
-          onCommitRequest: params.onCommitRequest,
-          withWriteAdmission: params.withWriteAdmission,
-          validationOwner: params.validationOwner,
-          onExit: (code) => {
-            exitCode = code;
-          },
-          dispatch: () => worker.postMessage({ type: "mutate", coordination }, []),
-        }),
-    ).then((result) => [result]);
-    const observe = (outcome: "resolved" | "rejected") => {
-      const elapsedMs = Math.round(performance.now() - startedAt);
-      if (elapsedMs >= 1_000) {
-        createSubsystemLogger("session-sqlite").warn("slow SQLite reclamation Worker operation", {
-          pid: process.pid,
-          threadId,
-          isMainThread,
-          workerThreadId,
-          reclamationKind: params.diagnostics?.kind ?? params.workerData.plan.kind,
-          elapsedMs,
-          outcome,
-          exitCode,
-        });
-      }
-    };
-    void operation
-      .then(
-        () => observe("resolved"),
-        () => observe("rejected"),
-      )
-      .catch(() => {});
-    return operation;
   }
 
   return new Promise((resolve, reject) => {
@@ -210,6 +142,102 @@ function spawnSqliteTranscriptArchiveWorkerOperation<Result>(
       resolve(results);
     });
   });
+}
+
+function runSqliteColdMutation<Result>(
+  input: Extract<TranscriptArchiveWorkerOperation<Result>, { expectedMessageType: "reclaimed" }>,
+): Promise<Result[]> {
+  const params = {
+    ...input,
+    stateContext: captureOpenClawStateWorkerContext({
+      env: input.workerData.plan.databaseOptions.env,
+    }),
+  };
+  return withSqliteTranscriptArchiveSession(params.workerData.plan.databaseOptions, () =>
+    runExclusiveSqliteTranscriptArchiveWorker(() => {
+      params.assertCurrent?.();
+      return runScopedSqliteArchiveMutation(
+        params.workerData,
+        createSqliteTranscriptArchiveWorker,
+        (transport) => {
+          const startedAt = performance.now();
+          const workerThreadId = transport.threadId;
+          let exitCode: number | undefined;
+          if (params.diagnostics) {
+            params.diagnostics.workerThreadId = workerThreadId;
+          }
+          const operation = withSqliteMutationWorkerCoordination(
+            params.stateContext,
+            transport,
+            transport.initialOperationId,
+            (coordination) =>
+              runSqliteMutationWorkerRequest<Result>({
+                transport,
+                operationId: transport.initialOperationId,
+                completion: "exit",
+                databaseAuthority: {
+                  databasePath: params.stateContext.admission.databasePath,
+                  maintenanceScope: params.stateContext.maintenanceScope,
+                  creationPaths: [
+                    params.workerData.plan.databaseOptions.path,
+                    params.stateContext.admission.databasePath,
+                    resolveQuarantineStorePath(params.stateContext.environment),
+                  ],
+                  assertCurrent() {
+                    params.stateContext.admission.assertCurrent();
+                    params.assertCurrent?.();
+                  },
+                },
+                onCommitRequest: params.onCommitRequest,
+                withWriteAdmission: params.withWriteAdmission,
+                validationOwner: params.validationOwner,
+                onExit: (code) => {
+                  exitCode = code;
+                },
+                dispatch: () =>
+                  transport.channel.postMessage(
+                    { type: "mutate", coordination },
+                    coordination.databaseAdmission ? [coordination.databaseAdmission] : [],
+                  ),
+              }),
+            () => {
+              params.stateContext.admission.assertCurrent();
+              params.assertCurrent?.();
+            },
+            [
+              params.workerData.plan.databaseOptions.path,
+              params.stateContext.admission.databasePath,
+            ],
+          ).then((result) => [result]);
+          const observe = (outcome: "resolved" | "rejected") => {
+            const elapsedMs = Math.round(performance.now() - startedAt);
+            if (elapsedMs >= 1_000) {
+              createSubsystemLogger("session-sqlite").warn(
+                "slow SQLite reclamation Worker operation",
+                {
+                  pid: process.pid,
+                  threadId,
+                  isMainThread,
+                  workerThreadId,
+                  reclamationKind: params.diagnostics?.kind ?? params.workerData.plan.kind,
+                  elapsedMs,
+                  outcome,
+                  exitCode,
+                },
+              );
+            }
+          };
+          void operation
+            .then(
+              () => observe("resolved"),
+              () => observe("rejected"),
+            )
+            .catch(() => {});
+          return operation;
+        },
+      );
+    }, params.signal),
+  );
 }
 
 // Serialize lifecycle archive Workers so this path cannot multiply
@@ -260,6 +288,9 @@ export function runExclusiveSqliteTranscriptArchiveWorker<T>(
 export function runSqliteTranscriptArchiveWorkerOperation<Result>(
   params: TranscriptArchiveWorkerOperation<Result>,
 ): Promise<Result[]> {
+  if (params.expectedMessageType === "reclaimed") {
+    return runSqliteColdMutation(params);
+  }
   return runExclusiveSqliteTranscriptArchiveWorker(() => {
     params.assertCurrent?.();
     return spawnSqliteTranscriptArchiveWorkerOperation<Result>(params);
@@ -275,12 +306,7 @@ function runSqliteTranscriptArchiveWorker(
     runExclusiveSqliteTranscriptArchiveWorker,
   );
   if (scoped) {
-    return scoped.then((result) => {
-      if (result.type !== "done") {
-        throw new Error("SQLite archive Worker returned another operation's result");
-      }
-      return result.results;
-    });
+    return scoped.then((result) => result.results);
   }
   return runSqliteTranscriptArchiveWorkerOperation<TranscriptArchiveWorkerResult>({
     expectedMessageType: "done",
@@ -302,12 +328,7 @@ export function runSqliteTranscriptArchivePublishWorker(
     (run) => runExclusiveSqliteTranscriptArchiveWorker(run, signal),
   );
   if (scoped) {
-    return scoped.then((result) => {
-      if (result.type !== "published") {
-        throw new Error("SQLite archive Worker returned another operation's result");
-      }
-      return result.results;
-    });
+    return scoped.then((result) => result.results);
   }
   return runSqliteTranscriptArchiveWorkerOperation<TranscriptArchivePublishResult>({
     signal,
@@ -348,9 +369,6 @@ export async function runSqliteTranscriptArchiveReadWorker(
     throw new Error("SQLite archive reads require their captured database scope");
   }
   const result = await scoped;
-  if (result.type !== "final-read") {
-    throw new Error("SQLite archive Worker returned another operation's result");
-  }
   return result.results;
 }
 
@@ -366,9 +384,6 @@ export async function runSqliteTranscriptArchivePageWorker(
     throw new Error("SQLite archive reads require their captured database scope");
   }
   const result = await scoped;
-  if (result.type !== "page-read") {
-    throw new Error("SQLite archive Worker returned another operation's result");
-  }
   return result.results;
 }
 

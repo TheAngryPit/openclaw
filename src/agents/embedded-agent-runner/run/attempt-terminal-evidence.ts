@@ -1,4 +1,3 @@
-import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../../../auto-reply/tokens.js";
 import {
   hasAcceptedSessionSpawn,
   hasCompletionMessageSessionSpawn,
@@ -68,8 +67,6 @@ type TerminalAttemptState = Pick<
   | "clientToolCalls"
   | "yieldDetected"
   | "didSendDeterministicApprovalPrompt"
-  | "heartbeatToolResponse"
-  | "lastToolError"
   | "toolMediaUrls"
   | "toolAudioAsVoice"
   | "toolTrustedLocalMedia"
@@ -91,13 +88,12 @@ type TerminalAttemptState = Pick<
     toolMetas?: readonly { asyncStarted?: boolean }[];
   };
 
+/** A failed tool is not delivery or durable progress for the turn. */
 export function hasAttemptTerminalState(attempt: TerminalAttemptState): boolean {
   return Boolean(
-    attempt.lastToolError ||
     attempt.clientToolCalls ||
     attempt.yieldDetected ||
     attempt.didSendDeterministicApprovalPrompt ||
-    attempt.heartbeatToolResponse ||
     attempt.toolMediaUrls?.some((url) => url.trim().length > 0) ||
     attempt.toolAudioAsVoice ||
     attempt.toolTrustedLocalMedia ||
@@ -121,6 +117,7 @@ type AcceptedSessionSpawnContinuationAttempt = Pick<
   | "assistantTexts"
   | "terminal"
   | "sourceReplyDelivered"
+  | "preparedTerminalReply"
   | "sourceReplyDeliveryState"
 >;
 
@@ -159,11 +156,7 @@ export function shouldContinueInteractiveAcceptedSessionSpawns(params: {
   ) {
     return false;
   }
-  if (
-    attempt.assistantTexts.some(
-      (text) => text.trim().length > 0 && !isSilentReplyText(text, SILENT_REPLY_TOKEN),
-    )
-  ) {
+  if (attempt.preparedTerminalReply?.terminalReply.disposition === "visible") {
     return false;
   }
   // The media run delivers the result, so progress sends do not replace the owed reply.

@@ -6,10 +6,10 @@ import { createDeferred } from "../../../test/helpers/promise.js";
 import { makeUserMessage } from "../../../test/helpers/user-message.js";
 import {
   acquireSessionMcpRuntime,
-  getSessionMcpRuntimeManagerForTesting,
   peekSessionMcpRuntime,
   setSessionMcpRuntimeScheduler,
 } from "../../agents/agent-bundle-mcp-manager-api.js";
+import { getSessionMcpRuntimeTestManager } from "../../agents/agent-bundle-mcp-manager.test-support.js";
 import { waitForSessionMaintenance } from "../../agents/session-maintenance/coordinator.js";
 import { createSessionMaintenanceFollowup } from "../../agents/session-maintenance/run.js";
 import { SessionManager } from "../../agents/sessions/session-manager.js";
@@ -34,7 +34,7 @@ import {
   waitForDiagnosticEventsDrained,
 } from "../../infra/diagnostic-events.js";
 import { clearMemoryPluginState } from "../../plugins/memory-state.js";
-import { beginSessionWorkAdmission } from "../../sessions/session-lifecycle-admission.js";
+import { beginSessionEffect } from "../../sessions/session-controller.lifecycle.js";
 import { extractTextFromChatContent } from "../../shared/chat-content.js";
 import { createTestGatewayScheduler } from "../../test-utils/gateway-scheduler-clock.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
@@ -81,7 +81,7 @@ function finishModelResponse(response: ServerResponse, content: string): void {
         id: "private-memory-fixture",
         object: "chat.completion.chunk",
         created: 1,
-        model: "test-model",
+        model: "owner-model",
         ...chunk,
       })}\n\n`,
     );
@@ -112,7 +112,8 @@ it.each(["completed", "interrupted"] as const)(
       const stopDiagnostics = onInternalDiagnosticEvent((event) => {
         if (
           event.type === "model.call.started" &&
-          event.model === "test-model" &&
+          event.model === "owner-model" &&
+          event.sessionId !== scope.sessionId &&
           event.contextTokenBudget !== undefined
         ) {
           runtimeBudgets.push(event.contextTokenBudget);
@@ -214,16 +215,13 @@ it.each(["completed", "interrupted"] as const)(
               api: "openai-completions",
               apiKey: "synthetic-fixture-key",
               baseUrl: `http://127.0.0.1:${address.port}/v1`,
-              models: [
-                model("owner-model", "Owner fixture", 128_000),
-                model("test-model", "Fixture", 1_000_000),
-              ],
+              models: [model("owner-model", "Owner fixture", 128_000)],
             },
           },
         },
       };
       let flush: ReturnType<typeof runMemoryFlushIfNeeded> | undefined;
-      let admission: Awaited<ReturnType<typeof beginSessionWorkAdmission>> | undefined;
+      let admission: Awaited<ReturnType<typeof beginSessionEffect>> | undefined;
       const scheduler = createTestGatewayScheduler();
       try {
         await setSessionMcpRuntimeScheduler(scheduler);
@@ -285,9 +283,8 @@ it.each(["completed", "interrupted"] as const)(
           prompt: "Checkpoint durable notes. Reply NO_REPLY.",
           systemPrompt: "Write durable notes only.",
           relativePath: "memory/checkpoint.md",
-          model: "test-provider/test-model",
         }));
-        admission = await beginSessionWorkAdmission({
+        admission = await beginSessionEffect({
           scope: scope.storePath,
           identities: [scope.sessionKey, scope.sessionId],
           signal: interrupted.signal,
@@ -307,7 +304,7 @@ it.each(["completed", "interrupted"] as const)(
             sessionStore: { [scope.sessionKey]: entry },
             sessionKey: scope.sessionKey,
             storePath: scope.storePath,
-            isHeartbeat: false,
+
             abortSignal: interrupted.signal,
           }),
         );
@@ -429,7 +426,7 @@ it.each(["completed", "interrupted"] as const)(
         admission?.release();
         await waitForSessionMaintenance(scope.sessionKey);
         // Retire fixture-owned leftovers after work settles, including failed setup or assertions.
-        const mcpManager = getSessionMcpRuntimeManagerForTesting();
+        const mcpManager = getSessionMcpRuntimeTestManager();
         for (const sessionId of mcpManager.listSessionIds()) {
           if (mcpManager.peekSession({ sessionId })?.workspaceDir === state.workspaceDir) {
             await mcpManager.disposeSession(sessionId);

@@ -1,6 +1,10 @@
 import type { JSX } from "@solidjs/web";
-import { createMemo, getOwner, runWithOwner } from "solid-js";
+import { createMemo, Show } from "solid-js";
 import { EDITOR_IDS, EDITOR_LABELS } from "../lib/editor-links.ts";
+import {
+  KEYBOARD_SHORTCUT_COMBOS,
+  type KeyboardShortcutCombo,
+} from "../lib/keyboard-shortcut-contract.ts";
 import { t } from "../lib/reactive/i18n.ts";
 import { formatSessionSnoozeWakeTime, isSessionSnoozed } from "../lib/sessions/session-snooze.ts";
 import { useSessionMenuAppearance } from "./session-icon-picker-solid.tsx";
@@ -11,25 +15,23 @@ import type {
 } from "./session-menu-actions.ts";
 import type { CompactSessionMenuView } from "./session-menu-compact.ts";
 import { useSessionMenuDetails } from "./session-menu-details-solid.tsx";
-import { sessionArchiveShortcut } from "./session-menu-options.ts";
 import { useSessionSnoozeEntries } from "./session-menu-snooze.tsx";
 import { Icon, type IconName } from "./solid/icon.tsx";
 import { Kbd, KeyboardShortcut } from "./solid/kbd.tsx";
-import type { MenuEntry, MenuItem } from "./solid/menu.tsx";
+import type { MenuControls, MenuEntry, MenuItem } from "./solid/menu.tsx";
 
-export function SessionMenuShortcut(props: {
-  shortcut: string;
-  alias?: ReturnType<typeof sessionArchiveShortcut>;
-}) {
+export function SessionMenuShortcut(props: { shortcut: string; alias?: KeyboardShortcutCombo }) {
   return (
     <span class="session-menu__shortcut" aria-hidden="true">
       <Kbd keys={props.shortcut.toUpperCase()} inline />
-      {props.alias ? (
-        <>
-          {" "}
-          / <KeyboardShortcut combo={props.alias} inline />
-        </>
-      ) : undefined}
+      <Show when={props.alias} keyed>
+        {(alias) => (
+          <>
+            {" "}
+            / <KeyboardShortcut combo={alias} inline />
+          </>
+        )}
+      </Show>
     </span>
   );
 }
@@ -60,35 +62,32 @@ const STANDARD_ITEMS = {
 } as const;
 
 export function useSessionMenuEntries(
-  host: HTMLElement,
   actions: SessionMenuActions,
   readState: () => MenuState,
-  revision: () => number,
-  options: { openInExtra?: () => readonly MenuEntry[] } = {},
+  options: { openInExtra?: () => readonly MenuEntry[]; controls?: MenuControls } = {},
 ) {
-  const owner = getOwner();
   const state = readState();
+  const archiveShortcut = () =>
+    state.archiveShortcut && state.selectionCount === 1 && !state.session.archived
+      ? KEYBOARD_SHORTCUT_COMBOS.archiveSession
+      : undefined;
   const batch = () => state.selectionCount > 1;
   const count = () => String(state.selectionCount);
   const disabled = (kind: SessionManagementActionKind) =>
     actions.actionDisabled(kind, actions.actionExtraDisabled(kind));
   const appearance = useSessionMenuAppearance(
-    host,
     readState,
     (kind) => actions.actionDisabled(kind),
     (action) => actions.runAction(action),
+    options.controls?.ref,
   );
-  const details = useSessionMenuDetails(actions, readState, disabled, revision);
-  const multipleOwners = createMemo(() => {
-    revision();
-    return actions.ownerMenu.multipleOwners;
+  const details = useSessionMenuDetails(actions, readState, disabled, options.controls);
+  const multipleOwners = actions.ownerMenu.multipleOwners;
+  const involvementAvailable = createMemo(() => actions.involvementAvailable);
+  const appearanceContent = createMemo(() => appearance.render(), { lazy: true });
+  const snoozeEntries = createMemo(() => useSessionSnoozeEntries(actions, readState), {
+    lazy: true,
   });
-  const involvementAvailable = createMemo(() => {
-    revision();
-    return actions.involvementAvailable;
-  });
-  let appearanceContent: JSX.Element;
-  let snoozeEntries: ReturnType<typeof useSessionSnoozeEntries> | undefined;
   const icon = (name: IconName) => (
     <span class="session-menu__icon" aria-hidden="true">
       <Icon name={name} />
@@ -105,7 +104,7 @@ export function useSessionMenuEntries(
   const item = (entry: ItemOptions): MenuItem => ({
     id: entry.kind,
     label: entry.label,
-    class: `session-menu__item${entry.kind === "delete" ? " session-menu__item--destructive" : ""}`,
+    class: ["session-menu__item", { "session-menu__item--destructive": entry.kind === "delete" }],
     variant: entry.kind === "delete" ? "danger" : undefined,
     disabled: disabled(entry.kind),
     attributes: {
@@ -120,7 +119,7 @@ export function useSessionMenuEntries(
     details: entry.shortcut ? (
       <SessionMenuShortcut
         shortcut={entry.shortcut}
-        alias={entry.kind === "toggle-archived" ? sessionArchiveShortcut(state) : undefined}
+        alias={entry.kind === "toggle-archived" ? archiveShortcut() : undefined}
       />
     ) : undefined,
   });
@@ -130,13 +129,11 @@ export function useSessionMenuEntries(
       id: state.compact ? `compact:open-${entry.view}` : `submenu:${entry.view}`,
       label: entry.label,
       labelClass: "session-menu__text",
-      class: [
-        "session-menu__item",
-        !state.compact && entry.view === "assign-owner" ? "people-menu__submenu" : "",
-        !state.compact && entry.view === "advanced" ? "session-menu__advanced" : "",
-      ]
-        .filter(Boolean)
-        .join(" "),
+      class: {
+        "session-menu__item": true,
+        "people-menu__submenu": !state.compact && entry.view === "assign-owner",
+        "session-menu__advanced": !state.compact && entry.view === "advanced",
+      },
       disabled: entry.disabled,
       attributes: {
         title: entry.title,
@@ -154,7 +151,7 @@ export function useSessionMenuEntries(
           ) : undefined}
         </>
       ),
-      children: state.compact ? undefined : body(entry.view),
+      children: state.compact ? undefined : () => body(entry.view),
       closeOnSelect: false,
       onBeforeShow: entry.view === "icon" ? appearance.prepare : undefined,
     };
@@ -257,90 +254,72 @@ export function useSessionMenuEntries(
     kinds.map((kind) =>
       item({ kind, label: t(STANDARD_ITEMS[kind][0]), icon: STANDARD_ITEMS[kind][1] }),
     );
-  function copyOptions(): MenuEntry[] {
-    return [
-      ...(state.navigationAllowed ? items(["copy-session-preview-link"]) : []),
-      ...items(["copy-markdown", "copy-session-id"]),
-    ];
-  }
-  function openOptions(): MenuEntry[] {
-    return [
-      ...(state.navigationAllowed ? items(["open-new-tab", "open-new-window"]) : []),
-      ...(state.splitAllowed ? items(["split-right", "split-below"]) : []),
-      ...(options.openInExtra?.() ?? []),
-      ...(state.worktreePath
-        ? [
-            content(
-              "editors-heading",
-              <div class="session-menu__info">{t("sessionsView.workspaceEditors")}</div>,
-            ),
-            ...EDITOR_IDS.map((editor) => ({
-              id: `open-in:${editor}`,
-              label: EDITOR_LABELS[editor],
-              class: "session-menu__item",
-              disabled: actions.actionDisabled("open-in"),
-            })),
-          ]
-        : []),
-    ];
-  }
-  function advancedBody(): MenuEntry[] {
-    return [
-      submenu({
-        view: "icon",
-        label: t("sessionsView.setIconColorMenu"),
-        icon: "palette",
-        disabled: actions.actionDisabled("set-icon") && actions.actionDisabled("set-color"),
-        title: state.actionDisabledReasons["set-icon"] ?? state.actionDisabledReasons["set-color"],
-      }),
-      item({
-        kind: "fork",
-        label: t("sessionsView.forkSession"),
-        icon: "copy",
-        shortcut: "f",
-        title: state.forkFromLastCompleted ? t("sessionsView.forkFromLastCompleted") : undefined,
-      }),
-      submenu({ view: "copy", label: t("sessionsView.copyDetails"), icon: "copy" }),
-      ...(state.navigationAllowed || state.worktreePath || options.openInExtra
-        ? [
-            submenu({
-              view: "open-in",
-              label: t("sessionsView.openInEditorMenu"),
-              icon: "externalLink",
-            }),
-          ]
-        : []),
-      ...details.communication(),
-      ...(details.error() !== null
-        ? [
-            content(
-              "settings-error",
-              <div class="session-menu__info" role="alert">
-                {details.error()}
-              </div>,
-            ),
-            { id: "reload-settings", label: t("common.retry"), class: "session-menu__item" },
-          ]
-        : []),
-      ...(!state.involvingMeContext ? involvement() : []),
-      deleteDivider,
-      deleteAction(),
-    ];
-  }
   function body(view: CompactSessionMenuView): MenuEntry[] {
     switch (view) {
       case "advanced":
-        return advancedBody();
+        return [
+          submenu({
+            view: "icon",
+            label: t("sessionsView.setIconColorMenu"),
+            icon: "palette",
+            disabled: actions.actionDisabled("set-icon") && actions.actionDisabled("set-color"),
+            title:
+              state.actionDisabledReasons["set-icon"] ?? state.actionDisabledReasons["set-color"],
+          }),
+          item({
+            kind: "fork",
+            label: t("sessionsView.forkSession"),
+            icon: "copy",
+            shortcut: "f",
+            title: state.forkFromLastCompleted
+              ? t("sessionsView.forkFromLastCompleted")
+              : undefined,
+          }),
+          submenu({ view: "copy", label: t("sessionsView.copyDetails"), icon: "copy" }),
+          ...(state.navigationAllowed || state.worktreePath || options.openInExtra
+            ? [
+                submenu({
+                  view: "open-in",
+                  label: t("sessionsView.openInEditorMenu"),
+                  icon: "externalLink",
+                }),
+              ]
+            : []),
+          ...details.communication(),
+          details.readStatus,
+          ...(!state.involvingMeContext ? involvement() : []),
+          deleteDivider,
+          deleteAction(),
+        ];
       case "snooze":
-        snoozeEntries ??= runWithOwner(owner, () => useSessionSnoozeEntries(actions, readState));
-        return snoozeEntries();
+        return snoozeEntries()();
       case "copy":
-        return copyOptions();
+        return [
+          ...(state.navigationAllowed ? items(["copy-session-preview-link"]) : []),
+          ...items(["copy-markdown", "copy-session-id"]),
+        ];
       case "open-in":
-        return openOptions();
+        return [
+          ...(state.navigationAllowed ? items(["open-new-tab", "open-new-window"]) : []),
+          ...(state.splitAllowed ? items(["split-right", "split-below"]) : []),
+          ...(options.openInExtra?.() ?? []),
+          ...(state.worktreePath
+            ? [
+                content(
+                  "editors-heading",
+                  <div class="session-menu__info">{t("sessionsView.workspaceEditors")}</div>,
+                ),
+                ...EDITOR_IDS.map((editor) => ({
+                  id: `open-in:${editor}`,
+                  label: EDITOR_LABELS[editor],
+                  class: "session-menu__item",
+                  disabled: actions.actionDisabled("open-in"),
+                })),
+              ]
+            : []),
+        ];
       case "icon":
-        appearanceContent ??= runWithOwner(owner, () => appearance.render(true));
-        return [content("appearance", appearanceContent)];
+        return [content("appearance", appearanceContent())];
       case "group":
         return groupOptions();
       case "assign-owner":
@@ -449,31 +428,24 @@ export function useSessionMenuEntries(
           ]
         : []),
       ...(state.involvingMeContext ? involvement() : []),
-      ...(!batch()
+      ...(!batch() && !actions.actionExtraDisabled("snooze")
         ? [
-            ...(!actions.actionExtraDisabled("snooze")
-              ? [
-                  isSessionSnoozed(
-                    { snoozedUntil: state.session.snoozedUntil ?? undefined },
-                    Date.now(),
-                  )
-                    ? item({
-                        kind: "wake",
-                        label: `${t("sessionsView.wakeSession")} · ${formatSessionSnoozeWakeTime(state.session.snoozedUntil!)}`,
-                        icon: "clock",
-                      })
-                    : submenu({
-                        view: "snooze",
-                        label: t("sessionsView.snooze"),
-                        icon: "clock",
-                        disabled: actions.actionDisabled("snooze"),
-                        title: state.actionDisabledReasons.snooze,
-                      }),
-                ]
-              : []),
-            archive(),
+            isSessionSnoozed({ snoozedUntil: state.session.snoozedUntil ?? undefined }, Date.now())
+              ? item({
+                  kind: "wake",
+                  label: `${t("sessionsView.wakeSession")} · ${formatSessionSnoozeWakeTime(state.session.snoozedUntil!)}`,
+                  icon: "clock",
+                })
+              : submenu({
+                  view: "snooze",
+                  label: t("sessionsView.snooze"),
+                  icon: "clock",
+                  disabled: actions.actionDisabled("snooze"),
+                  title: state.actionDisabledReasons.snooze,
+                }),
           ]
         : []),
+      ...(!batch() ? [archive()] : []),
     ];
   }
   const advanced = () => [

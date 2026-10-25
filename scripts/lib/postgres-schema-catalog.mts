@@ -480,13 +480,23 @@ export function portTables(data: Catalog) {
   }));
 }
 
-function indexExpressions(indexSource: string, cols: Map<string, string>, table: string): string {
+function indexExpressions(
+  indexSource: string,
+  cols: Map<string, string>,
+  table: string,
+  columns: readonly Column[],
+): string {
   const ts = tokens(indexSource);
   const on = ts.findIndex((token) => keyword(token, "ON"));
   const keys = group(ts, ts.indexOf("(", on));
   const terms = parts(keys.body).map((term) => {
     const order = /^(ASC|DESC)$/i.test(term.at(-1)!) ? term.pop()!.toUpperCase() : "ASC";
-    return `(${expression(term.join(" "), cols, table).sql}) ${order} NULLS ${order === "DESC" ? "LAST" : "FIRST"}`;
+    const notNull =
+      term.length === 1 &&
+      columns.some((column) => column.name === identifier(term[0]!) && !column.nullable);
+    // Non-null keys match PostgreSQL's default ORDER BY; nullable expressions retain SQLite order.
+    const nulls = notNull ? "" : ` NULLS ${order === "DESC" ? "LAST" : "FIRST"}`;
+    return `(${expression(term.join(" "), cols, table).sql}) ${order}${nulls}`;
   });
   const where = ts.slice(keys.end + 1);
   if (where.length && !keyword(where.shift(), "WHERE")) {
@@ -666,12 +676,14 @@ function mapChecks(ctx: Context, mapping: TableMapping, sqlTokens: string[]): vo
         const value = member.split(".").reduce(firstJsonMember, "document");
         return `${value} AS ${quote(`j_${member}`)}`;
       });
+      // STRICT skips absent metadata; a fixed builtin path also avoids parsing this
+      // CTE on every INSERT just to discover that SQL-function inlining is impossible.
       ctx.record(
         "function",
         name,
         functionName,
         item.source,
-        `CREATE FUNCTION ${quote(functionName)}(navigation_json text) RETURNS boolean LANGUAGE sql IMMUTABLE AS $navigation$\nWITH input AS (SELECT CASE WHEN navigation_json IS JSON THEN navigation_json::json END AS document),\nmembers AS (SELECT ${members.join(",\n")} FROM input)\nSELECT ${item.sql} FROM members;\n$navigation$;`,
+        `CREATE FUNCTION ${quote(functionName)}(navigation_json text) RETURNS boolean LANGUAGE sql IMMUTABLE STRICT SET search_path = pg_catalog AS $navigation$\nWITH input AS (SELECT CASE WHEN navigation_json IS JSON THEN navigation_json::json END AS document),\nmembers AS (SELECT ${members.join(",\n")} FROM input)\nSELECT ${item.sql} FROM members;\n$navigation$;`,
       );
       item.sql = `${quote(functionName)}("navigation_json")`;
     }
@@ -719,7 +731,7 @@ function mapIndexes(ctx: Context, mapping: TableMapping, indexes: Row[]): void {
       table.indexes++;
     } else {
       try {
-        sql = `CREATE ${Number(index.unique) ? "UNIQUE " : ""}INDEX ${quote(indexName)} ON ${qualified(ctx, name)} ${indexExpressions(source, cols, name)};`;
+        sql = `CREATE ${Number(index.unique) ? "UNIQUE " : ""}INDEX ${quote(indexName)} ON ${qualified(ctx, name)} ${indexExpressions(source, cols, name, table.columns)};`;
         table.indexes++;
       } catch (error) {
         reason = `Index omitted: ${error instanceof Error ? error.message : String(error)}`;

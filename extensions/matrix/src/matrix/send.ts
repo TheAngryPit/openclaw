@@ -133,12 +133,11 @@ export async function sendMessageMatrix(
             wireEventType: wireEventType!,
           })
         : null;
-      let plannedEvents: MatrixPreparedEvent[] | undefined = storedPlan?.events;
+      let plannedEvents: readonly MatrixPreparedEvent[] | undefined = storedPlan?.events;
       if (!plannedEvents) {
         const preparedText = chunkMatrixText(messageText, {
           cfg,
           accountId: opts.accountId,
-          preserveWhitespace: true,
         });
         const { chunks, convertedText, preparedBody, fitsInSingleEvent, tableMode } = preparedText;
         const singleEventBody = fitsInSingleEvent ? preparedBody : undefined;
@@ -393,7 +392,6 @@ export async function sendSingleTextMessageMatrix(
   } = prepareMatrixSingleText(text.trimEnd(), {
     cfg: opts.cfg,
     accountId: opts.accountId,
-    preserveWhitespace: true,
   });
   if (!trimmedText.trim()) {
     throw new Error("Matrix single-message send requires text");
@@ -481,7 +479,6 @@ export async function editMessageMatrix(
       const { convertedText, preparedBody, tableMode } = prepareMatrixSingleText(newText, {
         cfg,
         accountId: opts.accountId,
-        preserveWhitespace: true,
       });
       const newContent = withMatrixExtraContentFields(
         buildTextContent(convertedText, undefined, {

@@ -1,11 +1,15 @@
 export { readAssistantThinkingAppend } from "@openclaw/llm-core/event-stream";
 export * from "../providers/simple-options.js";
+export { iterateSseFrames } from "../transports/transport-stream-shared.js";
 export { serializeModelRequestBody } from "../transports/model-request-body.js";
 export * from "../providers/tool-result-text.js";
 export { hasMediaPayload, isImageWithMediaPayload } from "../media-payload.js";
 export * from "../providers/transform-messages.js";
 export * from "../replay-turn-classification.js";
-export { createDiagnosticRecord, isCredentialFieldName } from "../utils/credential-redaction.js";
+export {
+  projectPreparedDiagnosticValue,
+  isCredentialFieldName,
+} from "../utils/credential-redaction.js";
 export { projectProviderError } from "../utils/provider-error.js";
 export { matchesContextOverflowMessage } from "../utils/overflow.js";
 export * from "../utils/prompt-cache-stability.js";

@@ -13,7 +13,7 @@ import type { ClawHubRecommendation } from "../../../../src/shared/clawhub-recom
 import type { RunFailureNotice } from "../../../../src/shared/run-failure-notice.js";
 import type { SkillWorkshopChangeNotice } from "../../../../src/shared/skill-workshop-change-notice.js";
 import type { BrowserTabTarget } from "../../components/browser/browser-target.ts";
-import type { toolIcons } from "../../components/icons-tools.ts";
+import type { IconName } from "../../components/icon-data.ts";
 import type { SenderIdentity } from "./sender-label.ts";
 
 export type { HumanMention };
@@ -123,7 +123,7 @@ export type ChatGoalAction = "pause" | "resume" | "clear";
 export type ChatGoalRecovery = {
   pending: boolean;
   goalId?: string;
-  action?: ChatGoalAction | "edit" | "complete" | "block";
+  action?: ChatGoalAction | "edit" | "replace" | "complete" | "block";
   retired?: "expired" | "invalid";
   onCheck: () => Promise<boolean>;
 };
@@ -199,7 +199,6 @@ export type ChatQueueItem = {
     | "executing-command"
     | "sending"
     | "waiting-reconnect"
-    | "unconfirmed"
     // Provider review requires a new operator decision even if delivery has prior attempts.
     | "held"
     | "failed";
@@ -224,18 +223,23 @@ export type ChatItem =
       key: string;
       text: string;
       timestamp: number;
-      icon?: keyof typeof toolIcons;
+      icon?: IconName;
       label?: string;
       startsTurn?: true;
       boundaryId?: string;
       tone?: "danger";
+      /** Informational source-owned event eligible for timeline folding. */
+      systemEvent?: "info" | "delivery-warning";
       /** Collapse the body behind a disclosure; the label line stays visible. */
       collapsedBody?: true;
+      showTimestamp?: true;
       /** Structural only: separates a handed-off run from its resumption. Never rendered. */
       handoffBoundary?: true;
       /** A background skill review's changes; rendered as a native row instead of `text`. */
       skillChanges?: SkillWorkshopChangeNotice;
       runError?: RunFailureNotice;
+      /** Total identical failures represented by the latest display notice. */
+      repeatCount?: number;
       permissionMissing?: NodePermissionRequest;
     }
   | {
@@ -243,8 +247,9 @@ export type ChatItem =
       key: string;
       compaction?: "active" | "complete";
       compactionId?: string;
+      systemEvent?: "info";
       label: string;
-      icon?: keyof typeof toolIcons;
+      icon?: IconName;
       metric?: string;
       description?: string;
       timestamp: number;
@@ -278,6 +283,13 @@ export type ChatItem =
     }
   | { kind: "question"; key: string; questionId: string; startedAt: number };
 
+export type SystemEventItem = Extract<ChatItem, { kind: "notice" | "divider" }>;
+export type SystemEventGroup = {
+  kind: "system-event-group";
+  key: string;
+  events: SystemEventItem[];
+};
+
 export type ChatStreamSegment = {
   /** Input observed when live commentary first arrived; omitted for history replay. */
   afterUserSendId?: string;
@@ -290,11 +302,13 @@ export type ChatStreamSegment = {
   itemId?: string;
 };
 
-export function streamSegmentHasItemId(segment: { itemId?: unknown }): boolean {
-  return typeof segment.itemId === "string" && segment.itemId.trim().length > 0;
+export function streamSegmentHasItemId(segment: Pick<ChatStreamSegment, "itemId">): boolean {
+  return Boolean(segment.itemId?.trim());
 }
 
-export function streamSegmentUsesAccumulatedText(segment: { itemId?: unknown }): boolean {
+export function streamSegmentUsesAccumulatedText(
+  segment: Pick<ChatStreamSegment, "itemId">,
+): boolean {
   return !streamSegmentHasItemId(segment);
 }
 
@@ -379,6 +393,7 @@ export type MessageImageSource = {
 };
 
 export type MessageContentItem =
+  | import("../../../../src/shared/plugin-inline-view.js").PluginInlineViewBlock
   | ClawHubRecommendation
   | {
       type: "image";
@@ -478,6 +493,8 @@ export type ToolCard = {
   resultMessageId?: string;
   /** Gateway display projection omitted content; the durable result may still be complete. */
   outputTruncated?: boolean;
+  /** Bounded external preview; does not authorize full-message recovery. */
+  catalogTruncated?: boolean;
   toolOutput?: ToolOutputMetadata;
   /** Structured tool result details (e.g. the edit tool's precomputed diff). */
   details?: unknown;
@@ -509,3 +526,9 @@ export type ToolCardOutcome =
   | "blocked"
   | "skipped"
   | "unknown";
+
+export type ChatGoalMutationAction = { goalId: string } & (
+  | { action: ChatGoalAction }
+  | { action: "edit"; objective: string }
+  | { action: "replace"; objective: string; expectedRunId: string; expectedGoalUpdatedAt: number }
+);

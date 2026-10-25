@@ -33,6 +33,7 @@ import type { MemoryLimitParams } from "./lib/process-memory.mts";
 import { resolveRunNodeInputSignature } from "./lib/run-node-input-state.mts";
 import { preflightInstalledSourceArtifacts } from "./lib/source-update-artifact-preflight.mts";
 import { TSDOWN_PACKAGE_CONFIG_GROUP } from "./lib/tsdown-config-groups.mts";
+import { resolveTsdownDeclarationGeneratorInputs } from "./lib/tsdown-declaration-generator-inputs.mts";
 import {
   TSDOWN_PACKAGE_OUTPUT_ROOTS,
   tsdownPackageOutputRoot,
@@ -40,7 +41,6 @@ import {
 import {
   TSDOWN_MAX_OLD_SPACE_MB_ENV,
   TSDOWN_DECLARATION_EXTENSIONS,
-  TSDOWN_DECLARATION_TOOL_INPUTS,
   TSDOWN_PACKAGES_CACHE_INPUT,
   listTsdownOutputRoots,
   resolveTsdownBuildPlan,
@@ -82,7 +82,12 @@ const declarationStep = (
 ): BuildAllStep => ({
   ...tsxStep(label, "scripts/tsdown-build.mts", "--config", config, ...args),
   cache: {
-    inputs: [...TSDOWN_DECLARATION_TOOL_INPUTS, config, TSDOWN_PACKAGES_CACHE_INPUT],
+    inputs: (root) => [
+      ...resolveTsdownDeclarationGeneratorInputs(root, "scripts/tsdown-build.mts", config),
+      "scripts/build-all.mts",
+      "tsconfig.packages.json",
+      TSDOWN_PACKAGES_CACHE_INPUT,
+    ],
     outputs: roots.map((root) => ({ path: root, extensions: TSDOWN_DECLARATION_EXTENSIONS })),
     restore: "always",
     runOnHit: { env: { OPENCLAW_RUN_NODE_SKIP_DTS_BUILD: "1" } },
@@ -97,6 +102,12 @@ const pluginAssetStep = (phase: "build" | "copy") =>
     phase,
   ]);
 export const BUILD_ALL_STEPS: BuildAllStep[] = [
+  nodeStep("runtime:scripts:check", [
+    "--import",
+    "./scripts/tsx.mjs",
+    "scripts/generate-runtime-script-assets.mjs",
+    "--check",
+  ]),
   nodeStep("native-protocol", ["scripts/prepare-native-protocol.mjs"]),
   nodeStep("clean:dist", [
     "-e",
@@ -161,7 +172,9 @@ const RUNTIME_FINALIZE_STEP_LABELS = [
   "runtime-postbuild-stamp",
 ] as const;
 const RUNTIME_STEP_LABELS = [...RUNTIME_SETUP_STEP_LABELS, ...RUNTIME_FINALIZE_STEP_LABELS];
+const RUNTIME_SOURCE_CHECK_STEP_LABELS = ["runtime:scripts:check"];
 const ASSET_RUNTIME_STEP_LABELS = [
+  ...RUNTIME_SOURCE_CHECK_STEP_LABELS,
   "plugins:assets:build",
   "tsdown",
   ...RUNTIME_SETUP_STEP_LABELS,
@@ -214,10 +227,15 @@ const BUILD_ALL_PROFILES: Record<string, string[]> = {
     ...FULL_RUNTIME_STEP_LABELS.filter((step) => !step.startsWith("plugins:assets:")),
     "check-plugin-sdk-exports",
   ],
-  gatewayWatch: ["tsdown", ...RUNTIME_STEP_LABELS],
+  gatewayWatch: [...RUNTIME_SOURCE_CHECK_STEP_LABELS, "tsdown", ...RUNTIME_STEP_LABELS],
   qaRuntime: [...ASSET_RUNTIME_STEP_LABELS],
   sourcePerformance: [...ASSET_RUNTIME_STEP_LABELS, "write-build-info"],
-  cliStartup: ["tsdown", ...RUNTIME_STEP_LABELS, "write-cli-startup-metadata"],
+  cliStartup: [
+    ...RUNTIME_SOURCE_CHECK_STEP_LABELS,
+    "tsdown",
+    ...RUNTIME_STEP_LABELS,
+    "write-cli-startup-metadata",
+  ],
 };
 
 const FULL_BUILD_PROFILE_STEP_ENV = {
@@ -359,9 +377,7 @@ export function resolveBuildAllEnvironment(
     readGitCommit,
   });
   // Older installed updaters already send this marker to candidate builds.
-  // Updates need runtime artifacts; explicit declaration/package builds still win.
   if (buildEnv.OPENCLAW_UPDATE_IN_PROGRESS === "1") {
-    buildEnv[RUN_NODE_SKIP_DTS_BUILD_ENV] ??= "1";
     // Published updaters can still pass the serving checkout's source root.
     // Rebind before plugin asset hooks resolve SDK aliases in this candidate.
     buildEnv.OPENCLAW_DEV_SOURCE_ROOT = process.cwd();
@@ -568,12 +584,14 @@ export async function runBuildAllSteps(
         status: await runManagedCommand({
           bin: invocation.command,
           args:
-            script === "scripts/tsdown-build.mts" ||
-            script === "scripts/write-unified-entry-dts.ts" ||
-            script === "scripts/write-plugin-sdk-entry-dts.ts" ||
-            script === "scripts/runtime-postbuild.mts"
-              ? distArtifactEntryArgs(script, invocation.args.slice(3))
-              : invocation.args,
+            invocation.args[0] === "scripts/ui.js"
+              ? distArtifactEntryArgs("scripts/ui.js", invocation.args.slice(1), { native: true })
+              : script === "scripts/tsdown-build.mts" ||
+                  script === "scripts/write-unified-entry-dts.ts" ||
+                  script === "scripts/write-plugin-sdk-entry-dts.ts" ||
+                  script === "scripts/runtime-postbuild.mts"
+                ? distArtifactEntryArgs(script, invocation.args.slice(3))
+                : invocation.args,
           ...invocation.options,
           signal: params.signal,
           requireProcessTreeExit: process.platform !== "win32",

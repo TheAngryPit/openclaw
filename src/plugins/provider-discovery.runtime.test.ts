@@ -1,6 +1,7 @@
 /** Covers provider discovery runtime loading from plugin manifests and registries. */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PluginManifestRecord } from "./manifest-registry.js";
+import { createPluginManifestRecordFixture } from "./plugin-metadata.test-support.js";
 import {
   prepareSyntheticAuthWithProvider,
   resolveSyntheticAuthWithProvider,
@@ -47,102 +48,75 @@ vi.mock("./plugin-setup-module.js", () => ({
 import { resolvePluginDiscoveryProvidersRuntime } from "./provider-discovery.runtime.js";
 
 function createManifestPlugin(id: string): PluginManifestRecord {
-  return {
+  return createPluginManifestRecordFixture({
     id,
     enabledByDefault: true,
-    channels: [],
     providers: [id],
-    cliBackends: [],
-    skills: [],
-    hooks: [],
-    origin: "bundled",
-    rootDir: `/tmp/${id}`,
     source: "bundled",
+    rootDir: `/tmp/${id}`,
     manifestPath: `/tmp/${id}/openclaw.plugin.json`,
     providerDiscoverySource: `/tmp/${id}/provider-discovery.ts`,
-  };
+  });
 }
 
 function configureCapturedRuntimeManifest() {
   mocks.resolveDiscoveredProviderPluginIds.mockReturnValue(["fixture"]);
   const manifest = createManifestPlugin("fixture");
   manifest.modelCatalog = { discovery: { fixture: "runtime" } };
-  mocks.loadPluginMetadataSnapshot.mockReturnValue({
-    index: { plugins: [] },
-    manifestRegistry: { plugins: [manifest], diagnostics: [] },
-  });
+  mockManifestPlugins([manifest]);
+}
+
+type Catalog = NonNullable<PluginManifestRecord["modelCatalog"]>;
+type CatalogProvider = NonNullable<Catalog["providers"]>[string];
+type CatalogModel = CatalogProvider["models"][number];
+const catalogModel = (
+  id: string,
+  name: string,
+  contextWindow: number,
+  maxTokens: number,
+  fields: Partial<CatalogModel> = {},
+): CatalogModel => ({ id, name, input: ["text"], contextWindow, maxTokens, ...fields });
+const anthropicModel = () =>
+  catalogModel("claude-sonnet-4-6", "Claude Sonnet 4.6", 200000, 64000, { reasoning: true });
+function catalogManifest(
+  id: string,
+  providers: NonNullable<Catalog["providers"]>,
+  discovery: Catalog["discovery"],
+): PluginManifestRecord {
+  return {
+    ...createManifestPluginWithoutDiscovery({ id }),
+    modelCatalog: { providers, discovery },
+  };
 }
 
 function createManifestPluginWithModelCatalog(
   id: string,
   discovery: "static" | "refreshable" | "runtime" = "static",
 ): PluginManifestRecord {
-  return {
-    ...createManifestPluginWithoutDiscovery({ id }),
-    modelCatalog: {
-      providers: {
-        [id]: {
-          baseUrl: "https://catalog.example.test/v1",
-          api: "openai-responses",
-          models: [
-            {
-              id: "catalog-model",
-              name: "Catalog Model",
-              reasoning: true,
-              input: ["text"],
-              contextWindow: 128000,
-              maxTokens: 4096,
-              thinkingLevelMap: { off: null, minimal: "low", max: "max" },
-              cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0 },
-            },
-          ],
-        },
+  return catalogManifest(
+    id,
+    {
+      [id]: {
+        baseUrl: "https://catalog.example.test/v1",
+        api: "openai-responses",
+        models: [
+          catalogModel("catalog-model", "Catalog Model", 128000, 4096, {
+            reasoning: true,
+            thinkingLevelMap: { off: null, minimal: "low", max: "max" },
+            cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0 },
+          }),
+        ],
       },
-      discovery: { [id]: discovery },
     },
-  };
+    { [id]: discovery },
+  );
 }
 
-function createManifestPluginWithMixedCatalogDiscovery(): PluginManifestRecord {
+function manifestProvider(id: string): CatalogProvider {
   return {
-    ...createManifestPluginWithoutDiscovery({ id: "xiaomi" }),
-    providers: ["xiaomi", "xiaomi-token-plan"],
-    modelCatalog: {
-      providers: {
-        xiaomi: {
-          baseUrl: "https://api.xiaomimimo.com/v1",
-          api: "openai-completions",
-          models: [
-            {
-              id: "mimo-v2-flash",
-              name: "MiMo V2 Flash",
-              input: ["text"],
-              contextWindow: 262144,
-              maxTokens: 8192,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            },
-          ],
-        },
-        "xiaomi-token-plan": {
-          baseUrl: "https://token-plan-sgp.xiaomimimo.com/v1",
-          api: "openai-completions",
-          models: [
-            {
-              id: "mimo-v2.5-pro",
-              name: "MiMo V2.5 Pro",
-              input: ["text"],
-              contextWindow: 1048576,
-              maxTokens: 32000,
-              cost: { input: 1, output: 3, cacheRead: 0.2, cacheWrite: 0 },
-            },
-          ],
-        },
-      },
-      discovery: {
-        xiaomi: "static",
-        "xiaomi-token-plan": "runtime",
-      },
-    },
+    baseUrl: "https://catalog.example.test/v1",
+    api: "openai-completions",
+    models: [catalogModel(id, id, 128000, 4096)],
   };
 }
 
@@ -170,12 +144,7 @@ function createManifestPluginWithoutDiscovery(params: {
 
 function createProvider(params: { id: string; mode: "static" | "catalog" }): ProviderPlugin {
   const hook = {
-    run: async () => ({
-      provider: {
-        baseUrl: "https://example.test/v1",
-        models: [],
-      },
-    }),
+    run: async () => ({ provider: { baseUrl: "https://example.test/v1", models: [] } }),
   };
   return {
     id: params.id,
@@ -192,15 +161,9 @@ function mockManifestPlugins(plugins: PluginManifestRecord[]) {
   });
 }
 
-function requireResolvePluginProvidersParams(index = 0): {
-  onlyPluginIds?: string[];
-} {
-  const params = (
-    mocks.resolvePluginProvidersCore.mock.calls[index] as [unknown] | undefined
-  )?.[0] as
-    | {
-        onlyPluginIds?: string[];
-      }
+function requireResolvePluginProvidersParams(index = 0) {
+  const params = mocks.resolvePluginProvidersCore.mock.calls[index]?.[0] as
+    | { onlyPluginIds?: string[] }
     | undefined;
   if (!params) {
     throw new Error(`resolvePluginProvidersCore call ${index} missing`);
@@ -208,17 +171,9 @@ function requireResolvePluginProvidersParams(index = 0): {
   return params;
 }
 
-function requireDiscoveredProviderIdsParams(index = 0): {
-  registry?: unknown;
-  manifestRegistry?: unknown;
-} {
-  const params = (
-    mocks.resolveDiscoveredProviderPluginIds.mock.calls[index] as [unknown] | undefined
-  )?.[0] as
-    | {
-        registry?: unknown;
-        manifestRegistry?: unknown;
-      }
+function requireDiscoveredProviderIdsParams(index = 0) {
+  const params = mocks.resolveDiscoveredProviderPluginIds.mock.calls[index]?.[0] as
+    | { registry?: unknown; manifestRegistry?: unknown }
     | undefined;
   if (!params) {
     throw new Error(`resolveDiscoveredProviderPluginIds call ${index} missing`);
@@ -279,7 +234,17 @@ describe("resolvePluginDiscoveryProvidersRuntime", () => {
     mocks.resolveDiscoveredProviderPluginIds.mockReturnValue(["deepseek", "xiaomi"]);
     mockManifestPlugins([
       createManifestPlugin("deepseek"),
-      createManifestPluginWithMixedCatalogDiscovery(),
+      {
+        ...catalogManifest(
+          "xiaomi",
+          {
+            xiaomi: manifestProvider("mimo-v2-flash"),
+            "xiaomi-token-plan": manifestProvider("mimo-v2.5-pro"),
+          },
+          { xiaomi: "static", "xiaomi-token-plan": "runtime" },
+        ),
+        providers: ["xiaomi", "xiaomi-token-plan"],
+      },
     ]);
 
     const providers = resolvePluginDiscoveryProvidersRuntime({
@@ -379,11 +344,7 @@ describe("resolvePluginDiscoveryProvidersRuntime", () => {
       id: "claude-cli",
       label: "Claude CLI",
       auth: [],
-      resolveSyntheticAuth: () => ({
-        apiKey: "synthetic-token",
-        source: "test",
-        mode: "oauth",
-      }),
+      resolveSyntheticAuth: () => ({ apiKey: "synthetic-token", source: "test", mode: "oauth" }),
     };
     mocks.loadSource.mockReturnValue(syntheticProvider);
 
@@ -510,6 +471,55 @@ describe("resolvePluginDiscoveryProvidersRuntime", () => {
     },
   );
 
+  it.each(["agent", "plugin"] as const)(
+    "retains canonical %s credential scope in a configured static catalog descriptor",
+    (scope) => {
+      mocks.resolveDiscoveredProviderPluginIds.mockReturnValue(["fixture"]);
+      mockManifestPlugins([
+        catalogManifest(
+          "fixture",
+          {
+            fixture: {
+              authScope: scope,
+              baseUrl: "https://fixture.invalid/v1",
+              api: "openai-completions",
+              models: [catalogModel("configured", "Configured", 10000, 1000)],
+            },
+          },
+          { fixture: "static" },
+        ),
+      ]);
+      const providers = resolvePluginDiscoveryProvidersRuntime({
+        discoveryEntriesOnly: true,
+        config: {
+          models: {
+            providers: {
+              fixture: {
+                baseUrl: "https://fixture.invalid/v1",
+                api: "openai-completions",
+                models: [
+                  {
+                    id: "configured",
+                    name: "Configured",
+                    input: ["text"],
+                    contextWindow: 10000,
+                    maxTokens: 1000,
+                    reasoning: false,
+                    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      });
+      expect(providers).toHaveLength(1);
+      expect(providers[0]?.authScope).toBe(scope);
+      expect(providers[0]?.staticCatalog).toBeDefined();
+      expect(mocks.resolvePluginProvidersCore).not.toHaveBeenCalled();
+    },
+  );
+
   it("can omit manifest model catalogs from static discovery entries", () => {
     mocks.resolveDiscoveredProviderPluginIds.mockReturnValue(["openai"]);
     mockManifestPlugins([createManifestPluginWithModelCatalog("openai")]);
@@ -537,29 +547,17 @@ describe("resolvePluginDiscoveryProvidersRuntime", () => {
   ])("defaults only $name manifest model cost components", async ({ cost, expectedCost }) => {
     mocks.resolveDiscoveredProviderPluginIds.mockReturnValue(["anthropic"]);
     mockManifestPlugins([
-      {
-        ...createManifestPluginWithModelCatalog("anthropic"),
-        modelCatalog: {
-          providers: {
-            anthropic: {
-              baseUrl: "https://api.anthropic.com",
-              api: "anthropic-messages",
-              models: [
-                {
-                  id: "claude-sonnet-4-6",
-                  name: "Claude Sonnet 4.6",
-                  reasoning: true,
-                  input: ["text"],
-                  contextWindow: 200000,
-                  maxTokens: 64000,
-                  ...(cost ? { cost } : {}),
-                },
-              ],
-            },
+      catalogManifest(
+        "anthropic",
+        {
+          anthropic: {
+            baseUrl: "https://api.anthropic.com",
+            api: "anthropic-messages",
+            models: [{ ...anthropicModel(), ...(cost ? { cost } : {}) }],
           },
-          discovery: { anthropic: "static" },
         },
-      },
+        { anthropic: "static" },
+      ),
     ]);
 
     const providers = resolvePluginDiscoveryProvidersRuntime({ discoveryEntriesOnly: true });
@@ -574,12 +572,7 @@ describe("resolvePluginDiscoveryProvidersRuntime", () => {
     ).resolves.toEqual({
       providers: {
         anthropic: expect.objectContaining({
-          models: [
-            expect.objectContaining({
-              id: "claude-sonnet-4-6",
-              cost: expectedCost,
-            }),
-          ],
+          models: [expect.objectContaining({ id: "claude-sonnet-4-6", cost: expectedCost })],
         }),
       },
     });
@@ -588,40 +581,18 @@ describe("resolvePluginDiscoveryProvidersRuntime", () => {
   it("ignores manifest model catalogs that cannot form valid models.json providers", () => {
     mocks.resolveDiscoveredProviderPluginIds.mockReturnValue(["anthropic"]);
     mockManifestPlugins([
-      {
-        ...createManifestPluginWithModelCatalog("anthropic"),
-        modelCatalog: {
-          providers: {
-            "claude-cli": {
-              models: [
-                {
-                  id: "claude-sonnet-4-6",
-                  name: "Claude Sonnet 4.6",
-                  reasoning: true,
-                  input: ["text"],
-                  contextWindow: 200000,
-                  maxTokens: 64000,
-                },
-              ],
-            },
-            anthropic: {
-              baseUrl: "https://api.anthropic.com",
-              api: "anthropic-messages",
-              models: [
-                {
-                  id: "claude-sonnet-4-6",
-                  name: "Claude Sonnet 4.6",
-                  reasoning: true,
-                  input: ["text"],
-                  contextWindow: 200000,
-                  maxTokens: 64000,
-                },
-              ],
-            },
+      catalogManifest(
+        "anthropic",
+        {
+          "claude-cli": { models: [anthropicModel()] },
+          anthropic: {
+            baseUrl: "https://api.anthropic.com",
+            api: "anthropic-messages",
+            models: [anthropicModel()],
           },
-          discovery: { "claude-cli": "static", anthropic: "static" },
         },
-      },
+        { "claude-cli": "static", anthropic: "static" },
+      ),
     ]);
 
     const providers = resolvePluginDiscoveryProvidersRuntime({ discoveryEntriesOnly: true });

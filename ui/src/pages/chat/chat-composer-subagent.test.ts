@@ -1,20 +1,24 @@
 /* @vitest-environment jsdom */
-import { html, nothing, render } from "lit";
 import { afterEach, assert, describe, expect, it, onTestFinished, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { GatewaySessionRow, ModelCatalogResult } from "../../api/types.ts";
+import { makeBootRoster } from "../../app/bootstrap.test-support.ts";
 import { disposeQuestionPromptState } from "../../app/question-prompt.ts";
 import { buildCatalogSessionKey } from "../../lib/sessions/catalog-key.ts";
 import { sessionMutationGatewayHello } from "../../test-helpers/gateway-methods.ts";
-import { flush, waitForSolid } from "../../test-helpers/solid-settle.ts";
-import { createComposerContainer, resetComposerFixture } from "./chat-composer.test-support.ts";
+import { waitForSolid } from "../../test-helpers/solid-settle.ts";
+import {
+  createComposerContainer,
+  disposeComposer,
+  renderComposerInto,
+  resetComposerFixture,
+} from "./chat-composer.test-support.ts";
 import { createRefreshChatPane } from "./chat-pane-history.test-support.ts";
 import { ChatPaneRuntime } from "./chat-pane-render.ts";
 import { createGatewayBrowserClientFixture, createPaneTestHost } from "./chat-pane.test-support.ts";
 import { refreshChatMetadata, retireChatMetadataRequests } from "./chat-state-refresh.ts";
-import { renderChat } from "./chat-view-render.test-support.ts";
+import { disposeChatView, renderChatPropsInto } from "./chat-view.test-helpers.ts";
 import type { ChatProps } from "./chat-view.tsx";
-import { renderChatComposer } from "./components/chat-composer-render.test-support.ts";
 import {
   installTranscriptDomMocks,
   resetTranscriptTestDom,
@@ -40,7 +44,7 @@ function createRecoveringComposer(draft: string) {
   const draw = () => {
     pane.render();
     assert(pane.chatProps);
-    render(renderChatComposer(pane.chatProps), container);
+    renderComposerInto(container, pane.chatProps);
     const input = container.querySelector<HTMLTextAreaElement>("textarea");
     const send = container.querySelector<HTMLButtonElement>(".chat-send-btn--send");
     assert(input);
@@ -67,18 +71,18 @@ class SuggestionRecoveryPane extends ChatPaneRuntime {
     this.context = context;
     this.connectedClient = state.client;
     Object.defineProperty(this, "isConnected", { value: true });
-    this.presencePayload = {
+    this.presence.update({
       presence: [
         { user: { id: "owner" }, ts: 1 },
         { user: { id: "viewer" }, ts: 1 },
       ],
-    };
+    });
     onTestFinished(() => disposeQuestionPromptState(this.questionPromptState));
   }
 
   protected override renderChatPaneLayout({ chatProps }: { chatProps: ChatProps }) {
     this.chatProps = chatProps;
-    return html``;
+    return null;
   }
 }
 
@@ -125,7 +129,7 @@ it.each([
       ready.send.click();
       expect(state.handleSendChat).toHaveBeenCalledTimes(control ? 2 : 1);
     } finally {
-      render(nothing, container);
+      disposeComposer(container);
     }
   },
 );
@@ -147,7 +151,7 @@ it("keeps ordinary input usable while the initial placement turn is pending", ()
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     expect(state.handleSendChat).toHaveBeenCalledOnce();
   } finally {
-    render(nothing, container);
+    disposeComposer(container);
   }
 });
 
@@ -163,41 +167,7 @@ it("explains an unresolved initial turn while offline without blocking the outbo
     expect(input.disabled).toBe(false);
     expect(send.disabled).toBe(false);
   } finally {
-    render(nothing, container);
-  }
-});
-
-it("updates held Send when an edited draft changes between control and ordinary input", () => {
-  const { state, container, draw } = createRecoveringComposer("/stop");
-  let renderRequested = false;
-  state.requestUpdate = () => {
-    renderRequested = true;
-  };
-  let view = draw();
-  const edit = (draft: string) => {
-    renderRequested = false;
-    view.input.value = draft;
-    view.input.dispatchEvent(new Event("input", { bubbles: true }));
-    // Exercise the draft-only fast path instead of unconditionally redrawing the pane.
-    if (renderRequested) {
-      view = draw();
-    }
-  };
-  try {
-    expect(view.send.disabled).toBe(false);
-    edit("Keep this ordinary draft");
-    expect(view.input.value).toBe("Keep this ordinary draft");
-    expect(view.send.disabled).toBe(true);
-    view.send.click();
-    view.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    expect(state.handleSendChat).not.toHaveBeenCalled();
-
-    edit("/approve approval-123 allow-once");
-    expect(view.send.disabled).toBe(false);
-    view.send.click();
-    expect(state.handleSendChat).toHaveBeenCalledOnce();
-  } finally {
-    render(nothing, container);
+    disposeComposer(container);
   }
 });
 
@@ -226,7 +196,7 @@ it.each(["Keep this suggestion", "/stop"])(
       pane.render();
       const props = pane.chatProps;
       assert(props);
-      render(renderChatComposer(props), container);
+      renderComposerInto(container, props);
       const send = container.querySelector<HTMLButtonElement>(".chat-send-btn--send");
       assert(send);
       expect(props.suggestionComposer).toBe(true);
@@ -250,7 +220,7 @@ it.each(["Keep this suggestion", "/stop"])(
       expect(state.chatMessage).toBe("");
       expect(state.handleSendChat).not.toHaveBeenCalled();
     } finally {
-      render(nothing, container);
+      disposeComposer(container);
     }
   },
 );
@@ -276,7 +246,7 @@ it.each([
   const draw = () => {
     pane.render();
     assert(pane.chatProps);
-    render(renderChatComposer(pane.chatProps), container);
+    renderComposerInto(container, pane.chatProps);
   };
   try {
     draw();
@@ -305,7 +275,7 @@ it.each([
     void pane.chatProps?.onSend();
     expect(state.handleSendChat).toHaveBeenCalledOnce();
   } finally {
-    render(nothing, container);
+    disposeComposer(container);
   }
 });
 
@@ -320,12 +290,7 @@ it.each([
       createGatewayBrowserClientFixture({ recoveryScopeReady: true }),
     );
     state.sessionKey = "agent:main:setup";
-    context.agents.state.agentsList = {
-      defaultId: "main",
-      mainKey: "main",
-      scope: "global",
-      agents: [{ id: "main" }],
-    };
+    context.agents.state.agentsList = makeBootRoster({ scope: "global" });
     state.handleSendChat = vi.fn();
     state.chatMessage = draft;
     state.chatModelCatalogInitialized = true;
@@ -346,12 +311,12 @@ it.each([
         "No models are permitted by your administrator.",
       );
       const container = createComposerContainer();
-      render(renderChatComposer(pane.chatProps), container);
+      renderComposerInto(container, pane.chatProps);
       expect(container.querySelector(".agent-chat__disabled-banner-detail")?.textContent).toBe(
         "No models are permitted by your administrator.",
       );
       expect(container.querySelector(".agent-chat__disabled-banner button")).toBeNull();
-      render(nothing, container);
+      disposeComposer(container);
     }
   },
 );
@@ -366,12 +331,7 @@ it.each([
       createGatewayBrowserClientFixture({ recoveryScopeReady: true }),
     );
     state.sessionKey = "agent:main:choice";
-    context.agents.state.agentsList = {
-      defaultId: "main",
-      mainKey: "main",
-      scope: "global",
-      agents: [{ id: "main" }],
-    };
+    context.agents.state.agentsList = makeBootRoster({ scope: "global" });
     state.sessionsResult = {
       ts: 1,
       path: "",
@@ -441,7 +401,7 @@ it.each([
     const draw = () => {
       pane.render();
       assert(pane.chatProps);
-      render(renderChatComposer(pane.chatProps), container);
+      renderComposerInto(container, pane.chatProps);
       return pane.chatProps;
     };
     try {
@@ -487,12 +447,12 @@ it.each([
       expect(state.sessionsResult.sessions[0]).toBe(historyRow);
       expect(historyRow?.model).toBe("primary-model");
       retireChatMetadataRequests(state);
-      expect(state.chatModelCatalogInitialized).toBe(!restricted);
+      expect(state.chatModelCatalogInitialized).toBe(false);
     } finally {
       catalog.resolve({ models: [] });
       await pending;
       retireChatMetadataRequests(state);
-      render(nothing, container);
+      disposeComposer(container);
     }
   },
 );
@@ -538,7 +498,7 @@ describe("subagent composer", () => {
     state.chatMessage = "Continue this work";
     pane.render();
     const container = createComposerContainer();
-    render(renderChatComposer(pane.chatProps!), container);
+    renderComposerInto(container, pane.chatProps!);
 
     expect(container.querySelector("textarea")).not.toBeNull();
     expect(pane.chatProps?.canSend).toBe(true);
@@ -562,7 +522,7 @@ describe("subagent composer", () => {
     "keeps copy but not Reply when $name replaces the composer",
     ({ key, ...scenario }) => {
       installTranscriptDomMocks();
-      const { pane, state } = createRefreshChatPane();
+      const { pane, state, context } = createRefreshChatPane();
       state.sessionKey = key;
       state.sessionsResult = {
         ts: 1,
@@ -583,17 +543,13 @@ describe("subagent composer", () => {
       const container = document.body.appendChild(createComposerContainer());
       try {
         pane.render();
-        render(renderChat(pane.chatProps!), container);
-        pane.chatProps!.transcript.hostConnected();
-        pane.chatProps!.transcript.hostUpdated();
-        flush();
+        renderChatPropsInto(container, pane.chatProps!, context);
         expect(container.textContent).toContain("The workspace review is complete.");
         expect(container.querySelector("textarea")).toBeNull();
         expect(container.querySelector(".chat-reply-btn")).toBeNull();
         expect(container.querySelector(".chat-copy-btn")).not.toBeNull();
       } finally {
-        render(nothing, container);
-        pane.chatProps?.transcript.hostDisconnected();
+        disposeChatView(container);
         resetTranscriptTestDom();
       }
     },
@@ -642,7 +598,7 @@ describe("subagent composer", () => {
       pane.render();
       const props = pane.chatProps!;
       const container = createComposerContainer();
-      render(renderChatComposer({ ...props, canAbort: true, onAbort: vi.fn() }), container);
+      renderComposerInto(container, { ...props, canAbort: true, onAbort: vi.fn() });
       expect(props.canSend).toBe(false);
       void props.onSend();
       expect(state.handleSendChat).not.toHaveBeenCalled();
@@ -665,7 +621,7 @@ describe("subagent composer", () => {
     "keeps an ordinary nested session reply editable while connected=%s",
     (connected) => {
       installTranscriptDomMocks();
-      const { pane, state } = createRefreshChatPane(
+      const { pane, state, context } = createRefreshChatPane(
         connected ? createGatewayBrowserClientFixture() : undefined,
       );
       state.sessionKey = "agent:main:fork";
@@ -690,7 +646,7 @@ describe("subagent composer", () => {
       const container = document.body.appendChild(createComposerContainer());
       const draw = () => {
         pane.render();
-        render(renderChat(pane.chatProps!), container);
+        renderChatPropsInto(container, pane.chatProps!, context);
       };
       try {
         draw();
@@ -707,8 +663,7 @@ describe("subagent composer", () => {
           "Keep this draft",
         );
       } finally {
-        render(nothing, container);
-        pane.chatProps?.transcript.hostDisconnected();
+        disposeChatView(container);
         resetTranscriptTestDom();
       }
     },

@@ -203,22 +203,18 @@ function create(request: Extract<NativeWorkerRequest, { type: "create" }>): void
     send({ type: "error", id, error });
     stop(id, lifetime);
   };
-  try {
-    if (resourcePorts && descriptor) {
-      const resourcePort = resourcePorts.port1;
-      lifetime.resource = {
-        port: resourcePort,
-        owner: attachBrokerNativeResource(
-          descriptor.attachment,
-          resourcePort,
-          (response) => send({ type: "resource-message", id, response }),
-          fail,
-        ),
-      };
-    }
-  } catch (error) {
-    taskPort?.close();
-    throw error;
+  if (resourcePorts && descriptor) {
+    const resourcePort = resourcePorts.port1;
+    // Attachment failures, including a rejected endpoint, arrive through fail() after creation.
+    lifetime.resource = {
+      port: resourcePort,
+      owner: attachBrokerNativeResource(
+        descriptor.attachment,
+        resourcePort,
+        (response) => send({ type: "resource-message", id, response }),
+        fail,
+      ),
+    };
   }
   worker.on("message", (value: unknown) => {
     send({ type: "message", id, value }, transfers(value));
@@ -261,7 +257,8 @@ port.on("message", (message: NativeWorkerRequest) => {
     return;
   }
   if (message.type === "release") {
-    if (lifetime.joined) {
+    // The parent can also join an exited target with the broker's independent close receipt.
+    if (lifetime.joined || lifetime.nativeJoined) {
       lifetime.resource?.owner.dispose();
       workers.delete(message.id);
     }

@@ -2,6 +2,8 @@
 // stored agent auth profiles for reusable media tools.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
+import { withPluginMetadataSnapshotScope } from "../../plugins/current-plugin-metadata-snapshot.js";
+import { createPluginMetadataSnapshotFixture } from "../../plugins/plugin-metadata.test-support.js";
 import * as authSource from "../auth-profiles/source-check.js";
 import * as authStoreRuntime from "../auth-profiles/store-runtime.js";
 import type { AuthProfileCredential, AuthProfileStore } from "../auth-profiles/types.js";
@@ -41,6 +43,20 @@ vi.mock("../model-auth.js", async (importOriginal) => {
 
 const AGENT_DIR = "/tmp/openclaw-model-config-helper";
 const MODEL = "gpt-5.5";
+
+function hatcheryConfig(): OpenClawConfig {
+  return {
+    models: {
+      providers: {
+        hatchery: {
+          baseUrl: "https://example.com/v1",
+          apiKey: "sk-configured", // pragma: allowlist secret
+          models: [],
+        },
+      },
+    },
+  };
+}
 
 type Decision = ReturnType<typeof resolveOpenAiImageMediaCandidate>;
 type Profiles = AuthProfileStore["profiles"];
@@ -114,6 +130,29 @@ afterEach(() => {
 });
 
 describe("hasProviderAuthForTool", () => {
+  it("does not select direct or subscription agent credentials for plugin scope", () => {
+    const cfg: OpenClawConfig = {};
+    const metadata = createPluginMetadataSnapshotFixture({
+      plugins: [
+        {
+          id: "openai",
+          providers: ["openai"],
+          modelCatalog: { providers: { openai: { authScope: "plugin", models: [] } } },
+        },
+      ],
+    });
+    withPluginMetadataSnapshotScope(
+      metadata,
+      () => {
+        for (const credential of [apiKey("openai"), oauth("openai")]) {
+          const authStore = store({ "openai:profile": credential });
+          expect(hasProviderAuthForTool({ cfg, provider: "openai", authStore })).toBe(false);
+          expect(resolveMedia({ cfg, authStore })).toEqual({ kind: "drop" });
+        }
+      },
+      { config: cfg, trustConfigIdentity: true },
+    );
+  });
   it("keeps a prepared missing auth source unavailable without probing storage", () => {
     const probe = vi.spyOn(authSource, "hasAnyAuthProfileStoreSource").mockImplementation(() => {
       throw new Error("unexpected caller-thread auth source probe");
@@ -151,17 +190,7 @@ describe("hasProviderAuthForTool", () => {
   });
 
   it("accepts config-backed custom provider auth", () => {
-    const cfg = {
-      models: {
-        providers: {
-          hatchery: {
-            baseUrl: "https://example.com/v1",
-            apiKey: "sk-configured", // pragma: allowlist secret
-            models: [],
-          },
-        },
-      },
-    } as OpenClawConfig;
+    const cfg = hatcheryConfig();
 
     expect(hasProviderAuthForTool({ provider: "hatchery", cfg })).toBe(true);
   });
@@ -204,17 +233,7 @@ describe("hasProviderAuthForTool", () => {
     // Regression: hasProviderAuthForTool used to call the runtime availability
     // check without the auth store, so inline provider keys in billing cooldown
     // were still advertised as usable tool auth.
-    const cfg = {
-      models: {
-        providers: {
-          hatchery: {
-            baseUrl: "https://example.com/v1",
-            apiKey: "sk-configured", // pragma: allowlist secret
-            models: [],
-          },
-        },
-      },
-    } as OpenClawConfig;
+    const cfg = hatcheryConfig();
     const cooldownStats = (disabledUntil: number) => ({
       "inline-api-key:hatchery": { disabledUntil, disabledReason: "billing" as const },
     });

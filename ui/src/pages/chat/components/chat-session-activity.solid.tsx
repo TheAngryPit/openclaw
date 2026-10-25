@@ -2,23 +2,24 @@ import type { JSX } from "@solidjs/web";
 import { For, Show, type Accessor } from "solid-js";
 import { Icon } from "../../../components/solid/icon.tsx";
 import type { MessageGroup } from "../../../lib/chat/chat-types.ts";
-import { LitContent } from "../../../lit/solid-content.tsx";
 import { rawMessageTimestamp } from "../chat-thread-items.ts";
 import { ForwardedAttribution } from "./chat-forwarded-attribution.tsx";
 import type { RenderMessageGroupOptions } from "./chat-message-group-options.ts";
-import { renderChatTimestamp } from "./chat-message-timestamp.ts";
+import { ChatTimestamp } from "./chat-message-timestamp-view.tsx";
 import "./chat-session-activity.css";
 
-type ChatSessionActivityProps = {
+export function ChatSessionActivity(props: {
   group: MessageGroup;
   options: RenderMessageGroupOptions;
   renderEntry: (
     item: Accessor<MessageGroup["messages"][number]>,
     index: Accessor<number>,
-  ) => { content: JSX.Element; actions: JSX.Element };
-};
-
-export function ChatSessionActivity(props: ChatSessionActivityProps) {
+  ) => {
+    content: JSX.Element;
+    actions: JSX.Element;
+    actionsRef?: (element: HTMLDivElement) => void;
+  };
+}) {
   const disclosureId = () => "session-activity:" + props.group.key;
   const expanded = () =>
     Boolean(props.options.searchResult) ||
@@ -85,12 +86,11 @@ export function ChatSessionActivity(props: ChatSessionActivityProps) {
                     <div class="chat-session-activity__message">
                       {entry.content}
                       <div class="chat-session-activity__meta">
-                        <LitContent
-                          value={renderChatTimestamp(
-                            rawMessageTimestamp(item().message) ?? props.group.timestamp,
-                          )}
+                        <ChatTimestamp
+                          timestamp={rawMessageTimestamp(item().message) ?? props.group.timestamp}
                         />
                         <div
+                          ref={(element) => entry.actionsRef?.(element)}
                           class="chat-group-footer-actions"
                           data-message-actions-for={item().key}
                         >

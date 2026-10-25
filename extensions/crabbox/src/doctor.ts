@@ -10,10 +10,13 @@ import {
 import { findCrabboxBinary } from "./crabbox-binary.js";
 import * as managedBinary from "./crabbox-managed-binary.js";
 import { CRABBOX_WORKER_PROVIDER_ID, parseCrabboxSetupSecrets } from "./crabbox-worker-profile.js";
-import { WARM_IMAGE_MAX_ENTRIES } from "./crabbox-worker-warm-image-records.js";
 import {
   crabboxWarmImageRecoveryHint,
   CRABBOX_WARM_IMAGE_WAIT_HINT,
+  WARM_IMAGE_MAX_ENTRIES,
+} from "./crabbox-worker-warm-image-records.js";
+import {
+  admitCrabboxWarmImageProfile,
   projectCrabboxWarmImage,
   type WarmProfileRecord,
 } from "./crabbox-worker-warm-image-store.js";
@@ -293,7 +296,7 @@ export function registerCrabboxWorkerProviderDoctorChecks(
           ...(ctx.env ? { env: ctx.env } : {}),
         });
         for (const { key, value } of entries) {
-          const image = projectCrabboxWarmImage(key, value);
+          const image = projectCrabboxWarmImage(key, admitCrabboxWarmImageProfile(value)!);
           const facts = [
             image.profileId,
             image.backend,
@@ -328,7 +331,7 @@ export function registerCrabboxWorkerProviderDoctorChecks(
                   ? `Warm-image capture ${image.capture.selector}${display} is taking longer than usual.`
                   : `Warm-image capture ${image.capture.selector}${display} is in progress.`,
               fixHint: uncertain
-                ? crabboxWarmImageRecoveryHint(image.capture.selector)
+                ? crabboxWarmImageRecoveryHint(image.capture.selector, image.capture.checkpointIds)
                 : CRABBOX_WARM_IMAGE_WAIT_HINT,
             });
           }

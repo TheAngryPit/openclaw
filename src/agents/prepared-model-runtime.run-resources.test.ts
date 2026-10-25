@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { expectDefined } from "@openclaw/normalization-core";
 import { expect, it, vi } from "vitest";
+import { awaitGateBeforeSettlement } from "../../test/helpers/promise.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { PluginStateKeyedStore } from "../plugin-state/plugin-state-store.js";
 import {
@@ -43,36 +44,52 @@ import {
 } from "./prepared-model-runtime.js";
 import { closePreparedModelRuntimeSnapshots } from "./prepared-model-runtime.lifecycle.js";
 import { resetPreparedModelRuntimeSnapshotsForTest } from "./prepared-model-runtime.test-support.js";
+import { completionModelDefinition } from "./simple-completion.test-support.js";
 
 const providerId = "run-owner-provider";
 const siblingId = "run-owner-sibling";
+const model = completionModelDefinition({ id: "model", name: "Fixture model" });
+const providerCatalog = {
+  api: "openai-completions" as const,
+  baseUrl: "https://fixture.invalid/v1",
+  models: [{ id: model.id, name: model.name, input: model.input }],
+};
 
 type Registration = {
   id: string;
-  mode: string;
   database: DatabaseSync;
   file: string;
   disposals: number;
   store: PluginStateKeyedStore<{ value: number }>;
   instance: PluginInstanceHandle;
 };
+type RunInput = Parameters<typeof acquireAgentRunPreparedModelRuntime>[0];
+type RunOptions = Parameters<typeof acquireAgentRunPreparedModelRuntime>[1];
+type Gate = ReturnType<typeof createDeferredCore<void>>;
+
+function registration(records: Registration[], id = providerId, previous?: Registration) {
+  return expectDefined(
+    records.find((record) => record.id === id && record !== previous),
+    `${id} registration`,
+  );
+}
 
 async function withRunFixture(
   run: (fixture: {
     config: OpenClawConfig;
-    input: Parameters<typeof acquireAgentRunPreparedModelRuntime>[0];
+    input: RunInput;
     registrations: Registration[];
     acquire: (
-      options?: Parameters<typeof acquireAgentRunPreparedModelRuntime>[1],
+      options?: RunOptions,
       workspace?: string,
-      inputPatch?: Partial<Parameters<typeof acquireAgentRunPreparedModelRuntime>[0]>,
+      inputPatch?: Partial<RunInput>,
     ) => Promise<PreparedModelRuntimeLease>;
     original: () => Registration;
-    finishDisposal: ReturnType<typeof createDeferredCore<void>>;
-    disposalStarted: ReturnType<typeof createDeferredCore<void>>;
+    finishDisposal: Gate;
+    disposalStarted: Gate;
     holdDisposal: () => void;
-    catalogStarted: ReturnType<typeof createDeferredCore<void>>;
-    finishCatalog: ReturnType<typeof createDeferredCore<void>>;
+    catalogStarted: Gate;
+    finishCatalog: Gate;
   }) => Promise<void>,
   options: {
     catalog?: "hold" | "reject";
@@ -118,23 +135,12 @@ async function withRunFixture(
           channels: [],
           channelConfigs: {},
           providerAuthChoices: [],
-          ...(options.catalog && id === providerId
-            ? { providerCatalogEntry: "./catalog.cjs" }
-            : {}),
-          ...(!options.catalog
-            ? {
-                modelCatalog: {
-                  providers: {
-                    [id]: {
-                      discovery: "static",
-                      api: "openai-completions",
-                      baseUrl: "https://fixture.invalid/v1",
-                      models: [{ id: "model", name: "Fixture model", input: ["text"] }],
-                    },
-                  },
-                },
-              }
-            : {}),
+          providerCatalogEntry: options.catalog && id === providerId ? "./catalog.cjs" : undefined,
+          modelCatalog: options.catalog
+            ? undefined
+            : {
+                providers: { [id]: { discovery: "static", ...providerCatalog } },
+              },
         },
       });
       fs.writeFileSync(
@@ -147,7 +153,7 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
   const database = new DatabaseSync(file);
   database.exec("CREATE TABLE answer(value INTEGER); INSERT INTO answer VALUES (42)");
   const store = api.runtime.state.openKeyedStore({ namespace: "run-proof", maxEntries: 20 });
-  const record = { id: api.id, mode: api.registrationMode, database, file, disposals: 0, store, instance: bridge.captureInstance() };
+  const record = { id: api.id, database, file, disposals: 0, store, instance: bridge.captureInstance() };
   bridge.registrations.push(record);
   api.lifecycle.registerRuntimeLifecycle({ id: "database", async dispose() {
     if (bridge.hold && record === bridge.registrations[0]) {
@@ -164,7 +170,7 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
       await bridge.finishCatalog.promise;
       if (database.prepare("SELECT value FROM answer").get().value !== 42) throw new Error("catalog lost registration state");
       if (bridge.catalog === "reject") throw new Error("fixture static catalog failed");
-      return { provider: { api: "openai-completions", baseUrl: "https://fixture.invalid/v1", models: [{ id: "model", name: "Fixture model", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 8192, maxTokens: 1024 }] } };
+      return { provider: { api: "openai-completions", baseUrl: "https://fixture.invalid/v1", models: [${JSON.stringify(model)}] } };
     } } } : {})
   };
   bridge.providers[api.id] = provider;
@@ -189,23 +195,9 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
           [providerId, siblingId].map((id) => [
             id,
             {
-              api: "openai-completions" as const,
+              ...providerCatalog,
               apiKey: "synthetic-run-key",
-              baseUrl: "https://fixture.invalid/v1",
-              models:
-                options.catalog && id === providerId
-                  ? []
-                  : [
-                      {
-                        id: "model",
-                        name: "Fixture model",
-                        reasoning: false,
-                        input: ["text" as const],
-                        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-                        contextWindow: 8192,
-                        maxTokens: 1024,
-                      },
-                    ],
+              models: options.catalog && id === providerId ? [] : [structuredClone(model)],
             },
           ]),
         ),
@@ -246,11 +238,7 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
               leases.push(lease);
               return lease;
             },
-            original: () =>
-              expectDefined(
-                registrations.find((record) => record.id === providerId),
-                "selected provider registration",
-              ),
+            original: () => registration(registrations),
             finishDisposal,
             disposalStarted,
             catalogStarted,
@@ -287,6 +275,10 @@ function readAnswer(record: Registration): unknown {
   return record.database.prepare("SELECT value FROM answer").get()?.value;
 }
 
+function expectRetained(record: Registration) {
+  expect([readAnswer(record), record.disposals]).toEqual([42, 0]);
+}
+
 function expectReopened(record: Registration) {
   const reopened = new DatabaseSync(record.file, { readOnly: true });
   try {
@@ -294,6 +286,11 @@ function expectReopened(record: Registration) {
   } finally {
     reopened.close();
   }
+}
+
+function expectDisposed(record: Registration) {
+  expect(record.disposals).toBe(1);
+  expectReopened(record);
 }
 
 it("retains a replaced RUN generation without letting its release retire the replacement", async () => {
@@ -307,20 +304,15 @@ it("retains a replaced RUN generation without letting its release retire the rep
     });
     const second = await acquire();
     expect(first.snapshot === second.snapshot).toBe(false);
-    const replacement = expectDefined(
-      registrations.find((record) => record.id === providerId && record !== old),
-      "replacement registration",
-    );
-    expect(readAnswer(old)).toBe(42);
-    expect(old.disposals).toBe(0);
+    const replacement = registration(registrations, providerId, old);
+    expectRetained(old);
     await first[Symbol.asyncDispose]();
     await expect.poll(() => old.disposals).toBe(1);
     expect(readAnswer(replacement)).toBe(42);
     const third = await acquire();
     expect(third.snapshot === second.snapshot).toBe(true);
     await second[Symbol.asyncDispose]();
-    expect(readAnswer(replacement)).toBe(42);
-    expect(replacement.disposals).toBe(0);
+    expectRetained(replacement);
     await third[Symbol.asyncDispose]();
     await expect.poll(() => replacement.disposals).toBe(1);
   });
@@ -330,10 +322,7 @@ it("keeps shared SDK KV namespaces available across RUN registration retirement"
   await withRunFixture(async ({ acquire, original, registrations }) => {
     const first = await acquire();
     const old = original();
-    const sibling = expectDefined(
-      registrations.find((record) => record.id === siblingId),
-      "sibling plugin registration",
-    );
+    const sibling = registration(registrations, siblingId);
     await old.store.register("answer", { value: 42 });
     await sibling.store.register("answer", { value: 84 });
     const shared = openOpenClawStateDatabase().db;
@@ -341,10 +330,7 @@ it("keeps shared SDK KV namespaces available across RUN registration retirement"
     await expect.poll(() => old.disposals).toBe(1);
     expect(shared.isOpen).toBe(true);
     const next = await acquire();
-    const latest = expectDefined(
-      registrations.find((record) => record.id === providerId && record !== old),
-      "next SDK state user",
-    );
+    const latest = registration(registrations, providerId, old);
     expect((await latest.store.lookup("answer"))?.value).toBe(42);
     expect((await sibling.store.lookup("answer"))?.value).toBe(84);
     expect(openOpenClawStateDatabase().db === shared).toBe(true);
@@ -372,12 +358,11 @@ it("process close waits for admitted registration disposal and rejects new RUN a
       try {
         await expect.poll(() => original().database.isOpen && !closed).toBe(true);
         await expect(acquire().then(() => undefined)).rejects.toThrow("process lifetime closed");
-        await Promise.race([
+        await awaitGateBeforeSettlement(
           disposalStarted.promise,
-          closing.then(() => {
-            throw new Error("Process close finished before registration disposal");
-          }),
-        ]);
+          closing,
+          "Process close finished before registration disposal",
+        );
         expect(readAnswer(original())).toBe(42);
         expect(closed).toBe(false);
         expect(original().instance.retainedWorkCount).toBeGreaterThan(0);
@@ -385,9 +370,8 @@ it("process close waits for admitted registration disposal and rejects new RUN a
         finishDisposal.resolve();
         await Promise.all([closing, leaseReleased]);
       }
-      expect(original().disposals).toBe(1);
+      expectDisposed(original());
       expect(original().instance.retainedWorkCount).toBe(0);
-      expectReopened(original());
     },
   );
 });
@@ -418,15 +402,13 @@ it("publishes a replacement while an idle RUN registration is still disposing", 
         await nextTurn();
         expect.soft(published).toBe(true);
         expect.soft(readConfig).toBe(config);
-        expect(readAnswer(original())).toBe(42);
-        expect(original().disposals).toBe(0);
+        expectRetained(original());
       } finally {
         finishDisposal.resolve();
         await Promise.all([publication, reader]);
       }
       await closePreparedModelRuntimeSnapshots();
-      expect(original().disposals).toBe(1);
-      expectReopened(original());
+      expectDisposed(original());
     },
   );
 });
@@ -440,16 +422,12 @@ it("preserves eight Gateway RUN retention entries without closing an evicted liv
     const configuredCount = registrations.length;
     const uncovered = { loadRuntimePlugins: true } as const;
     const first = await acquire({}, `${input.workspaceDir}/run-0`, uncovered);
-    const oldest = expectDefined(
-      registrations.slice(configuredCount).find((record) => record.id === providerId),
-      "first dynamic registration",
-    );
+    const oldest = registration(registrations.slice(configuredCount));
     for (let index = 1; index < 9; index++) {
       const lease = await acquire({}, `${input.workspaceDir}/run-${index}`, uncovered);
       await lease[Symbol.asyncDispose]();
     }
-    expect(readAnswer(oldest)).toBe(42);
-    expect(oldest.disposals).toBe(0);
+    expectRetained(oldest);
     await first[Symbol.asyncDispose]();
     await expect.poll(() => oldest.disposals).toBe(1);
     expect(
@@ -476,12 +454,11 @@ it.each(["hold", "reject"] as const)(
         const pending = acquire({ abortSignal: abort.signal });
         void pending.catch(() => undefined);
         try {
-          await Promise.race([
+          await awaitGateBeforeSettlement(
             catalogStarted.promise,
-            pending.then(() => {
-              throw new Error("Catalog hook was not entered");
-            }),
-          ]);
+            pending,
+            "Catalog hook was not entered",
+          );
           expect(readAnswer(original())).toBe(42);
           expect(original().instance.retainedWorkCount).toBeGreaterThan(0);
           if (catalog === "hold") {
@@ -498,9 +475,8 @@ it.each(["hold", "reject"] as const)(
             );
           }
           await closePreparedModelRuntimeSnapshots();
-          expect(original().disposals).toBe(1);
+          expectDisposed(original());
           expect(original().instance.retainedWorkCount).toBe(0);
-          expectReopened(original());
         } finally {
           finishCatalog.resolve();
           await Promise.allSettled([pending]);
@@ -530,12 +506,11 @@ it("joins registered plugin disposal after cache retirement during catalog acqui
       let closed = false;
       let closing: Promise<unknown> | undefined;
       try {
-        await Promise.race([
+        await awaitGateBeforeSettlement(
           catalogStarted.promise,
-          pending.then(() => {
-            throw new Error("Catalog acquisition bypassed the registered provider");
-          }),
-        ]);
+          pending,
+          "Catalog acquisition bypassed the registered provider",
+        );
         const cache = getPluginCache();
         resetPluginCache();
         expect(getPluginCacheRetirementSignal(cache).aborted).toBe(true);
@@ -550,27 +525,23 @@ it("joins registered plugin disposal after cache retirement during catalog acqui
         });
         await nextTurn();
         expect(closed).toBe(false);
-        expect(original().disposals).toBe(0);
-        expect(readAnswer(original())).toBe(42);
+        expectRetained(original());
         finishCatalog.resolve();
-        await Promise.race([
+        await awaitGateBeforeSettlement(
           disposalStarted.promise,
-          closing.then(() => {
-            throw new Error("Retirement bypassed the registered plugin disposer");
-          }),
-        ]);
+          closing,
+          "Retirement bypassed the registered plugin disposer",
+        );
         await nextTurn();
         await metadataRetired.promise;
         expect(closed).toBe(false);
-        expect(original().disposals).toBe(0);
-        expect(readAnswer(original())).toBe(42);
+        expectRetained(original());
         finishDisposal.resolve();
         await closing;
         expect((await acquisition)[0]?.status).toBe("rejected");
         expect(getPreparedModelRuntimeSnapshot(input)).toBeUndefined();
-        expect(original().disposals).toBe(1);
+        expectDisposed(original());
         expect(original().database.isOpen).toBe(false);
-        expectReopened(original());
       } finally {
         finishCatalog.resolve();
         finishDisposal.resolve();
@@ -591,8 +562,7 @@ it("retains a managed RUN source borrowed after matching standalone publication 
     const borrowed = await acquirePublishedPreparedModelRuntime(input);
     try {
       await first[Symbol.asyncDispose]();
-      expect(readAnswer(original())).toBe(42);
-      expect(original().disposals).toBe(0);
+      expectRetained(original());
     } finally {
       await borrowed[Symbol.asyncDispose]();
     }
