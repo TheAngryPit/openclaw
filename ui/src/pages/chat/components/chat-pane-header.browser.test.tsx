@@ -3,6 +3,7 @@ import { installTitleTooltips } from "../../../components/tooltip-title.ts";
 import { i18n, t } from "../../../i18n/index.ts";
 import { KEYBOARD_SHORTCUT_COMBOS } from "../../../lib/keyboard-shortcut-contract.ts";
 import { mountSolid } from "../../../test-helpers/mount-solid.ts";
+import { createSidebarRegionCallbackMocks } from "../../../test-helpers/sidebar-region-callbacks.ts";
 import { flush, waitForSolid } from "../../../test-helpers/solid-settle.ts";
 import "../../../styles.css";
 import "../../../styles/chat/startup-layout.css";
@@ -87,12 +88,10 @@ describe.skipIf(typeof HTMLElement.prototype.checkVisibility !== "function")(
         sessionMenuAction: chatPaneHeaderSessionMenu(),
       });
       const header = container.querySelector<HTMLElement>(".chat-pane__header")!;
-      const trigger = container.querySelector<HTMLButtonElement>(
-        ".chat-pane__agent-identity > button",
-      )!;
+      const trigger = container.querySelector<HTMLButtonElement>(".chat-pane__agent-identity")!;
       const name = container.querySelector<HTMLElement>(".chat-pane__agent-name")!;
       const actions = container.querySelector<HTMLElement>(".chat-pane__header-trailing")!;
-      const settings = container.querySelector<HTMLButtonElement>(".chat-pane__agent-settings")!;
+      const settings = container.querySelector<HTMLElement>(".chat-pane__agent-settings")!;
       expect(trigger.checkVisibility()).toBe(true);
       expect(name.getBoundingClientRect().width).toBeGreaterThan(40);
       const headerCenter = header.getBoundingClientRect().left + header.clientWidth / 2;
@@ -103,11 +102,12 @@ describe.skipIf(typeof HTMLElement.prototype.checkVisibility !== "function")(
         actions.getBoundingClientRect().left,
       );
       expect(header.scrollWidth).toBeLessThanOrEqual(header.clientWidth);
-      // Idle pill is only avatar and name; settings is collapsed inside it and
-      // has no title tooltip.
-      const pill = container.querySelector<HTMLElement>(".chat-pane__agent-identity")!;
-      expect(trigger.querySelector(":scope > svg")).toBeNull();
-      expect(settings.hasAttribute("title")).toBe(false);
+      // Idle pill is only avatar and name; the settings glyph is collapsed inside it.
+      const pill = trigger;
+      expect(trigger.getAttribute("aria-label")).toBe(
+        t("agentChip.namedSettings", { name: props.agent!.name }),
+      );
+      expect(trigger.hasAttribute("title")).toBe(false);
       expect(getComputedStyle(settings).opacity).toBe("0");
       expect(settings.getBoundingClientRect().width).toBe(0);
       const idlePill = pill.getBoundingClientRect();
@@ -123,23 +123,17 @@ describe.skipIf(typeof HTMLElement.prototype.checkVisibility !== "function")(
       expect(hoverPill.left).toBeCloseTo(idlePill.left, 0);
       expect(trigger.getBoundingClientRect().left).toBeCloseTo(idleTriggerLeft, 0);
       expect(hoverSettings.width).toBe(28);
-      expect(hoverSettings.left).toBeGreaterThanOrEqual(
-        trigger.getBoundingClientRect().right - 0.5,
-      );
+      expect(hoverSettings.left).toBeGreaterThanOrEqual(name.getBoundingClientRect().right - 0.5);
       expect(hoverSettings.right).toBeLessThanOrEqual(hoverPill.right);
       expect(hoverPill.right).toBeLessThanOrEqual(actions.getBoundingClientRect().left);
+      // The pill opens agent settings directly; no session context popover.
+      await userEvent.click(trigger);
+      expect(props.onOpenAgentSettings).toHaveBeenCalledWith("research");
+      expect(document.querySelector(":popover-open")).toBeNull();
+      expect(container.querySelector(".chat-pane__crumbs")).toBeNull();
       trigger.focus();
       await userEvent.keyboard("{Enter}");
-      const context = container.querySelector<HTMLElement>(".chat-pane__agent-context")!;
-      await expect.poll(() => context.matches(":popover-open")).toBe(true);
-      expect(context.textContent).toContain("Session title");
-      expect(context.getBoundingClientRect().left).toBeGreaterThanOrEqual(0);
-      expect(context.getBoundingClientRect().right).toBeLessThanOrEqual(width);
-      await userEvent.keyboard("{Escape}");
-      await expect.poll(() => context.matches(":popover-open")).toBe(false);
-      expect(document.activeElement).toBe(trigger);
-      settings.click();
-      expect(props.onOpenAgentSettings).toHaveBeenCalledWith("research");
+      expect(props.onOpenAgentSettings).toHaveBeenCalledTimes(2);
     });
 
     it.each([
@@ -228,16 +222,7 @@ describe.skipIf(typeof HTMLElement.prototype.checkVisibility !== "function")(
         <DesktopFrameControls
           layout={openSlot({ columns: [] }, "subagents")}
           panelDefinitions={sidebarPanelDefinitions()}
-          callbacks={{
-            activatePanel: vi.fn(),
-            togglePanelExpanded,
-            setDock,
-            closeSlot: vi.fn(),
-            openSlot: vi.fn(),
-            reorderPanel: vi.fn(),
-            resizePanel: vi.fn(),
-            setOpen: vi.fn(),
-          }}
+          callbacks={createSidebarRegionCallbackMocks({ togglePanelExpanded, setDock })}
           onCloseAll={() => Promise.resolve()}
           closing={false}
           closable={false}
@@ -590,6 +575,7 @@ describe.skipIf(typeof HTMLElement.prototype.checkVisibility !== "function")(
           const layout = container.querySelector<HTMLButtonElement>(
             ".chat-header-session-menu__trigger",
           )!;
+          const closePane = container.querySelector<HTMLButtonElement>(".chat-pane__close")!;
           for (const width of [320, 693]) {
             container.style.width = `${width}px`;
             expect(trigger.checkVisibility()).toBe(true);
@@ -601,14 +587,18 @@ describe.skipIf(typeof HTMLElement.prototype.checkVisibility !== "function")(
             expect(branchBounds.right).toBeLessThanOrEqual(bounds.right);
             expect(closeBounds.right).toBeLessThanOrEqual(bounds.right);
             expect(header.scrollWidth).toBeLessThanOrEqual(header.clientWidth);
+            const closePaneBounds = closePane.getBoundingClientRect();
+            expect(closePane.checkVisibility()).toBe(true);
+            expect(closePaneBounds.width).toBe(32);
+            expect(closePaneBounds.height).toBe(32);
+            expect(closePaneBounds.left).toBeGreaterThanOrEqual(branchBounds.right);
+            expect(closePaneBounds.right).toBeLessThanOrEqual(bounds.right);
             vi.mocked(props.onBranchSelect).mockClear();
             await page.elementLocator(trigger).click();
             await page.getByRole("menuitem", { name: /Earlier idea/ }).click();
             expect(props.onBranchSelect).toHaveBeenCalledExactlyOnceWith("other");
           }
-          await page.elementLocator(layout).click();
-          await page.getByRole("menuitem", { name: "View", exact: true }).click();
-          await page.getByRole("menuitem", { name: "Close pane", exact: true }).click();
+          await page.elementLocator(closePane).click();
           expect(props.onClosePane).toHaveBeenCalledExactlyOnceWith("pane-1");
         }
       },

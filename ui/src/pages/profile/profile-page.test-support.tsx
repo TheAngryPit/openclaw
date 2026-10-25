@@ -6,6 +6,7 @@ import type {
 import { createAgentSelectionCapability } from "../../app/agent-selection.ts";
 import type { ApplicationContext, ApplicationGatewaySnapshot } from "../../app/context.ts";
 import type { AuthenticatedUser } from "../../app/user-profile.ts";
+import { createApplicationGatewaySnapshot } from "../../test-helpers/application-context-fixtures.ts";
 import {
   createTestGatewayClient,
   type GatewayRequestHandler,
@@ -18,21 +19,23 @@ export function createConnectedContext(
   request: GatewayRequestHandler,
   selfUser: AuthenticatedUser | null = null,
 ) {
-  let snapshot: ApplicationGatewaySnapshot = {
+  let snapshot: ApplicationGatewaySnapshot = createApplicationGatewaySnapshot({
     client: createTestGatewayClient(request),
     phase: "connected",
-    offlineStable: false,
-    canvasPluginSurfaceUrl: null,
-    hello: null,
     assistantAgentId: "main",
     sessionKey: "agent:main:main",
-    lastError: null,
-    lastErrorCode: null,
     selfUser,
-  };
+  });
   const listeners = new Set<(next: ApplicationGatewaySnapshot) => void>();
+  const routeListeners = new Set<() => void>();
   const subscribe = () => () => undefined;
   const baseContext = {
+    router: {
+      subscribe(listener: () => void) {
+        routeListeners.add(listener);
+        return () => routeListeners.delete(listener);
+      },
+    },
     runtimeConfig: { subscribe, state: {}, ensureLoaded: async () => undefined },
     gateway: {
       connect: vi.fn(),
@@ -103,6 +106,11 @@ export function createConnectedContext(
   };
   return {
     context,
+    emitNavigation() {
+      for (const listener of routeListeners) {
+        listener();
+      }
+    },
     emitSnapshot(next: Partial<ApplicationGatewaySnapshot>) {
       snapshot = { ...snapshot, ...next };
       for (const listener of listeners) {

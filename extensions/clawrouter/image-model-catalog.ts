@@ -13,12 +13,13 @@ import {
   resolveProviderHttpRequestConfigWithOriginTrust,
   sanitizeConfiguredModelProviderRequest,
 } from "openclaw/plugin-sdk/provider-http";
+import { omitNullRequestHeaders } from "openclaw/plugin-sdk/provider-request-headers";
 import { mergeSsrFPolicies } from "openclaw/plugin-sdk/ssrf-runtime";
 import {
   asOptionalRecord,
   normalizeOptionalString,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { normalizeClawRouterApiBaseUrl } from "./provider-catalog.js";
+import { normalizeClawRouterApiBaseUrl } from "./base-url.js";
 
 // Qualified by ClawRouter's JSON Images API contract; not a list of key grants.
 const SUPPORTED_IMAGE_MODELS = new Set([
@@ -148,7 +149,7 @@ export function resolveClawRouterImageHttpContext(
   const providerHeaders = sanitizeConfiguredModelProviderRequest({
     headers: providerConfig?.headers,
   })?.headers;
-  const headers = new Headers(providerHeaders);
+  const headers = new Headers(omitNullRequestHeaders(providerHeaders));
   context.headers.forEach((value, name) => headers.set(name, value));
   // The same resolved ClawRouter credential owns discovery and paid dispatch.
   headers.set("Authorization", "Bearer " + apiKey);

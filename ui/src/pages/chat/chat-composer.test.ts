@@ -14,6 +14,7 @@ import {
 } from "./chat-composer.test-support.ts";
 import { installChatComposerPickerDismissal } from "./components/chat-picker-overlay.ts";
 import type { ChatQuestionCard } from "./components/chat-question-card.ts";
+import { MockDictationAudioContext } from "./talk/input.test-support.ts";
 import * as realtimeTalkInput from "./talk/input.ts";
 
 const discoverRealtimeTalkInputsMock = vi.fn();
@@ -159,23 +160,9 @@ it("labels the send action as Suggest and emits ephemeral typing state", () => {
   expect(onTypingChange).toHaveBeenLastCalledWith(false);
 });
 
-const audioNode = () => ({ connect: vi.fn(), disconnect: vi.fn() });
-class DictationAudioContext {
-  readonly destination = {};
-  readonly sampleRate = 8000;
-  readonly close = vi.fn(async () => undefined);
-
-  createMediaStreamSource = audioNode;
-  createScriptProcessor = () => ({ ...audioNode(), onaudioprocess: null });
-  createGain = () => ({ ...audioNode(), gain: { value: 1 } });
-  createAnalyser() {
-    return {
-      fftSize: 0,
-      smoothingTimeConstant: 0,
-      ...audioNode(),
-      getFloatTimeDomainData: (samples: Float32Array) => samples.fill(0),
-    };
-  }
+class DictationAudioContext extends MockDictationAudioContext {
+  override createScriptProcessor = () => super.createScriptProcessor();
+  override createGain = () => super.createGain();
 }
 
 function dictationPointer(type: "pointerdown" | "pointerup", pointerId: number): PointerEvent {
@@ -207,7 +194,7 @@ afterEach(async () => {
   });
 });
 
-it("keeps composer, send, and queue class lists aligned with refreshed state", () => {
+it("keeps composer, send, and queue class lists aligned with refreshed state", async () => {
   const {
     container,
     query,
@@ -232,7 +219,7 @@ it("keeps composer, send, and queue class lists aligned with refreshed state", (
         (offline ? " chat-queue__item--reconnect" : ""),
     );
   };
-  assertClasses();
+  await waitForSolid(() => assertClasses());
   renderComposerInto(container, { ...initial, offline: true, sending: true });
   assertClasses(true);
   expectClasses(query(".chat-queue__badge"), "chat-queue__badge chat-queue__badge--reconnect");
@@ -301,7 +288,7 @@ it("clears a live whitespace draft when the last rendered draft was already empt
 
 it.each([true, false])(
   "keeps the unsaved row edit visible and cancellable (source retained: %s)",
-  (retained) => {
+  async (retained) => {
     const onCancel = vi.fn();
     const source = { id: "queued", text: "original queued text", createdAt: 1 };
     const { query } = renderComposer({
@@ -315,6 +302,11 @@ it.each([true, false])(
       },
     });
     const composer = query<HTMLTextAreaElement>(".agent-chat__composer-combobox textarea");
+    await waitForSolid(() =>
+      expect(query<HTMLTextAreaElement>(".chat-queue__edit-input")?.value).toBe(
+        "unsaved queued edit",
+      ),
+    );
 
     composer?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
 
@@ -329,7 +321,7 @@ it.each([true, false])(
   },
 );
 
-it("lets queued rows own the offline outbox state", () => {
+it("lets queued rows own the offline outbox state", async () => {
   const { container, query } = renderComposer({
     offline: true,
     draft: "Queue this message",
@@ -342,9 +334,41 @@ it("lets queued rows own the offline outbox state", () => {
 
   expect(query(".agent-chat__input--offline")).not.toBeNull();
   expect(query(".agent-chat__composer-status-band")).toBeNull();
-  expect(container.querySelectorAll(".chat-queue__badge--reconnect")).toHaveLength(2);
+  await waitForSolid(() =>
+    expect(container.querySelectorAll(".chat-queue__badge--reconnect")).toHaveLength(2),
+  );
   expect(query<HTMLTextAreaElement>("textarea")?.disabled).toBe(false);
   expect(button(container, t("chat.runControls.sendMessage")).disabled).toBe(false);
+});
+
+it("releases layout observation when a banner replaces the input", async () => {
+  vi.useFakeTimers();
+  const { container, props: initial } = renderComposer({}, true);
+  const input = container.querySelector<HTMLElement>(".agent-chat__input")!;
+  let top = 100;
+  vi.spyOn(input, "getBoundingClientRect").mockImplementation(() => new DOMRect(0, top, 400, 48));
+  window.dispatchEvent(new Event("resize"));
+  await vi.advanceTimersByTimeAsync(20);
+  expect(input.style.getPropertyValue("--chat-composer-popover-max-height")).toBe("72px");
+
+  renderComposerInto(container, {
+    ...initial,
+    disabledBanner: { kind: "composer-replacement", text: "This session is archived." },
+  });
+  expect(container.querySelector(".agent-chat__input")).toBeNull();
+  top = 200;
+  window.dispatchEvent(new Event("resize"));
+  await vi.advanceTimersByTimeAsync(20);
+  expect(input.style.getPropertyValue("--chat-composer-popover-max-height")).toBe("72px");
+
+  renderComposerInto(container, initial);
+  const replacement = container.querySelector<HTMLElement>(".agent-chat__input")!;
+  expect(replacement).not.toBe(input);
+  vi.spyOn(replacement, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 300, 400, 48));
+  window.dispatchEvent(new Event("resize"));
+  await vi.advanceTimersByTimeAsync(20);
+  expect(replacement.style.getPropertyValue("--chat-composer-popover-max-height")).toBe("272px");
+  expect(input.style.getPropertyValue("--chat-composer-popover-max-height")).toBe("72px");
 });
 
 it("replaces the composer with the archived-session notice", () => {

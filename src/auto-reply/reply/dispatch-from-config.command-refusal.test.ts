@@ -22,6 +22,7 @@ import type { ReplyPayload } from "../types.js";
 import type * as CommandsStatus from "./commands-status.js";
 import { dispatchReplyFromConfig } from "./dispatch-from-config.js";
 import type { DispatchFromConfigParams } from "./dispatch-from-config.types.js";
+import { createReplyAgentDefaults } from "./get-reply-config.test-support.js";
 import { withFullRuntimeReplyConfig } from "./get-reply-fast-path.js";
 import { getReplyFromConfig } from "./get-reply.js";
 import { resetInboundDedupe } from "./inbound-dedupe.js";
@@ -78,12 +79,7 @@ beforeEach(async ({ onTestFinished }) => {
   });
   cfg = withFullRuntimeReplyConfig({
     agents: {
-      defaults: {
-        workspace: state.workspaceDir,
-        skipBootstrap: true,
-        model: { primary: "mock-openai/gpt-5.6-luna" },
-        models: { "mock-openai/gpt-5.6-luna": { agentRuntime: { id: "openclaw" } } },
-      },
+      defaults: createReplyAgentDefaults(state.workspaceDir),
     },
     commands: { ownerAllowFrom: [`${channel}:owner`] },
     plugins: { enabled: false },
@@ -144,6 +140,9 @@ async function send(params: {
           BotUsername: "bot",
           CommandSource: params.native ? "native" : "text",
           CommandAuthorized: true,
+          InboundAccessAuthorized: true,
+          InboundEventKind: "user_request",
+          InputProvenance: { kind: "external_user", sourceChannel: channel },
         },
         cfg,
         dispatcher,
@@ -212,6 +211,40 @@ it.each<
     }
   }
 });
+
+it.each([false, true])(
+  "refuses an archived native source before /new (send denied=%s)",
+  async (sendDenied) => {
+    if (sendDenied) {
+      cfg.session = { sendPolicy: { default: "deny" } };
+      await persistConfig();
+    }
+    const storePath = resolveSessionStorePathCore(undefined, { agentId: "main" });
+    const source = { storePath, sessionKey: `agent:main:${channel}:slash:owner` };
+    const target = { storePath, sessionKey: targetKey };
+    await replaceSessionEntry(source, {
+      sessionId: "archived-command-source",
+      updatedAt: 1,
+      archivedAt: 2,
+      mainRestartRecovery: {
+        cycleId: "cycle-1",
+        revision: 4,
+        chargedAttempts: 3,
+        tombstone: { reason: "automatic recovery exhausted" },
+      },
+    });
+    await replaceSessionEntry(target, { sessionId: "active-target", updatedAt: Date.now() });
+    const originalSource = loadSessionEntry(source);
+    const originalTarget = loadSessionEntry(target);
+
+    const { texts } = await send({ sender: "owner", body: "/new", native: true });
+
+    expect(texts).toEqual(sendDenied ? [] : [expect.stringContaining("Use Resume in WebChat")]);
+    expect(loadSessionEntry(source)).toEqual(originalSource);
+    expect(loadSessionEntry(target)).toEqual(originalTarget);
+    expect(runEmbeddedAgent).not.toHaveBeenCalled();
+  },
+);
 
 it("delivers a native cross-human steering refusal after consuming its source", async ({
   signal,

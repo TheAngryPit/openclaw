@@ -24,6 +24,7 @@ import { readSessionTranscriptAnchorFactsInDatabase } from "./session-transcript
 import { reconcileSessionTranscriptIndexInTransaction } from "./session-transcript-index.js";
 import type { SessionMessageRewriteSelection } from "./session-transcript-mutation.types.js";
 import { SessionTranscriptWriterClaimReboundError } from "./session-transcript-writer-claim-error.js";
+import { timedMessageEvent } from "./transcript-message.test-support.js";
 
 // mock-isolation: The fixture owns its database and transcript maintenance lifetime.
 vi.mock("./session-accessor.sqlite-maintenance-kick.js", () => ({
@@ -33,13 +34,7 @@ vi.mock("./session-accessor.sqlite-maintenance-kick.js", () => ({
 vi.mock("./session-history-eviction.js", () => ({ kickSessionHistoryDiskBudgetMaintenance() {} }));
 
 const message = { role: "user", content: "Original question" };
-const question = {
-  type: "message",
-  id: "question",
-  parentId: null,
-  timestamp: "2026-01-01T00:00:01Z",
-  message,
-};
+const question = timedMessageEvent("question", null, "2026-01-01T00:00:01Z", message);
 
 function fixture(f: Fixture, pretty = false, sideEvents = 0) {
   const header = {
@@ -272,12 +267,19 @@ it.each([
       limits,
     );
     await f.prepare(command);
-    const sql = trackSqliteStatementExecutions(f.database.db, ["payload", "otherRead"], (query) =>
-      /^select\b/i.test(query)
-        ? query.includes('as "event_json"') && query.includes('from "transcript_events"')
-          ? "payload"
-          : "otherRead"
-        : null,
+    const sql = trackSqliteStatementExecutions(
+      f.database.db,
+      ["payload", "otherRead", "mutation"],
+      (query) => {
+        if (/^update "session_windows"/i.test(query) && query.includes("transcript_updated_at")) {
+          return "mutation";
+        }
+        return /^select\b/i.test(query)
+          ? query.includes('as "event_json"') && query.includes('from "transcript_events"')
+            ? "payload"
+            : "otherRead"
+          : null;
+      },
     );
     const transactions = f.hooks.transactions;
     if (lostResponse) {
@@ -294,7 +296,7 @@ it.each([
       }
     })();
     expect(f.hooks.transactions - transactions).toBe(1);
-    expect(sql.counts).toEqual({ payload: 1, otherRead: 0 });
+    expect(sql.counts).toEqual({ payload: 1, otherRead: 0, mutation: 1 });
     assert(outcome.kind === "committed");
     const append = outcome.receipt.transcript.append;
     assert(append?.kind === "metadata" && append.value.snapshot.ok);
@@ -324,6 +326,58 @@ it.each([
     await f.reopenDatabase();
     expect(f.read().transcript.version).toEqual(outcome.receipt.transcript.after);
     expect(rewrite.rows().map((row) => JSON.parse(row.eventJson))).toEqual(expectedEvents);
+  });
+});
+
+it("commits a changed prompt with a duplicate carrier and leaves unchanged replay untouched", async () => {
+  await withActor(async (f) => {
+    const text = "Final transformed question";
+    const { rewrite, carrier, command } = promptCarrier(f, text);
+    assert("append" in command.input && command.input.append?.kind === "metadata");
+    const append = command.input.append;
+    const projection = append.modelPromptProjection;
+    assert(projection);
+    delete append.modelPromptProjection;
+    await f.prepare(command);
+    const first = f.mutate(command);
+    assert(first.kind === "committed");
+    append.modelPromptProjection = projection;
+    append.input.options.expectedMutationAt = first.receipt.transcript.after.updatedAt;
+    command.input.commandId = "changed-prompt-duplicate-carrier";
+    await f.prepare(command);
+    const changed = f.mutate(command);
+    assert(changed.kind === "committed");
+    expect(changed.receipt.transcript.after.rawSeq).toBe(first.receipt.transcript.after.rawSeq);
+    expect(changed.receipt.transcript.after.updatedAt).toBeGreaterThan(
+      first.receipt.transcript.after.updatedAt!,
+    );
+    expect(changed.receipt.transcript.after.generation).not.toBe(
+      first.receipt.transcript.after.generation,
+    );
+    const expectedEvents = [
+      rewrite.header,
+      {
+        ...question,
+        message: { ...message, __openclaw: { modelPromptProjection: { version: 1, text } } },
+      },
+      carrier,
+    ];
+    append.input.options.expectedMutationAt = changed.receipt.transcript.after.updatedAt;
+    command.input.commandId = "unchanged-prompt-duplicate-carrier";
+    await f.prepare(command);
+    const unchanged = f.mutate(command);
+    assert(unchanged.kind === "committed");
+    expect(unchanged.receipt.transcript.after).toEqual(changed.receipt.transcript.after);
+    f.restartActor();
+    await f.reopenDatabase();
+    expect(f.read().transcript.version).toEqual(changed.receipt.transcript.after);
+    expect(rewrite.rows().map((row) => JSON.parse(row.eventJson))).toEqual(expectedEvents);
+    expect(
+      readSessionTranscriptBoundedActiveContextCore(f.scope, {
+        maxBytes: 10_000,
+        maxEvents: 20,
+      }).events,
+    ).toEqual(expectedEvents);
   });
 });
 

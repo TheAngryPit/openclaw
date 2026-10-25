@@ -13,7 +13,7 @@ import {
 } from "../../components/solid/settings-ui.tsx";
 import { registerProfileEnglish } from "../../i18n/locales/en-profile.ts";
 import { buildExternalLinkRel, EXTERNAL_LINK_TARGET } from "../../lib/external-link.ts";
-import "../../components/viewer-facepile.ts";
+import "../../components/solid/viewer-facepile.tsx";
 import { projectApplicationConfig } from "../../lib/reactive/application.ts";
 import { registerEnglishCatalog, t } from "../../lib/reactive/i18n.ts";
 import { uploadsEnabled } from "../../lib/uploads.ts";
@@ -23,18 +23,23 @@ registerEnglishCatalog(registerProfileEnglish);
 
 export type IdentitySectionProps = {
   config?: ApplicationConfigCapability;
-  profile: UserProfile;
+  profileId: string;
+  profileDisplayName: UserProfile["displayName"];
+  profileEmails: readonly string[];
+  profileGithubIdentity: UserProfile["githubIdentity"] | null;
   canWrite?: boolean;
   connected: boolean;
   avatarUrl: string | null;
   displayName: string;
   gitCoauthorEnabled: boolean;
-  busy: "display-name" | "avatar" | "git-coauthor" | "loading" | null;
+  prAttributionEnabled: boolean;
+  busy: "display-name" | "avatar" | "git-coauthor" | "pr-attribution" | "loading" | null;
   error: string | null;
   onDisplayNameInput: (value: string) => void;
   onSaveDisplayName: () => void;
   onAvatarSelect: (file: File) => void;
   onGitCoauthorChange: (enabled: boolean) => void;
+  onPrAttributionChange: (enabled: boolean) => void;
 };
 
 export function IdentitySection(props: IdentitySectionProps) {
@@ -44,7 +49,7 @@ export function IdentitySection(props: IdentitySectionProps) {
   });
   const canUpload = () => configuration()?.read().uploadsEnabled !== false;
   const canWrite = () => props.canWrite !== false;
-  const isOwnerProfile = () => props.profile.id === GATEWAY_OWNER_PROFILE_ID;
+  const isOwnerProfile = () => props.profileId === GATEWAY_OWNER_PROFILE_ID;
   return (
     <div id={PROFILE_SETTINGS_TARGET_IDS.identity}>
       <SettingsSection
@@ -61,9 +66,9 @@ export function IdentitySection(props: IdentitySectionProps) {
             <span class="identity-avatar-control">
               <openclaw-viewer-avatar
                 prop:user={{
-                  id: props.profile.id,
-                  name: props.profile.displayName ?? undefined,
-                  email: props.profile.emails[0],
+                  id: props.profileId,
+                  name: props.profileDisplayName ?? undefined,
+                  email: props.profileEmails[0],
                   avatarUrl: props.avatarUrl ?? undefined,
                   watchedSessions: [],
                 }}
@@ -133,7 +138,7 @@ export function IdentitySection(props: IdentitySectionProps) {
                 disabled={
                   !canWrite() ||
                   props.busy !== null ||
-                  props.displayName.trim() === (props.profile.displayName ?? "")
+                  props.displayName.trim() === (props.profileDisplayName ?? "")
                 }
               >
                 {props.busy === "display-name" ? t("common.saving") : t("common.save")}
@@ -146,8 +151,8 @@ export function IdentitySection(props: IdentitySectionProps) {
             title={t("profilePage.identity.linkedEmails")}
             description={t("profilePage.identity.linkedEmailsDescription")}
             control={
-              props.profile.emails.length ? (
-                <SettingsValue value={props.profile.emails.join(", ")} />
+              props.profileEmails.length ? (
+                <SettingsValue value={props.profileEmails.join(", ")} />
               ) : undefined
             }
           />
@@ -157,13 +162,13 @@ export function IdentitySection(props: IdentitySectionProps) {
           description={
             isOwnerProfile()
               ? t("profilePage.identity.ownerGithubDescription")
-              : props.profile.githubIdentity
+              : props.profileGithubIdentity
                 ? t("profilePage.identity.githubAccountDescription")
                 : t("profilePage.identity.githubUnavailableDescription")
           }
           control={
             <Show
-              when={props.profile.githubIdentity}
+              when={props.profileGithubIdentity}
               fallback={
                 <SettingsStatus kind="muted" label={t("profilePage.identity.githubUnavailable")} />
               }
@@ -196,8 +201,32 @@ export function IdentitySection(props: IdentitySectionProps) {
               : t("profilePage.identity.gitCoauthorDescription")
           }
           checked={!isOwnerProfile() && props.gitCoauthorEnabled}
-          disabled={!canWrite() || props.busy !== null || isOwnerProfile()}
+          disabled={
+            !canWrite() ||
+            (props.busy !== null && props.busy !== "git-coauthor") ||
+            isOwnerProfile()
+          }
+          saving={props.busy === "git-coauthor"}
           onChange={props.onGitCoauthorChange}
+        />
+        <SettingsToggleRow
+          title={t("profilePage.identity.prAttribution")}
+          description={
+            <>
+              {t("profilePage.identity.prAttributionDescription")}
+              <br />
+              <a
+                href="https://openclaw.ai"
+                target={EXTERNAL_LINK_TARGET}
+                rel={buildExternalLinkRel()}
+              >
+                {t("profilePage.identity.prAttributionLink")}
+              </a>
+            </>
+          }
+          checked={props.prAttributionEnabled}
+          disabled={!canWrite() || props.busy !== null}
+          onChange={props.onPrAttributionChange}
         />
         <Show when={props.error}>
           <div class="settings-row identity-error" role="alert">

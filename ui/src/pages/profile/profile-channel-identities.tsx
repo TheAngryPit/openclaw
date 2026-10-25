@@ -1,4 +1,4 @@
-import { For, Show, createMemo, onSettled } from "solid-js";
+import { For, Show } from "solid-js";
 import {
   SettingsEmpty,
   SettingsLoadingSkeleton,
@@ -7,45 +7,48 @@ import {
 } from "../../components/solid/settings-ui.tsx";
 import { registerProfileEnglish } from "../../i18n/locales/en-profile.ts";
 import { registerEnglishCatalog, t } from "../../lib/reactive/i18n.ts";
-import type { ProfileChannelIdentitiesState } from "./profile-channel-identities-state.ts";
+import type { ProfileState } from "./profile-state.ts";
 
 registerEnglishCatalog(registerProfileEnglish);
 
 export type ProfileChannelIdentitiesProps = {
-  identitiesState: ProfileChannelIdentitiesState;
-  onPresentationDisposed: (identitiesState: ProfileChannelIdentitiesState) => void;
+  getState: () => ProfileState;
 };
 
 export function ProfileChannelIdentities(props: ProfileChannelIdentitiesProps) {
-  const state = createMemo(() => props.identitiesState.state());
-  onSettled(() => {
-    const identitiesState = props.identitiesState;
-    const onPresentationDisposed = props.onPresentationDisposed;
-    return () => onPresentationDisposed(identitiesState);
-  });
+  const state = () => props.getState();
 
   return (
     <openclaw-profile-channel-identities style={{ display: "contents" }}>
-      <Show when={state().canManageChannelIdentities}>
+      <Show when={state().canManageChannelIdentities()}>
         <form
           id="settings-profile-channel-identities"
-          aria-busy={state().busy ? "true" : "false"}
+          aria-busy={
+            state().channelIdentityBusy || state().identityLoading || state().identityBusy !== null
+              ? "true"
+              : "false"
+          }
           onSubmit={(event) => {
             event.preventDefault();
-            void props.identitiesState.linkIdentity();
+            void state().linkChannelIdentity();
           }}
         >
           <SettingsSection
             title={t("profilePage.channelIdentities.title")}
             description={t("profilePage.channelIdentities.description")}
           >
-            <Show when={state().loading && state().links === null}>
+            <Show
+              when={
+                (state().channelIdentityLoading || state().identityLoading) &&
+                state().channelIdentityLinks === null
+              }
+            >
               <SettingsLoadingSkeleton
                 label={t("profilePage.channelIdentities.loading")}
                 rows={1}
               />
             </Show>
-            <Show when={state().error}>
+            <Show when={state().channelIdentityError}>
               {(error) => (
                 <SettingsRow
                   title={t("profilePage.channelIdentities.errorTitle")}
@@ -53,13 +56,15 @@ export function ProfileChannelIdentities(props: ProfileChannelIdentitiesProps) {
                   role="alert"
                   stackedOnNarrow
                   control={
-                    state().links === null ? (
+                    state().channelIdentityLinks === null ? (
                       <button
                         type="button"
                         class="btn"
                         aria-label={t("profilePage.channelIdentities.retry")}
-                        disabled={state().loading || state().mutation !== null}
-                        onClick={() => void props.identitiesState.loadLinks()}
+                        disabled={
+                          state().channelIdentityLoading || state().channelIdentityMutation !== null
+                        }
+                        onClick={() => void state().loadChannelIdentityLinks()}
                       >
                         {t("profilePage.channelIdentities.retry")}
                       </button>
@@ -68,10 +73,10 @@ export function ProfileChannelIdentities(props: ProfileChannelIdentitiesProps) {
                 />
               )}
             </Show>
-            <Show when={state().status}>
+            <Show when={state().channelIdentityStatus}>
               {(status) => <SettingsRow title={status()} role="status" />}
             </Show>
-            <Show when={state().links}>
+            <Show when={state().channelIdentityLinks}>
               {(links) => (
                 <For
                   each={links()}
@@ -98,10 +103,10 @@ export function ProfileChannelIdentities(props: ProfileChannelIdentitiesProps) {
                             link.identity.accountId,
                             link.identity.senderId,
                           ].join(", ")}`}
-                          disabled={state().busy}
-                          onClick={() => void props.identitiesState.unlinkIdentity(link)}
+                          disabled={state().channelIdentityFormDisabled}
+                          onClick={() => void state().unlinkChannelIdentity(link)}
                         >
-                          {state().isRemoving(link)
+                          {state().isRemovingChannelIdentity(link)
                             ? t("profilePage.channelIdentities.removing")
                             : t("profilePage.channelIdentities.remove")}
                         </button>
@@ -126,9 +131,9 @@ export function ProfileChannelIdentities(props: ProfileChannelIdentitiesProps) {
                       pattern={"\\S(?:.*\\S)?"}
                       required
                       value={state()[field]}
-                      disabled={state().formDisabled}
+                      disabled={state().channelIdentityFormDisabled}
                       onInput={(event) =>
-                        props.identitiesState.setDraft(field, event.currentTarget.value)
+                        state().setChannelIdentityDraft(field, event.currentTarget.value)
                       }
                     />
                   }
@@ -139,8 +144,8 @@ export function ProfileChannelIdentities(props: ProfileChannelIdentitiesProps) {
               title={t("profilePage.channelIdentities.addTitle")}
               stackedOnNarrow
               control={
-                <button type="submit" class="btn" disabled={state().formDisabled}>
-                  {state().mutation?.kind === "link"
+                <button type="submit" class="btn" disabled={state().channelIdentityFormDisabled}>
+                  {state().channelIdentityMutation?.kind === "link"
                     ? t("profilePage.channelIdentities.linking")
                     : t("profilePage.channelIdentities.add")}
                 </button>

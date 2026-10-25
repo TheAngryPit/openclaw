@@ -651,6 +651,77 @@ it("does not expose channel identity management for the shared Gateway Owner pro
   );
 });
 
+it("retires the prior personal identity and channel form on principal change", async () => {
+  const nextProfile: UserProfile = {
+    ...modelAccountProfile,
+    id: "replacement-profile",
+    displayName: "Grace",
+    emails: ["grace@example.test"],
+  };
+  let profile = modelAccountProfile;
+  const linkRequests: unknown[] = [];
+  const request = vi.fn(async (method: string, params?: unknown) => {
+    if (method === "users.self") {
+      return { profile };
+    }
+    if (method === "users.listModelAccounts") {
+      return { profileId: profile.id, accounts: [], links: [] };
+    }
+    if (method === "users.listChannelIdentities") {
+      return { links: [] };
+    }
+    if (method === "users.linkChannelIdentity") {
+      linkRequests.push(params);
+      return params;
+    }
+    throw new Error("unexpected method: " + method);
+  });
+  const harness = createChannelIdentityHarness(request as GatewayBrowserClient["request"]);
+  const page = mountProfilePage(harness.context);
+  await waitForFast(() =>
+    expect(
+      page.querySelector<HTMLButtonElement>(
+        "#settings-profile-channel-identities button[type=submit]",
+      )?.disabled,
+    ).toBe(false),
+  );
+
+  const staleForm = page.querySelector<HTMLFormElement>("#settings-profile-channel-identities")!;
+  for (const [label, value] of [
+    ["Channel ID", "old-channel"],
+    ["Configured account ID", "old-account"],
+    ["Native sender ID", "old-sender"],
+  ] as const) {
+    const input = staleForm.querySelector<HTMLInputElement>('input[aria-label="' + label + '"]')!;
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+
+  profile = nextProfile;
+  harness.emitSnapshot({
+    selfUser: { id: nextProfile.id, email: nextProfile.emails[0], name: nextProfile.displayName },
+  });
+  flush();
+  expect(page.textContent).not.toContain("ada@example.test");
+  expect(page.querySelector(".identity-name-control")).toBeNull();
+  expect(page.querySelector("#settings-profile-channel-identities")).toBeNull();
+
+  staleForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  flush();
+  expect(linkRequests).toHaveLength(0);
+
+  await waitForFast(() =>
+    expect(
+      page.querySelector<HTMLButtonElement>(
+        "#settings-profile-channel-identities button[type=submit]",
+      )?.disabled,
+    ).toBe(false),
+  );
+  expect(page.textContent).toContain("grace@example.test");
+  expect(page.querySelector<HTMLInputElement>(".identity-name-control input")?.value).toBe("Grace");
+  expect(linkRequests).toHaveLength(0);
+});
+
 it("does not report a pending link as successful after the admin grant is revoked", async () => {
   const pendingLink = createDeferred<{
     profileId: string;
@@ -703,7 +774,16 @@ it("does not report a pending link as successful after the admin grant is revoke
     ),
   );
 
-  harness.emitHello(gatewayHelloForMethods(channelIdentityMethods, ["operator.write"]));
+  const staleForm = section;
+  harness.emitHello(gatewayHelloForMethods(channelIdentityMethods, ["operator.read"]));
+  staleForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  flush();
+  expect(page.querySelector("#settings-profile-channel-identities")).toBeNull();
+  expect(page.querySelector(".identity-name-control")).not.toBeNull();
+  expect(
+    request.mock.calls.filter(([method]) => method === "users.linkChannelIdentity"),
+  ).toHaveLength(1);
+
   pendingLink.resolve({ profileId: modelAccountProfile.id, identity });
   await pendingLink.promise;
   await Promise.resolve();
