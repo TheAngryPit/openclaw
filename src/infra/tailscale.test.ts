@@ -37,21 +37,6 @@ function useTailscaleSudoFixture(mode: "password" | "conflict" | "authentication
   process.env.OPENCLAW_TEST_TAILSCALE_SUDO_FIXTURE_MODE = mode;
 }
 
-function expectExecCall(
-  exec: ReturnType<typeof vi.fn>,
-  callNumber: number,
-  command: string,
-  args: readonly string[],
-  options?: Record<string, unknown>,
-) {
-  expect(exec).toHaveBeenNthCalledWith(
-    callNumber,
-    command,
-    args,
-    ...(options ? [expect.objectContaining(options)] : []),
-  );
-}
-
 const jsonReply = (value: unknown) => ({ stdout: JSON.stringify(value) });
 const whois = (LoginName: string) => jsonReply({ UserProfile: { LoginName } });
 
@@ -80,8 +65,7 @@ describe("tailscale helpers", () => {
 
   it("falls back to IP when DNS missing", async () => {
     const exec = vi.fn().mockResolvedValue(jsonReply({ Self: { TailscaleIPs: ["100.2.2.2"] } }));
-    const host = await getTailnetHostname(exec);
-    expect(host).toBe("100.2.2.2");
+    await expect(getTailnetHostname(exec)).resolves.toBe("100.2.2.2");
   });
 
   it.each([
@@ -117,18 +101,13 @@ describe("tailscale helpers", () => {
 
     const hostPromise = getTailnetHostnameAfterServe(exec);
     await vi.runAllTimersAsync();
-    const host = await hostPromise;
-
-    expect(host).toBe("retry.tailnet.ts.net");
+    await expect(hostPromise).resolves.toBe("retry.tailnet.ts.net");
     expect(exec).toHaveBeenCalledTimes(2);
-    expectExecCall(exec, 1, tailscaleBin, ["status", "--json"], {
-      timeoutMs: 5000,
-      logOutput: false,
-    });
-    expectExecCall(exec, 2, tailscaleBin, ["status", "--json"], {
-      timeoutMs: 5000,
-      logOutput: false,
-    });
+    expect(exec).toHaveBeenCalledWith(
+      tailscaleBin,
+      ["status", "--json"],
+      expect.objectContaining({ timeoutMs: 5000, logOutput: false }),
+    );
   });
 
   it("does not retry malformed post-Serve status JSON", async () => {
@@ -210,8 +189,6 @@ describe("tailscale helpers", () => {
 
   describe("waitForTailscaleBackendReady", () => {
     const status = (BackendState: string) => ({ ...jsonReply({ BackendState }), stderr: "" });
-    const statusArgs = ["status", "--json"];
-    const execOptions = { timeoutMs: 5000, logOutput: false };
 
     // Connect-failure wording as emitted by the tailscale CLI (cmd/tailscale/cli/diag.go),
     // which differs by platform and by whether a tailscaled process was found.
@@ -252,7 +229,12 @@ describe("tailscale helpers", () => {
       });
 
       expect(exec.mock.calls.length).toBeGreaterThan(1);
-      expectExecCall(exec, 1, tailscaleBin, ["-n", "sudo", ...statusArgs], execOptions);
+      expect(exec).toHaveBeenNthCalledWith(
+        1,
+        tailscaleBin,
+        ["-n", "sudo", "status", "--json"],
+        expect.objectContaining({ timeoutMs: 5000, logOutput: false }),
+      );
       expect(info).toHaveBeenCalledTimes(1);
     });
 
