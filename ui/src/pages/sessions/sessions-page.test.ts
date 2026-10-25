@@ -5,8 +5,10 @@ import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type { GatewaySessionRow, SessionsListResult } from "../../api/types.ts";
 import { showConfirmDialog } from "../../components/confirm-dialog.ts";
-import { showInputDialog } from "../../components/input-dialog.ts";
+import { showInputDialog } from "../../components/input-dialog.tsx";
 import * as sessionMenuWork from "../../components/session-menu-work.ts";
+import { agentRoster } from "../../e2e/agent-roster.test-support.ts";
+import { createAgentIdentityCapability } from "../../lib/agents/identity.ts";
 import * as uiErrors from "../../lib/format-error.ts";
 import type { SessionCapability } from "../../lib/sessions/index.ts";
 import { sessionsResult } from "../../lib/sessions/session-capability.test-support.ts";
@@ -28,6 +30,7 @@ import {
   getRenderedModalDialog,
   waitForConfirmDialogActions,
 } from "../../test-helpers/modal-dialog.ts";
+import { createRouteLoaderOptions } from "../../test-helpers/route-loader-options.ts";
 import {
   openSubmenu,
   selectMenuValue,
@@ -50,7 +53,10 @@ import {
 } from "./sessions-page.test-support.ts";
 
 vi.mock("../../components/confirm-dialog.ts", () => ({ showConfirmDialog: vi.fn() }));
-vi.mock("../../components/input-dialog.ts", () => ({ showInputDialog: vi.fn() }));
+vi.mock("../../components/input-dialog.tsx", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../components/input-dialog.tsx")>()),
+  showInputDialog: vi.fn(),
+}));
 function capturedTarget(row: GatewaySessionRow) {
   return {
     key: row.key,
@@ -107,9 +113,41 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 describe("sessions page lifecycle", () => {
+  it("retries a retained agent identity on roster publication after reconnect backoff", async () => {
+    let now = 1_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const readIdentity = vi
+      .fn()
+      .mockResolvedValueOnce({ agentId: "main", name: "Before", avatar: "" })
+      .mockRejectedValueOnce(new Error("Identity temporarily unavailable"))
+      .mockResolvedValueOnce({ agentId: "main", name: "After", avatar: "" });
+    const connection = createGateway(createTestGatewayClient(readIdentity));
+    const agentIdentity = createAgentIdentityCapability(connection.gateway);
+    const managed = createManagedSessions();
+    const context = { ...createContext(connection.gateway, managed.sessions), agentIdentity };
+    const row = sessionRow("webchat:identity");
+    const page = await createRenderedPage(context, sessionsResult([row], 1), "all");
+    const label = () => page.querySelector(".session-link")?.textContent;
+    await waitForFast(() => expect(label()).toContain("Before"));
+
+    connection.emit({ phase: "reconnecting" });
+    connection.emit({ phase: "connected" });
+    await agentIdentity.ensure(["main"]);
+    expect(readIdentity).toHaveBeenCalledTimes(2);
+    expect(label()).toContain("Before");
+
+    publishRows(managed, [row]);
+    await page.updateComplete;
+    expect(readIdentity).toHaveBeenCalledTimes(2);
+    now += 1_000;
+    publishRows(managed, [row]);
+    await waitForFast(() => expect(label()).toContain("After"));
+    expect(readIdentity).toHaveBeenCalledTimes(3);
+  });
+
   it("keeps a failed rename editable until a confirmed retry succeeds", async () => {
-    const actual = await vi.importActual<typeof import("../../components/input-dialog.ts")>(
-      "../../components/input-dialog.ts",
+    const actual = await vi.importActual<typeof import("../../components/input-dialog.tsx")>(
+      "../../components/input-dialog.tsx",
     );
     vi.mocked(showInputDialog).mockImplementation(actual.showInputDialog);
     const fixture = createModalDialogTestFixture();
@@ -135,7 +173,7 @@ describe("sessions page lifecycle", () => {
       input.dispatchEvent(new Event("input", { bubbles: true }));
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
       await waitForFast(() => expect(patch).toHaveBeenCalledOnce());
-      expect(input.disabled).toBe(true);
+      await waitForFast(() => expect(input.disabled).toBe(true));
       pending.reject(new Error("Rename unavailable. Try again."));
       await waitForFast(() =>
         expect(modal.querySelector('[role="alert"]')?.textContent).toContain(
@@ -290,15 +328,11 @@ describe("sessions page lifecycle", () => {
         "main",
       );
       const assignOwner = vi.spyOn(sessions, "assignOwner");
-      context.agents.state.agentsList = {
-        defaultId: "main",
-        mainKey: "main",
-        scope: "per-sender",
-        agents: [
-          { id: "main", name: "Main" },
-          { id: "reviewer", name: "Reviewer" },
-        ],
-      };
+      context.agents.state.agentsList = agentRoster(
+        { main: "Main", reviewer: "Reviewer" },
+        "main",
+        "per-sender",
+      );
       const page = await createRenderedPage(context, sessionsResult([row], 1));
       await waitForFast(() => expect(page.loading).toBe(false));
       const menu = await openRowMenu(page, row);
@@ -328,7 +362,7 @@ describe("sessions page lifecycle", () => {
   );
 
   it.each(["startup", "same-client reconnect"])(
-    "retains the current query when a route started before %s completes late",
+    "loads the current query before config settles on %s",
     async (ordering) => {
       const config = createDeferred();
       const sidebar = createDeferred<SessionsListResult>();
@@ -346,17 +380,24 @@ describe("sessions page lifecycle", () => {
         ordering === "startup" ? "connecting" : undefined,
       );
       context.runtimeConfig.ensureLoaded = () => config.promise;
-      const pendingRoute = sessionsRoute.loader!(context, {
-        signal: new AbortController().signal,
-        shouldRun: () => true,
-        revalidating: false,
-        location: { pathname: "/sessions", search: "", hash: "" },
-        deps: "",
-        cause: "navigation",
+      let routeData: SessionsRouteData | undefined;
+      const pendingRoute = Promise.resolve(
+        sessionsRoute.loader!(
+          context,
+          createRouteLoaderOptions({ pathname: "/sessions", search: "", hash: "" }),
+        ),
+      ).then((data) => {
+        routeData = data as SessionsRouteData;
+        return routeData;
       });
       connection.emit({ phase: "connected" });
-      const page = await createPage(context);
+      let mountedPage: Awaited<ReturnType<typeof createPage>> | undefined;
       try {
+        await waitForFast(() =>
+          expect(routeData).toEqual({ expandedSessionKey: null, statusFilter: "active" }),
+        );
+        const page = await createPage(context, routeData);
+        mountedPage = page;
         await waitForFast(() => expect(page.result?.sessions[0]?.key).toBe("agent:main:current-1"));
         if (ordering === "same-client reconnect") {
           connection.emit({ phase: "reconnecting" });
@@ -385,7 +426,7 @@ describe("sessions page lifecycle", () => {
       } finally {
         config.resolve();
         sidebar.resolve(result("agent:main:sidebar"));
-        page.remove();
+        mountedPage?.remove();
         sessions.dispose();
       }
     },

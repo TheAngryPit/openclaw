@@ -1,9 +1,24 @@
-import type { SystemChangesListResult, UserProfile, UsersSetDisplayNameResult } from "@openclaw/gateway-protocol";
-import { createMemo, createSignal, onSettled, Show } from "solid-js";
+import type {
+  SystemChangesListResult,
+  UserProfile,
+  UsersSetDisplayNameResult,
+} from "@openclaw/gateway-protocol";
+import {
+  createMemo,
+  createSignal,
+  Errored,
+  isPending,
+  latest,
+  lazy,
+  Loading,
+  onSettled,
+  Show,
+} from "solid-js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import { hasOperatorWriteAccess } from "../../app/operator-access.ts";
-import "../../components/openclaw-mascot.ts";
+import "../../components/openclaw-mascot.tsx";
 import type { SidebarAttentionElementAttributes } from "../../components/sidebar-attention-element.ts";
+import { LazyViewError } from "../../components/solid/lazy-view-error.tsx";
 import { channelSnapshotHasActiveChannel } from "../../lib/channels/index.ts";
 import { formatUiError } from "../../lib/format-error.ts";
 import { isGatewayMethodAdvertised } from "../../lib/gateway-methods.ts";
@@ -15,7 +30,9 @@ import { t } from "../../lib/reactive/i18n.ts";
 import { projectOwner } from "../../lib/reactive/projection.ts";
 import { defineSolidBridge, type SolidBridgeElement } from "../../lib/solid-bridge.ts";
 import "../../styles/custodian.css";
+import { createCustodianActions } from "./custodian-actions.ts";
 import { CustodianChangeHistory, type HistorySnapshot } from "./custodian-history.tsx";
+import { CustodianChannelOnboardingNudge } from "./custodian-nudge.tsx";
 import { custodianSessionStore, type CustodianSessionStore } from "./custodian-session-store.ts";
 import { CustodianSurface } from "./custodian-surface.tsx";
 import type { CustodianRouteData } from "./route.tsx";
@@ -30,12 +47,16 @@ type OnboardingIdentityOwner = {
 };
 
 type Props = { onboarding: boolean; newAgentIntent: boolean; store: CustodianSessionStore };
+const SidebarAttention = lazy(() => import("../../components/sidebar-attention.tsx"), {
+  export: "SidebarAttention",
+});
 const propertyReceipts = new WeakMap<HTMLElement, (key: keyof Props) => void>();
 function CustodianPageContent(props: Props, host: SolidBridgeElement<Props>) {
   const context = useApplication();
   const gateway = projectGateway(context.gateway);
   const channels = projectChannels(context.channels);
   const store = projectOwner(host.store, (source) => source);
+  const presentation = createCustodianActions(() => host.store);
   const historyAvailable = createMemo(() => {
     const snapshot = gateway.read().snapshot;
     return (
@@ -79,8 +100,32 @@ function CustodianPageContent(props: Props, host: SolidBridgeElement<Props>) {
   const [onboardingNameSkipped, setOnboardingNameSkipped] = createSignal(false);
   let onboardingOwner: OnboardingIdentityOwner | null = null;
   let onboardingNameRequestEpoch = 0;
+  let onboardingDisplayObservation: {
+    userId: string | null;
+    profileId: string | null;
+    name: string | null | undefined;
+  } | null = null;
+  let onboardingDisplayObservationRevision = 0;
   let onboardingLoadPending = false;
   let onboardingSavePending = false;
+  function observeOnboardingDisplayName(): void {
+    const selfUser = context.gateway.snapshot.selfUser;
+    const observation = {
+      userId: selfUser?.id ?? null,
+      profileId: selfUser?.identity?.id ?? null,
+      name: selfUser?.name,
+    };
+    const previous = onboardingDisplayObservation;
+    if (
+      previous &&
+      previous.userId === observation.userId &&
+      previous.profileId === observation.profileId &&
+      previous.name !== observation.name
+    ) {
+      onboardingDisplayObservationRevision += 1;
+    }
+    onboardingDisplayObservation = observation;
+  }
   function currentOnboardingOwner(): OnboardingIdentityOwner | null {
     const gatewayOwner = context.gateway;
     const snapshot = gatewayOwner.snapshot;
@@ -134,6 +179,7 @@ function CustodianPageContent(props: Props, host: SolidBridgeElement<Props>) {
   }
 
   function synchronizeOnboardingIdentity(): void {
+    observeOnboardingDisplayName();
     const nextOwner = currentOnboardingOwner();
     if (sameOnboardingOwner(onboardingOwner, nextOwner)) {
       if (!nextOwner) {
@@ -197,7 +243,7 @@ function CustodianPageContent(props: Props, host: SolidBridgeElement<Props>) {
     ) {
       return;
     }
-    const selfUserAtSaveStart = context.gateway.snapshot.selfUser;
+    const displayObservationRevisionAtSaveStart = onboardingDisplayObservationRevision;
     const requestEpoch = onboardingNameRequestEpoch;
     const isCurrentRequest = () =>
       isCurrentOnboardingOwner(owner) && onboardingNameRequestEpoch === requestEpoch;
@@ -215,14 +261,15 @@ function CustodianPageContent(props: Props, host: SolidBridgeElement<Props>) {
         return;
       }
       const currentSelfUser = context.gateway.snapshot.selfUser;
-      const hasNewerDisplayName =
-        currentSelfUser?.id === profile.id && currentSelfUser.name !== selfUserAtSaveStart?.name;
-      const savedProfile = hasNewerDisplayName
+      const hasNewerDisplayObservation =
+        currentSelfUser?.id === profile.id &&
+        onboardingDisplayObservationRevision !== displayObservationRevisionAtSaveStart;
+      const savedProfile = hasNewerDisplayObservation
         ? { ...result.profile, displayName: currentSelfUser.name ?? null }
         : result.profile;
       setOnboardingNameProfile(savedProfile);
       setOnboardingNameDraft(savedProfile.displayName ?? "");
-      if (!hasNewerDisplayName) {
+      if (!hasNewerDisplayObservation) {
         context.gateway.updateSelfUser?.({ name: result.profile.displayName ?? undefined });
       }
     } catch (error) {
@@ -264,6 +311,7 @@ function CustodianPageContent(props: Props, host: SolidBridgeElement<Props>) {
   }
   onSettled(() => {
     propertyReceipts.set(host, (key) => {
+      presentation.retire();
       if (key === "store") {
         store.replaceSource(host.store);
         void host.store.refreshTranscriptIfIdle();
@@ -342,24 +390,70 @@ function CustodianPageContent(props: Props, host: SolidBridgeElement<Props>) {
       });
     setHistoryReceipt({ owner, reset, result: completion });
   }
-  const channelStatusError = () =>
-    props.onboarding && !store.read().channelOnboardingNudgeClosed && channels.read().connected
-      ? channels.read().channelsError
-      : null;
-  const showChannelOnboardingNudge = () => {
+  const channelResult = createMemo(() => {
     const state = channels.read();
+    const receipt = state.channelsRead;
     const snapshot = state.channelsSnapshot;
-    return (
-      props.onboarding &&
-      !store.read().channelOnboardingNudgeClosed &&
-      state.connected &&
-      !state.channelsLoading &&
-      channelStatusError() === null &&
-      snapshot !== null &&
-      snapshot.partial !== true &&
-      !channelSnapshotHasActiveChannel(snapshot)
-    );
-  };
+    const completion = receipt?.completion ?? Promise.resolve(state.channelsError);
+    return completion.then((error) => ({
+      error,
+      snapshot: receipt ? state.channelsSnapshot : snapshot,
+    }));
+  });
+  const channelSnapshot = createMemo(() => {
+    const result = latest(channelResult);
+    if (result.error) {
+      throw new Error(result.error);
+    }
+    return result.snapshot;
+  });
+  const channelError = (retrying: boolean, retry: () => void) => (
+    <CustodianChannelOnboardingNudge
+      error
+      retrying={retrying}
+      onAction={retry}
+      onDismiss={() => props.store.dismissChannelOnboardingNudge()}
+    />
+  );
+  const PendingChannelInventory = () => (
+    <Show when={channels.read().channelsError}>{channelError(true, () => {})}</Show>
+  );
+  const ChannelOnboarding = () => (
+    <Show
+      when={
+        props.onboarding && !store.read().channelOnboardingNudgeClosed && channels.read().connected
+      }
+    >
+      <Loading fallback={<PendingChannelInventory />}>
+        {/* Retained errors must not hide the pending reconnect or retry state. */}
+        <Show when={!isPending(channelResult)} fallback={<PendingChannelInventory />}>
+          <Errored
+            fallback={(_error, reset) =>
+              channelError(false, () => {
+                void context.channels.refresh(false);
+                reset();
+              })
+            }
+          >
+            <Show
+              when={
+                channelSnapshot() !== null &&
+                channelSnapshot()?.partial !== true &&
+                !channelSnapshotHasActiveChannel(channelSnapshot())
+              }
+            >
+              <CustodianChannelOnboardingNudge
+                error={false}
+                retrying={false}
+                onAction={() => props.store.openChannelsFromOnboarding()}
+                onDismiss={() => props.store.dismissChannelOnboardingNudge()}
+              />
+            </Show>
+          </Errored>
+        </Show>
+      </Loading>
+    </Show>
+  );
   return (
     <section
       aria-busy={props.onboarding ? (onboardingNameLoading() ? "true" : "false") : undefined}
@@ -390,7 +484,13 @@ function CustodianPageContent(props: Props, host: SolidBridgeElement<Props>) {
         </Show>
         <div class="custodian__header-actions">
           <Show when={props.onboarding}>
-            <openclaw-sidebar-attention />
+            <Errored
+              fallback={(error, reset) => <LazyViewError error={error()} onRetry={reset} inline />}
+            >
+              <Loading>
+                <SidebarAttention />
+              </Loading>
+            </Errored>
           </Show>
           <Show when={historyAvailable()}>
             <button
@@ -430,7 +530,9 @@ function CustodianPageContent(props: Props, host: SolidBridgeElement<Props>) {
                   type="button"
                   disabled={onboardingNameLoading()}
                   onClick={() => {
-                    if (onboardingOwner) void loadOnboardingProfile(onboardingOwner);
+                    if (onboardingOwner) {
+                      void loadOnboardingProfile(onboardingOwner);
+                    }
                   }}
                 >
                   {onboardingNameLoading() ? t("common.loading") : t("common.retry")}
@@ -460,7 +562,9 @@ function CustodianPageContent(props: Props, host: SolidBridgeElement<Props>) {
                 maxlength={256}
                 autocomplete="nickname"
                 aria-describedby={
-                  "custodian-name-description" + (onboardingNameError() ? " custodian-name-error" : "")
+                  onboardingNameError()
+                    ? "custodian-name-description custodian-name-error"
+                    : "custodian-name-description"
                 }
                 value={onboardingNameDraft()}
                 disabled={onboardingNameBusy()}
@@ -498,12 +602,10 @@ function CustodianPageContent(props: Props, host: SolidBridgeElement<Props>) {
       <CustodianSurface
         class="custodian__column"
         store={props.store}
+        actions={presentation.actions}
         onboarding={props.onboarding}
         newAgentIntent={props.newAgentIntent}
-        showChannelOnboardingNudge={showChannelOnboardingNudge()}
-        channelOnboardingError={channelStatusError()}
-        channelOnboardingRetrying={channels.read().channelsLoading}
-        onRetryChannelOnboarding={() => void context.channels.refresh(false)}
+        channelOnboardingContent={<ChannelOnboarding />}
         historyContent={
           <Show when={historyOpen() && historyAvailable()}>
             <CustodianChangeHistory
@@ -528,9 +630,7 @@ export const CustodianPage = defineSolidBridge<Props>(
       store: { default: custodianSessionStore, attribute: false },
     },
     propertyChanged: (host, key) => {
-      if (key !== "newAgentIntent") {
-        propertyReceipts.get(host)?.(key);
-      }
+      propertyReceipts.get(host)?.(key);
     },
   },
 );
