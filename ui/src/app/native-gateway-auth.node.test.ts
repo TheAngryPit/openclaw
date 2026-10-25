@@ -1,9 +1,8 @@
 // @vitest-environment node
-import { createHash, generateKeyPairSync, sign, verify, webcrypto } from "node:crypto";
+import { createHash, generateKeyPairSync, webcrypto } from "node:crypto";
 import { MessageChannel, type MessagePort } from "node:worker_threads";
 import {
   DEFAULT_PREAUTH_HANDSHAKE_TIMEOUT_MS,
-  buildDeviceAuthPayloadV3,
   type ConnectParams,
 } from "@openclaw/gateway-client/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -28,6 +27,11 @@ const nativeClient = {
 const keys = generateKeyPairSync("ed25519");
 const publicKeyBytes = keys.publicKey.export({ format: "der", type: "spki" }).subarray(-32);
 const deviceId = createHash("sha256").update(publicKeyBytes).digest("hex");
+const nativeProof = {
+  id: deviceId,
+  publicKey: publicKeyBytes.toString("base64url"),
+  signature: "opaque-native-signature",
+};
 const signedAt = 1_790_000_000_000;
 type Challenge = { id: string; nonce: string; signedAt: number };
 const identityKey = "openclaw-device-identity-v1";
@@ -91,23 +95,11 @@ class RecordingSocket extends MockWebSocket {
   }
 }
 
-function signedAuthorization(
+function nativeAuthorization(
   challenge: Challenge,
   token = "synthetic-native-grant",
   kind: "token" | "password" | "deviceToken" | "credentialless" = "deviceToken",
 ) {
-  const payload = buildDeviceAuthPayloadV3({
-    deviceId,
-    clientId: nativeClient.id,
-    clientMode: nativeClient.mode,
-    platform: nativeClient.platform,
-    deviceFamily: nativeClient.deviceFamily,
-    role: "operator",
-    scopes,
-    token: kind === "password" || kind === "credentialless" ? null : token,
-    nonce: challenge.nonce,
-    signedAtMs: challenge.signedAt,
-  });
   return {
     id: challenge.id,
     result: {
@@ -121,9 +113,7 @@ function signedAuthorization(
           }
         : {}),
       device: {
-        id: deviceId,
-        publicKey: publicKeyBytes.toString("base64url"),
-        signature: sign(null, Buffer.from(payload), keys.privateKey).toString("base64url"),
+        ...nativeProof,
         signedAt: challenge.signedAt,
         nonce: challenge.nonce,
       },
@@ -140,7 +130,7 @@ describe("native authenticated Control UI", () => {
     postMessage: ReturnType<typeof vi.fn<(message: string) => void | Promise<unknown>>>;
   };
 
-  function replyWith(authorize: (challenge: Challenge) => unknown = signedAuthorization) {
+  function replyWith(authorize: (challenge: Challenge) => unknown = nativeAuthorization) {
     return (message: string) => {
       bridge.onmessage?.({ data: JSON.stringify(authorize(JSON.parse(message))) });
     };
@@ -155,7 +145,7 @@ describe("native authenticated Control UI", () => {
   }
 
   function authorizeWith(token: string) {
-    respondWith((challenge) => signedAuthorization(challenge, token));
+    respondWith((challenge) => nativeAuthorization(challenge, token));
   }
 
   function nativePort() {
@@ -269,7 +259,7 @@ describe("native authenticated Control UI", () => {
       search: "",
       hash: window.location.hash,
     });
-    gateway = createApplicationGateway(startup.settings, "", "", undefined, {
+    gateway = createApplicationGateway(startup.settings, "", "", {
       persistDefaultConnectionSettings: false,
       clientOptions: startup.nativeClient ?? undefined,
     });
@@ -296,7 +286,7 @@ describe("native authenticated Control UI", () => {
       usePortTransport();
       const { channel, send } = nativePort();
       channel.port1.on("message", (message: string) => {
-        channel.port1.postMessage(JSON.stringify(signedAuthorization(JSON.parse(message))));
+        channel.port1.postMessage(JSON.stringify(nativeAuthorization(JSON.parse(message))));
       });
       const deliver = (source: unknown, origin: string, target = gatewayUrl) =>
         deliverPort(channel.port2, source, origin, target);
@@ -352,7 +342,7 @@ describe("native authenticated Control UI", () => {
         await vi.advanceTimersByTimeAsync(0);
         expect(send).not.toHaveBeenCalled();
       } else {
-        bridge.onmessage?.({ data: JSON.stringify(signedAuthorization(request!)) });
+        bridge.onmessage?.({ data: JSON.stringify(nativeAuthorization(request!)) });
         await vi.advanceTimersByTimeAsync(0);
       }
       expect(socket.sent).toEqual([]);
@@ -371,7 +361,7 @@ describe("native authenticated Control UI", () => {
     "%s preserves the approved native %s grant and identity without browser credentials",
     async (transport, kind) => {
       const secret = kind === "deviceToken" ? "synthetic-native-grant" : "accepted-native-secret";
-      const authorize = (challenge: Challenge) => signedAuthorization(challenge, secret, kind);
+      const authorize = (challenge: Challenge) => nativeAuthorization(challenge, secret, kind);
       if (transport === "WebKit") {
         const handler = { postMessage: async (challenge: Challenge) => authorize(challenge) };
         Object.assign(window, {
@@ -386,32 +376,13 @@ describe("native authenticated Control UI", () => {
         respondWith(authorize);
       }
       const socket = connect();
-      const frame = await Promise.race([
-        socket.connect.promise,
-        socket.closed.promise.then(() => {
-          throw new Error("native method rejected before connect");
-        }),
-      ]);
+      const frame = await socket.connect.promise;
       expectNativeGrant(frame.params, { [kind]: secret });
       expect(frame.params.client).toMatchObject(nativeClient);
       if (transport !== "WebKit") {
         expect(bridge.postMessage).toHaveBeenCalledOnce();
       }
-      const device = frame.params.device!;
-      const payload = buildDeviceAuthPayloadV3({
-        deviceId: device.id,
-        clientId: frame.params.client.id,
-        clientMode: frame.params.client.mode,
-        platform: frame.params.client.platform,
-        deviceFamily: frame.params.client.deviceFamily,
-        role: frame.params.role!,
-        scopes: frame.params.scopes!,
-        token: kind === "password" ? null : frame.params.auth?.[kind],
-        nonce: device.nonce!,
-        signedAtMs: device.signedAt,
-      });
-      const signature = Buffer.from(device.signature, "base64url");
-      expect(verify(null, Buffer.from(payload), keys.publicKey, signature)).toBe(true);
+      expect(frame.params.device).toEqual({ ...nativeProof, nonce: "challenge-1", signedAt });
       expect(localStorage.getItem(identityKey)).toBeNull();
       socket.hello(frame.id, "synthetic-hello-grant");
       await vi.advanceTimersByTimeAsync(0);
@@ -465,12 +436,12 @@ describe("native authenticated Control UI", () => {
   ])("rejects invalid native authorization without browser fallback: %j", async (scenario) => {
     if (scenario.kind === "credential") {
       respondWith((challenge) => {
-        const reply = signedAuthorization(challenge);
+        const reply = nativeAuthorization(challenge);
         return { ...reply, result: { ...reply.result, auth: scenario.auth } };
       });
     } else if (scenario.kind === "personalRequirement") {
       bridge.postMessage.mockImplementation((message) => {
-        const reply = signedAuthorization(JSON.parse(message));
+        const reply = nativeAuthorization(JSON.parse(message));
         bridge.onmessage?.({
           data: JSON.stringify({
             ...reply,
@@ -493,7 +464,7 @@ describe("native authenticated Control UI", () => {
       } else if (scenario.failure === "subframe") {
         Object.assign(window, { top: {} });
       } else {
-        respondWith((request) => signedAuthorization({ ...request, nonce: "unrelated-challenge" }));
+        respondWith((request) => nativeAuthorization({ ...request, nonce: "unrelated-challenge" }));
       }
     } else if (scenario.kind === "challenge") {
       bridge.postMessage.mockImplementation(refuse("Invalid gateway challenge"));
@@ -533,20 +504,20 @@ describe("native authenticated Control UI", () => {
             messageHandlers: {
               OpenClawNativeGatewayAuth: {
                 postMessage: async (challenge: Challenge) =>
-                  signedAuthorization(challenge, undefined, "credentialless"),
+                  nativeAuthorization(challenge, undefined, "credentialless"),
               },
             },
           },
         });
       } else if (transport === "Tauri") {
         bridge.postMessage.mockImplementation((message) =>
-          Promise.resolve(signedAuthorization(JSON.parse(message), undefined, "credentialless")),
+          Promise.resolve(nativeAuthorization(JSON.parse(message), undefined, "credentialless")),
         );
       } else {
         bridge.postMessage.mockImplementation((message) => {
           bridge.onmessage?.({
             data: JSON.stringify(
-              signedAuthorization(JSON.parse(message), undefined, "credentialless"),
+              nativeAuthorization(JSON.parse(message), undefined, "credentialless"),
             ),
           });
         });
@@ -568,28 +539,7 @@ describe("native authenticated Control UI", () => {
       }
       expect(localStorage.getItem("openclaw-device-identity-v1")).toBeNull();
       expect(localStorage.getItem("openclaw.device.auth.v1:wss://gateway.example/work")).toBeNull();
-
-      const device = frame.params.device!;
-      const payload = buildDeviceAuthPayloadV3({
-        deviceId: device.id,
-        clientId: frame.params.client.id,
-        clientMode: frame.params.client.mode,
-        platform: frame.params.client.platform,
-        deviceFamily: frame.params.client.deviceFamily,
-        role: frame.params.role!,
-        scopes: frame.params.scopes!,
-        token: null,
-        nonce: device.nonce!,
-        signedAtMs: device.signedAt,
-      });
-      expect(
-        verify(
-          null,
-          Buffer.from(payload),
-          keys.publicKey,
-          Buffer.from(device.signature, "base64url"),
-        ),
-      ).toBe(true);
+      expect(frame.params.device).toEqual({ ...nativeProof, nonce: "challenge-1", signedAt });
 
       socket.emitMessage({
         type: "res",
@@ -640,9 +590,8 @@ describe("native authenticated Control UI", () => {
       );
       const first = connect();
       if (failure.startsWith("silent bridge")) {
-        await vi.advanceTimersByTimeAsync(
-          DEFAULT_PREAUTH_HANDSHAKE_TIMEOUT_MS / (failure === "silent bridge stopped" ? 1 : 2),
-        );
+        // Stop at the authorization deadline, before the local close's retry fires.
+        await vi.advanceTimersByTimeAsync(DEFAULT_PREAUTH_HANDSHAKE_TIMEOUT_MS / 2);
       }
       await expectRejected(first);
       expect(gateway!.snapshot.lastError).toBeTruthy();
@@ -650,6 +599,7 @@ describe("native authenticated Control UI", () => {
         expect(gateway!.snapshot.lastError).toContain("did not authorize");
       }
       if (failure === "silent bridge stopped") {
+        expect(wsInstances).toHaveLength(1);
         await stopWithoutRetry(1);
         return;
       }
@@ -682,7 +632,7 @@ describe("native authenticated Control UI", () => {
     });
     const socket = connect();
     expect(request).toBeDefined();
-    bridge.onmessage?.({ data: JSON.stringify(signedAuthorization(request!)) });
+    bridge.onmessage?.({ data: JSON.stringify(nativeAuthorization(request!)) });
     await parserImport.started.promise;
 
     gateway!.stop();
@@ -702,7 +652,7 @@ describe("native authenticated Control UI", () => {
     });
     const socket = connect();
     expect(request).toBeDefined();
-    bridge.onmessage?.({ data: JSON.stringify(signedAuthorization(request!)) });
+    bridge.onmessage?.({ data: JSON.stringify(nativeAuthorization(request!)) });
     await parserImport.started.promise;
 
     await vi.advanceTimersByTimeAsync(DEFAULT_PREAUTH_HANDSHAKE_TIMEOUT_MS / 2);
@@ -724,7 +674,7 @@ describe("native authenticated Control UI", () => {
     const channel = new MessageChannel();
     ports.push(channel.port1, channel.port2);
     channel.port1.on("message", (message: string) => {
-      channel.port1.postMessage(JSON.stringify(signedAuthorization(JSON.parse(message))));
+      channel.port1.postMessage(JSON.stringify(nativeAuthorization(JSON.parse(message))));
     });
     const socket = connect();
     window.dispatchEvent(
@@ -751,7 +701,6 @@ describe("native authenticated Control UI", () => {
   it("treats an authorization parser import failure as terminal", async () => {
     const importStarted = createDeferred();
     vi.resetModules();
-    // mock-isolation: emulate the parser chunk failing during import.
     vi.doMock("./native-gateway-authorization.ts", () => {
       importStarted.resolve();
       throw new Error("Synthetic native authorization parser chunk failed");
@@ -762,7 +711,7 @@ describe("native authenticated Control UI", () => {
     });
     const socket = connect();
     expect(request).toBeDefined();
-    bridge.onmessage?.({ data: JSON.stringify(signedAuthorization(request!)) });
+    bridge.onmessage?.({ data: JSON.stringify(nativeAuthorization(request!)) });
     await importStarted.promise;
     await socket.closed.promise;
     socket.emitClose(4008, "native authorization unavailable");
@@ -806,7 +755,13 @@ describe("native authenticated Control UI", () => {
       const socket = connect(gatewayUrl, "");
       const frame = await socket.connect.promise;
       expectNativeGrant(frame.params, { deviceToken: "ios-existing-grant" });
-      expect(frame.params.client).toMatchObject({ id: "openclaw-ios", mode: "ui", deviceFamily });
+      expect(frame.params.client).toMatchObject({
+        id: "openclaw-ios",
+        mode: "ui",
+        platform: "iOS",
+        deviceFamily,
+        instanceId: nativeClient.instanceId,
+      });
       expect(bridge.postMessage).not.toHaveBeenCalled();
     },
   );
