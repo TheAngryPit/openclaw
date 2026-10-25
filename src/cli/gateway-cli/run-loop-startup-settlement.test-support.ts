@@ -341,5 +341,4 @@ export function registerGatewayStartupFailureSettlementTests(
       });
     },
   );
-
 }

@@ -158,7 +158,12 @@ export async function waitForTailscaleBackendReady(params: {
     params.signal?.throwIfAborted();
     let pending: string;
     try {
-      const state = await readTailscaleBackendState(runExec, params.bin, params.prefix, params.signal);
+      const state = await readTailscaleBackendState(
+        runExec,
+        params.bin,
+        params.prefix,
+        params.signal,
+      );
       if (state === "Stopped") {
         throw new TailscaleBackendStoppedError();
       }
