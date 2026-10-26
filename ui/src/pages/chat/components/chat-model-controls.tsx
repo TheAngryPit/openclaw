@@ -2,6 +2,7 @@ import { createMemo, type Element, type Accessor } from "solid-js";
 import type { ChatAccountSelection } from "../../../../../packages/gateway-protocol/src/index.ts";
 import { resolveModelRuntimeRoute } from "../../../../../src/shared/model-runtime-route.js";
 import type {
+  CyberAccessProgram,
   ModelAuthStatusResult,
   ModelCatalogEntry,
   SessionsListResult,
@@ -16,6 +17,7 @@ import {
   resolveChatFastModeSelectState,
   resolveChatModelSelectState,
   type ChatFastModeSelectValue,
+  type ChatFastModePresentation,
   type ChatFastModeTarget,
 } from "../../../lib/chat/model-select-state.ts";
 import {
@@ -75,6 +77,10 @@ export type ChatModelControlsProps = {
   effortMutationDisabledReason?: string;
   contextWindowMutationDisabledReason?: string;
   fastModeTarget?: ChatFastModeTarget;
+  fastModeDisplay?: ChatFastModePresentation;
+  accessProgramMutationDisabledReason?: string;
+  requestedAccessProgram?: CyberAccessProgram;
+  onAccessProgramSelect?: (value: CyberAccessProgram | null, sessionKey: string) => unknown;
   sending: boolean;
   sessionKey: string;
   selectedSession: SessionsListResult["sessions"][number] | undefined;
@@ -300,11 +306,14 @@ function createChatModelControls(props: ChatModelControlsProps): Accessor<{
       loading: props.loading,
       sessionsResult: props.sessionsResult,
     });
+    const presentedFastMode = props.fastModeDisplay
+      ? { ...resolvedFastMode, ...props.fastModeDisplay }
+      : resolvedFastMode;
     // Reasoning/fast state still describes the previous model until the refreshed
     // session row lands. Lock both so stale levels cannot be committed mid-switch.
     const fastMode = props.modelSwitching
-      ? { ...resolvedFastMode, disabled: true }
-      : resolvedFastMode;
+      ? { ...presentedFastMode, disabled: true }
+      : presentedFastMode;
     const runtimeSelectionLocked = activeSession?.runtimeSelectionLocked === true;
     const currentProviderHint = activeSession?.modelProvider ?? "";
     // This control owns the saved preference, not the model observed on a run.
@@ -553,15 +562,39 @@ function createChatModelControls(props: ChatModelControlsProps): Accessor<{
     const selectedContextWindow =
       contextWindowOwner?.contextWindow ?? contextWindowOwner?.contextWindowDefault ?? "";
     const defaultContextWindow = contextWindowOwner?.contextWindowDefault;
+    const accessPrograms =
+      props.connected &&
+      catalogState.hasSnapshot &&
+      catalogState.status === "ready" &&
+      !retired &&
+      !uninitialized &&
+      !props.modelSwitching
+        ? (resolveModelRuntimeEntry(catalog.entry(currentOverride || defaultModel), triggerRuntime)
+            ?.availableAccessPrograms?.cyber ?? [])
+        : [];
+    const showAccessProgram =
+      Boolean(props.onAccessProgramSelect) &&
+      accessPrograms.some((program) => program !== "standard");
+    const accessProgramDisabled =
+      commonDisabled || Boolean(props.accessProgramMutationDisabledReason);
     const effortDisabled =
       commonDisabled ||
-      effortMutationDisabled ||
       !hasResolvableModel ||
-      (thinking.options.length === 0 && fastMode.disabled);
+      ((effortMutationDisabled || (thinking.options.length === 0 && fastMode.disabled)) &&
+        (!showAccessProgram || accessProgramDisabled));
     // Keep the effort control mounted but hidden until its catalog resolves.
     const reserveEffortPicker = !hasResolvableModel;
     return {
       model: {
+        accessProgramRecovery:
+          props.requestedAccessProgram !== undefined &&
+          !showAccessProgram &&
+          props.onAccessProgramSelect
+            ? {
+                disabled: accessProgramDisabled,
+                onClear: (sessionKey) => props.onAccessProgramSelect?.(null, sessionKey),
+              }
+            : undefined,
         providerAuth: props.modelAuthStatusResult ? providerAuth : undefined,
         accountSection: props.renderAccountSection?.(currentOverride || defaultModel),
         contextWindow:
@@ -611,6 +644,16 @@ function createChatModelControls(props: ChatModelControlsProps): Accessor<{
         onTargetSelect: props.onModelPickerTargetSelect,
       },
       effort: {
+        accessProgram:
+          showAccessProgram && props.onAccessProgramSelect
+            ? {
+                requested: props.requestedAccessProgram,
+                programs: accessPrograms,
+                disabled: accessProgramDisabled,
+                sessionKey: props.sessionKey,
+                onSelect: props.onAccessProgramSelect,
+              }
+            : undefined,
         disabled: effortDisabled,
         disabledReason: props.effortMutationDisabledReason,
         fastMode: {

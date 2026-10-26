@@ -905,7 +905,7 @@ const startupEnglish = {
     agentPendingOne: "{count} pending approval",
     agentPending: "{count} pending approvals",
 
-    reviewOnly: "Review only. Sign in with approval access to record a decision.",
+    reviewOnly: "You don’t have permission to approve.",
 
     labels: {},
   },
