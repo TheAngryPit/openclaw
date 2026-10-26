@@ -52,7 +52,7 @@ struct SessionDashboardScreen: View {
                 storedOperatorToken: storedOperatorToken,
                 appModel: self.appModel)
         }
-        ZStack {
+        return ZStack {
             OpenClawProBackground()
             if let url,
                authorization == nil || authorization?.dashboardCookie(url) != nil,
