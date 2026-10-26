@@ -651,7 +651,9 @@ export class GatewayBrowserClient {
     options?: GatewayProtocolRequestOptions,
   ): Promise<T> {
     const admissionRejection = this.nativeHelloAdmission.rejectRequest<T>();
-    if (admissionRejection) return admissionRejection;
+    if (admissionRejection) {
+      return admissionRejection;
+    }
     const requestOptions: GatewayProtocolRequestOptions = {
       ...options,
       onSent: (requestId) => {

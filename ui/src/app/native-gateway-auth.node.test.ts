@@ -700,6 +700,9 @@ describe("native authenticated Control UI", () => {
 
   it("treats an authorization parser import failure as terminal", async () => {
     const importStarted = createDeferred();
+    Object.assign(navigator, { onLine: true });
+    const addEventListener = vi.spyOn(window, "addEventListener");
+    const removeEventListener = vi.spyOn(window, "removeEventListener");
     vi.resetModules();
     // mock-isolation: This test intentionally makes the lazy parser import fail.
     vi.doMock("./native-gateway-authorization.ts", () => {
@@ -723,6 +726,26 @@ describe("native authenticated Control UI", () => {
     expect(socket.sent).toEqual([]);
     await vi.advanceTimersByTimeAsync(30_000);
     expect(wsInstances).toHaveLength(1);
+    window.dispatchEvent(new Event("online"));
+    await vi.advanceTimersByTimeAsync(1500);
+    await vi.dynamicImportSettled();
+    await vi.advanceTimersByTimeAsync(0);
+    const onlineAdds = addEventListener.mock.calls.filter(([type]) => type === "online");
+    const onlineRemoves = removeEventListener.mock.calls.filter(([type]) => type === "online");
+    const unmatchedOnlineAdds = onlineAdds.map(([, listener, options]) => ({
+      listener,
+      capture: typeof options === "boolean" ? options : (options?.capture ?? false),
+    }));
+    for (const [, listener, options] of onlineRemoves) {
+      const capture = typeof options === "boolean" ? options : (options?.capture ?? false);
+      const matchingAdd = unmatchedOnlineAdds.findIndex(
+        (add) => add.listener === listener && add.capture === capture,
+      );
+      if (matchingAdd !== -1) {
+        unmatchedOnlineAdds.splice(matchingAdd, 1);
+      }
+    }
+    expect(unmatchedOnlineAdds).toEqual([]);
   });
 
   it.each(["iPhone", "iPad"])(

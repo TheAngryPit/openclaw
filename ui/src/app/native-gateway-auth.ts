@@ -5,6 +5,7 @@ import {
 } from "@openclaw/gateway-client/browser";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { formatUiError } from "../lib/format-error.ts";
+import { createIdleImport } from "../lib/idle-import.ts";
 import { listen } from "../lib/reactive/listener.ts";
 import { generateUUID } from "../lib/uuid.ts";
 
@@ -168,10 +169,14 @@ export function createNativeGatewayConnectAuth(
     signal.throwIfAborted();
     const request = { id: generateUUID(), nonce, signedAt };
     return await new Promise<NativeGatewayAuthorization>((resolve, reject) => {
+      const authorizationImport = createIdleImport(
+        () => import("./native-gateway-authorization.ts"),
+      );
       const finish = (error?: Error, authorization?: NativeGatewayAuthorization) => {
         if (!pending.delete(request.id)) {
           return;
         }
+        authorizationImport.dispose();
         waitingForPort.delete(request.id);
         clearTimeout(timer);
         stopAbort();
@@ -200,7 +205,8 @@ export function createNativeGatewayConnectAuth(
           finish(new NativeGatewayAuthUnavailableError(reply.error));
           return;
         }
-        void import("./native-gateway-authorization.ts")
+        void authorizationImport
+          .load()
           .then(({ readAuthorization }) => {
             if (!pending.has(request.id)) {
               return;
