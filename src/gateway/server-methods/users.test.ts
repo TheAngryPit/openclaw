@@ -74,9 +74,9 @@ async function runUsersHandler(
   params: object,
   client?: object,
   context: object = {},
-  options: { signal?: AbortSignal; respond?: ReturnType<typeof vi.fn> } = {},
+  options: { signal?: AbortSignal } = {},
 ) {
-  const respond = options.respond ?? vi.fn();
+  const respond = vi.fn();
   await expectDefined(
     usersHandlers[method],
     `${method} test invariant`,
@@ -112,26 +112,9 @@ async function finishWrite(
   gate: Pick<ReturnType<typeof pauseWrite>, "entered" | "release">,
   pending: ReturnType<typeof runUsersHandler>,
   whilePending: () => void,
-  response?: ReturnType<typeof vi.fn>,
 ) {
   try {
-    try {
-      await awaitGateBeforeSettlement(
-        gate.entered.promise,
-        pending,
-        "profile write was not awaited",
-      );
-    } catch (error) {
-      const earlyResponse = response?.mock.calls[0];
-      if (!earlyResponse) {
-        throw error;
-      }
-      const [ok, , responseError] = earlyResponse;
-      throw new Error(
-        `${error instanceof Error ? error.message : String(error)}; early RPC response ${JSON.stringify({ ok, error: responseError })}`,
-        { cause: error },
-      );
-    }
+    await awaitGateBeforeSettlement(gate.entered.promise, pending, "profile write was not awaited");
     whilePending();
   } finally {
     gate.release.resolve();
@@ -420,29 +403,17 @@ it("refreshes from the current catalog when an older name write returns late", a
   const refresh = vi.fn();
   const params = { profileId: profile.id, displayName: "First name", onlyIfUnset: true };
   expect(validateUsersSetDisplayNameParams(params)).toBe(true);
-  const respond = vi.fn();
-  const pending = runUsersHandler(
-    "users.setDisplayName",
-    params,
-    connectedProfileClient(),
-    {
-      refreshConnectedUserProfile: refresh,
-    },
-    { respond },
-  );
-  await finishWrite(
-    gate,
-    pending,
-    () => {
-      expectUntouched(refresh);
-      readResidentUserProfileRevision.mockReturnValue({
-        ...residentProfile,
-        display_name: "Later name",
-        updated_at: 3,
-      });
-    },
-    respond,
-  );
+  const pending = runUsersHandler("users.setDisplayName", params, connectedProfileClient(), {
+    refreshConnectedUserProfile: refresh,
+  });
+  const respond = await finishWrite(gate, pending, () => {
+    expectUntouched(refresh);
+    readResidentUserProfileRevision.mockReturnValue({
+      ...residentProfile,
+      display_name: "Later name",
+      updated_at: 3,
+    });
+  });
   expect(respond).toHaveBeenCalledExactlyOnceWith(true, { profile: firstProfile });
   expect(validateUsersSetDisplayNameResult(respond.mock.calls[0]?.[1])).toBe(true);
   expect(setCanonicalUserProfileDisplayName).toHaveBeenCalledWith(
