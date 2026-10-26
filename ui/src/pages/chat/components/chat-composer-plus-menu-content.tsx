@@ -46,6 +46,12 @@ registerEnglishCatalog(registerMcpEnglish);
 
 function rootItems(menu: ChatComposerPlusMenuContentProps): MenuEntry[] {
   const entries: MenuEntry[] = [];
+  const attachments: MenuEntry[] = [];
+  const finish = () => [
+    ...entries,
+    ...(entries.length && attachments.length ? [menuDivider("attachment-divider")] : []),
+    ...attachments,
+  ];
   const canUpload = uploadsEnabled(menu.attachments.uploadConfig);
   if (canUpload) {
     const mediaOption = menu.attachments.imagesOnly
@@ -64,7 +70,7 @@ function rootItems(menu: ChatComposerPlusMenuContentProps): MenuEntry[] {
             ? []
             : ([["file", "paperclip", t("chat.composer.attachFileOption")]] as const)),
         ] as const)) {
-      entries.push({
+      attachments.push({
         id,
         label,
         class: "agent-chat__attach-menu-option",
@@ -73,13 +79,10 @@ function rootItems(menu: ChatComposerPlusMenuContentProps): MenuEntry[] {
     }
   }
   if (menu.showCapabilities || menu.rootToggles?.length) {
-    if (canUpload) {
-      entries.push(menuDivider("attachment-divider"));
-    }
     entries.push(...(menu.rootToggles ?? []).map(renderCapabilityToggleRow));
   }
   if (!menu.showCapabilities) {
-    return entries;
+    return finish();
   }
   const counts = {
     skills:
@@ -170,7 +173,7 @@ function rootItems(menu: ChatComposerPlusMenuContentProps): MenuEntry[] {
       closeOnSelect: false,
     });
   }
-  return entries;
+  return finish();
 }
 
 function skillRows(
@@ -392,7 +395,30 @@ function handleMenuSelection(
     uploadsEnabled(props.attachments.uploadConfig) &&
     (value === "camera" || value === "photo" || value === "file" || value === "media")
   ) {
-    props.inputHandle.open(value);
+    event.preventDefault();
+    props.inputHandle.open(value, () => {
+      const durations = ["--oc-overlay-show-duration", "--oc-overlay-hide-duration"].map(
+        (name) => ({
+          name,
+          value: surface.style.getPropertyValue(name),
+          priority: surface.style.getPropertyPriority(name),
+        }),
+      );
+      for (const { name } of durations) {
+        surface.style.setProperty(name, "0s");
+      }
+      try {
+        return overlay.request(false, "none") && !surface.matches(":popover-open");
+      } finally {
+        for (const { name, value: duration, priority } of durations) {
+          if (duration) {
+            surface.style.setProperty(name, duration, priority);
+          } else {
+            surface.style.removeProperty(name);
+          }
+        }
+      }
+    });
     return;
   }
   const rootToggle = props.rootToggles?.find((toggle) => toggle.value === value);

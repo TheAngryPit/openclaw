@@ -362,7 +362,7 @@ it.each(["item", "external", "closed"] as const)(
         flush();
         expect(back.isConnected).toBe(false);
         expect(document.activeElement).toBe(
-          view.getByRole("menuitem", { name: "Take photo", hidden: true }),
+          view.getByRole("menuitem", { name: "Skills", hidden: true }),
         );
       }
     } finally {

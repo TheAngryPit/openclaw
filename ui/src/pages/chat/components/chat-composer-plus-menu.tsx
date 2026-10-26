@@ -150,6 +150,9 @@ function PlusMenuSurface(props: { menu: ChatComposerPlusMenuContentProps }) {
         id={`chat-composer-plus-${id}`}
         panelClass="agent-chat__capability-menu-panel"
         placement="top-start"
+        positionAnchor={() =>
+          host?.closest<HTMLElement>(".agent-chat__input, .new-session-page__composer") ?? undefined
+        }
         pointerFocus="trigger"
         label={t("chat.composer.addAttachment")}
         open={props.menu.open}
