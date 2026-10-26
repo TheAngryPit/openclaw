@@ -234,13 +234,7 @@ function CustodianPageContent(props: Props, host: SolidBridgeElement<Props>) {
     const owner = onboardingOwner;
     const profile = onboardingNameProfile();
     const name = onboardingNameDraft().trim();
-    if (
-      !owner ||
-      !profile ||
-      !name ||
-      onboardingSavePending ||
-      !isCurrentOnboardingOwner(owner)
-    ) {
+    if (!owner || !profile || !name || onboardingSavePending || !isCurrentOnboardingOwner(owner)) {
       return;
     }
     const displayObservationRevisionAtSaveStart = onboardingDisplayObservationRevision;

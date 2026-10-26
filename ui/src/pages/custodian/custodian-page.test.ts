@@ -221,14 +221,14 @@ describe("custodian page", () => {
 
     pendingWrite.resolve({ profile: profile("First name") });
     await waitForFast(() =>
-      expect(page.querySelector(".custodian__name-prompt")).not.toBeNull(),
+      expect(page.querySelector(".custodian__name-form")?.getAttribute("aria-busy")).toBe("false"),
     );
 
     expect(harness.context.gateway.snapshot.selfUser).toMatchObject({ id: "profile-1" });
     expect(harness.context.gateway.snapshot.selfUser?.name).toBeUndefined();
-    expect(
-      page.querySelector<HTMLInputElement>("#custodian-onboarding-display-name")?.value,
-    ).toBe("");
+    expect(page.querySelector<HTMLInputElement>("#custodian-onboarding-display-name")?.value).toBe(
+      "",
+    );
     expect(harness.context.gateway.updateSelfUser).not.toHaveBeenCalled();
   });
 

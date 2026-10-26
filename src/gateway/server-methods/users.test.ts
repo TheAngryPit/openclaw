@@ -402,12 +402,9 @@ it("refreshes from the current catalog when an older name write returns late", a
   setCanonicalUserProfileDisplayName.mockImplementationOnce(gate.run);
   const refresh = vi.fn();
   const params = { profileId: profile.id, displayName: "First name", onlyIfUnset: true };
-  const pending = runUsersHandler(
-    "users.setDisplayName",
-    params,
-    adminClient,
-    { refreshConnectedUserProfile: refresh },
-  );
+  const pending = runUsersHandler("users.setDisplayName", params, connectedProfileClient(), {
+    refreshConnectedUserProfile: refresh,
+  });
   const respond = await finishWrite(gate, pending, () => {
     expectUntouched(refresh);
     readResidentUserProfileRevision.mockReturnValue({
