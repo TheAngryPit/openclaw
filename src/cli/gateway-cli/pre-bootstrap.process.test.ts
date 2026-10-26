@@ -234,7 +234,9 @@ describe("Gateway config selection before migration admission", () => {
         writeJson(selectedPath, clobbered);
         writeJson(`${selectedPath}.bak`, future);
       } else if (name === "discarded clobbered environment") {
+        // Missing metadata alone is valid; retain a real gateway-mode loss signal.
         current = {
+          ...clobbered,
           env: { vars: { OPENCLAW_GATEWAY_TOKEN: "discarded-test-token" } },
         };
         backup = healthy;

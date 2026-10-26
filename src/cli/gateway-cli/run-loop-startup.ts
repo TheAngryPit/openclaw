@@ -179,7 +179,7 @@ export function createGatewayStartupOperations(): {
   return {
     run,
     getStopCompletion: () => stopCompletion,
-    retainStopCompletion: (completion) => {
+    retainStopCompletion: (completion: Promise<void>) => {
       stopCompletion = completion;
     },
     close: () => scope.beginClose(),
