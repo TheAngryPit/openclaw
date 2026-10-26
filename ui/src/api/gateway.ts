@@ -4,12 +4,10 @@ import {
   GatewayProtocolClient,
   GatewayProtocolRequestError,
   isGatewayProtocolResponseError,
-  type GatewayConnectAuthSelection,
   type GatewayProtocolRequestOptions,
   type GatewayProtocolRequestTiming,
   type EventFrame,
   type HelloOk,
-  selectGatewayConnectAuth,
   shouldRetryGatewayWithDeviceToken,
   resolveGatewayStartupRetryAfterMs,
   resolveSafeTimeoutDelayMs,
@@ -21,15 +19,10 @@ import type {
 } from "@openclaw/gateway-client/scope-upgrade";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { sleepWithAbort } from "@openclaw/retry";
-import { roleScopesAllow } from "../../../src/shared/operator-scope-compat.js";
 import { NativeGatewayAuthUnavailableError } from "../app/native-gateway-auth.ts";
 import { isRemoteControlUiIngress } from "../app/remote-ingress.ts";
 import { formatUiError } from "../lib/format-error.ts";
-import {
-  clearDeviceAuthToken,
-  loadDeviceAuthToken,
-  storeDeviceAuthToken,
-} from "../lib/nodes/index.ts";
+import { clearDeviceAuthToken, storeDeviceAuthToken } from "../lib/nodes/index.ts";
 import { listSessionPlacementRecoveryStorageKeys } from "../lib/sessions/session-placement-recovery-storage-key.ts";
 import { generateUUID } from "../lib/uuid.ts";
 import { createBrowserGatewaySocket, probeGatewayReachability } from "./gateway-browser-socket.ts";
@@ -48,6 +41,8 @@ import {
   deriveLegacyV4RecoveryScope,
   CONTROL_UI_OPERATOR_ROLE,
   CONTROL_UI_OPERATOR_SCOPES,
+  NativeGatewayHelloAdmission,
+  selectBrowserGatewayConnectAuth,
   type ConnectPlan,
   type GatewayBrowserConnectOptions,
 } from "./gateway-connect-plan.ts";
@@ -112,7 +107,7 @@ export class GatewayBrowserClient {
   private readonly remoteIngress = isRemoteControlUiIngress();
   private nativeAuthAbort: AbortController | null = null;
   private nativeAuthError: GatewayRequestError | null = null;
-  private nativeHelloAdmissionRequired = false;
+  private readonly nativeHelloAdmission = new NativeGatewayHelloAdmission();
   // Close/stop advances this generation before another socket can make stale hello work look active.
   private recovery = { value: "", resolved: false, generation: 0 };
   private scopeUpgradeBinding: ScopeUpgradeBinding | null = null;
@@ -133,10 +128,10 @@ export class GatewayBrowserClient {
         scopes: [],
       });
     }
-    this.nativeHelloAdmissionRequired = Boolean(this.opts.nativeConnectAuth);
+    this.nativeHelloAdmission.reset(Boolean(this.opts.nativeConnectAuth));
     this.client = new GatewayProtocolClient<ConnectPlan>({
       createSocket: (handlers) => {
-        this.nativeHelloAdmissionRequired = Boolean(this.opts.nativeConnectAuth);
+        this.nativeHelloAdmission.reset(Boolean(this.opts.nativeConnectAuth));
         this.opts.onConnecting?.();
         this.catalogRetryAbort.abort();
         this.catalogRetryAbort = new AbortController();
@@ -249,10 +244,9 @@ export class GatewayBrowserClient {
           this.handlePairingResolution(event);
           return;
         }
-        if (this.nativeHelloAdmissionRequired) {
-          return;
-        }
-        this.chatEvents.dispatch(event, this.opts.onEvent);
+        this.nativeHelloAdmission.dispatch(() =>
+          this.chatEvents.dispatch(event, this.opts.onEvent),
+        );
       },
       onGap: (info) => this.opts.onGap?.(info),
       onActivity: () => {
@@ -393,9 +387,15 @@ export class GatewayBrowserClient {
       generation,
       serverCapabilities,
       nativeSignal: this.nativeAuthAbort.signal,
-      selectAuth: (input) => this.selectConnectAuth(input),
+      selectAuth: (input) =>
+        selectBrowserGatewayConnectAuth({
+          opts: this.opts,
+          remoteIngress: this.remoteIngress,
+          ...input,
+          pendingDeviceTokenRetry: this.pendingDeviceTokenRetry,
+        }),
     });
-    this.nativeHelloAdmissionRequired = Boolean(plan.expectedHelloAuth);
+    this.nativeHelloAdmission.expect(plan);
     if (this.pendingDeviceTokenRetry && plan.selectedAuth.authDeviceToken) {
       this.pendingDeviceTokenRetry = false;
     }
@@ -403,17 +403,9 @@ export class GatewayBrowserClient {
   }
 
   private handleConnectHello(hello: GatewayHelloOk, plan: ConnectPlan) {
-    const expectedHelloAuth = plan.expectedHelloAuth;
-    if (
-      expectedHelloAuth &&
-      (hello.auth?.method !== expectedHelloAuth.method ||
-        hello.auth?.recoveryScope !== expectedHelloAuth.recoveryScope)
-    ) {
-      this.nativeAuthError = new GatewayRequestError({
-        code: "UNAVAILABLE",
-        message: "The Gateway did not return the app-approved Tailscale identity.",
-        retryable: false,
-      });
+    const admissionError = this.nativeHelloAdmission.validateHello(hello, plan);
+    if (admissionError) {
+      this.nativeAuthError = admissionError;
       throw this.nativeAuthError;
     }
     this.connectionHello = hello;
@@ -451,7 +443,7 @@ export class GatewayBrowserClient {
         scopes,
       });
     }
-    this.nativeHelloAdmissionRequired = false;
+    this.nativeHelloAdmission.complete();
     void this.resolveRecoveryScope(hello, plan);
   }
 
@@ -653,46 +645,13 @@ export class GatewayBrowserClient {
     this.client.closeSocket(CONNECT_FAILED_CLOSE_CODE, `pairing ${decision}`);
   }
 
-  private selectConnectAuth(params: {
-    role: string;
-    deviceId: string;
-  }): GatewayConnectAuthSelection {
-    if (this.remoteIngress) {
-      return {};
-    }
-    const storedEntry = loadDeviceAuthToken({
-      deviceId: params.deviceId,
-      gatewayUrl: this.opts.url,
-      role: params.role,
-    });
-    const storedScopes = storedEntry?.scopes ?? [];
-    const storedTokenCanRead =
-      params.role !== CONTROL_UI_OPERATOR_ROLE ||
-      roleScopesAllow({
-        role: params.role,
-        requestedScopes: ["operator.sessions.read"],
-        allowedScopes: storedScopes,
-      });
-    return selectGatewayConnectAuth({
-      token: this.opts.token,
-      bootstrapToken: this.opts.bootstrapToken,
-      password: this.opts.password,
-      storedToken: storedTokenCanRead ? storedEntry?.token : undefined,
-      storedScopes: storedEntry?.scopes,
-      pendingDeviceTokenRetry: this.pendingDeviceTokenRetry,
-      trustedDeviceTokenRetry: isTrustedRetryEndpoint(this.opts.url),
-      preferBootstrapToken: true,
-    });
-  }
-
   request<T = unknown>(
     method: string,
     params?: unknown,
     options?: GatewayProtocolRequestOptions,
   ): Promise<T> {
-    if (this.nativeHelloAdmissionRequired) {
-      return Promise.reject(new Error("The native Gateway hello has not been admitted."));
-    }
+    const admissionRejection = this.nativeHelloAdmission.rejectRequest<T>();
+    if (admissionRejection) return admissionRejection;
     const requestOptions: GatewayProtocolRequestOptions = {
       ...options,
       onSent: (requestId) => {
@@ -780,12 +739,9 @@ export class GatewayBrowserClient {
   }
 
   addEventListener(listener: GatewayEventListener): () => void {
-    return this.client.addEventListener((event) => {
-      if (this.nativeHelloAdmissionRequired) {
-        return;
-      }
-      this.chatEvents.dispatch(event, listener);
-    });
+    return this.client.addEventListener(
+      this.nativeHelloAdmission.guard((event) => this.chatEvents.dispatch(event, listener)),
+    );
   }
 
   /** Drops a stale socket; the shared reconnect supervisor owns recovery. */

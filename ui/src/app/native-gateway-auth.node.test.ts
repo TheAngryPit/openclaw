@@ -701,6 +701,7 @@ describe("native authenticated Control UI", () => {
   it("treats an authorization parser import failure as terminal", async () => {
     const importStarted = createDeferred();
     vi.resetModules();
+    // mock-isolation: This test intentionally makes the lazy parser import fail.
     vi.doMock("./native-gateway-authorization.ts", () => {
       importStarted.resolve();
       throw new Error("Synthetic native authorization parser chunk failed");
