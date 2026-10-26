@@ -13,7 +13,12 @@ import { mountSolid } from "../../test-helpers/mount-solid.ts";
 import { createSolidApplicationContextProvider } from "../../test-helpers/solid-application-context.tsx";
 import { flush, waitForSolid } from "../../test-helpers/solid-settle.ts";
 import { PersonalInstructions } from "./personal-instructions.tsx";
-import { createConnectedContext } from "./profile-page.test-support.tsx";
+import {
+  createConnectedContext,
+  modelAccountProfile,
+  mountProfilePage,
+} from "./profile-page.test-support.tsx";
+import { disconnectedGitHub, mockRpc } from "./profile-rpc.test-support.ts";
 
 const file = {
   agentId: "main",
@@ -386,6 +391,7 @@ it("keeps the actual Profile editor mounted across an offline transition", async
       accounts: [],
       links: [],
     }),
+    "users.prefs.get": () => ({ status: "ok", entries: {} }),
     "users.github.status": () => disconnectedGitHub,
   });
   const { context, emit } = createContext(request);
