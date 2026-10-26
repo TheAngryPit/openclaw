@@ -74,9 +74,9 @@ async function runUsersHandler(
   params: object,
   client?: object,
   context: object = {},
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; respond?: ReturnType<typeof vi.fn> } = {},
 ) {
-  const respond = vi.fn();
+  const respond = options.respond ?? vi.fn();
   await expectDefined(
     usersHandlers[method],
     `${method} test invariant`,
