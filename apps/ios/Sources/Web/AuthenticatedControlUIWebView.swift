@@ -175,6 +175,7 @@ enum AuthenticatedControlUI {
         else { return nil }
         return ControlUINativeGatewayAuthHandler(config: config, expectedToken: token, appModel: appModel)
     }
+
     @MainActor
     static func storedOperatorToken(config: GatewayConnectConfig?) -> String? {
         self.storedOperatorAuthorization(config: config)?.entry.token

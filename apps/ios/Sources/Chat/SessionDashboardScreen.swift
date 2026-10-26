@@ -55,8 +55,8 @@ struct SessionDashboardScreen: View {
         ZStack {
             OpenClawProBackground()
             if let url,
-                authorization == nil || authorization?.dashboardCookie(url) != nil,
-                self.failedAccessBoundaryIdentity != webContentIdentity
+               authorization == nil || authorization?.dashboardCookie(url) != nil,
+               self.failedAccessBoundaryIdentity != webContentIdentity
             {
                 AuthenticatedControlUIWebView(
                     url: url,
