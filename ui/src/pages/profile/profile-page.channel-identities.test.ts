@@ -51,12 +51,13 @@ afterEach(async () => {
 });
 
 it.each(["removed", "already absent", "ownership rejected"])(
-  "lists and links exact bindings, then handles unlink %s from the current Profile",
+  "lists and links exact bindings across profile refresh, then handles unlink %s",
   async (outcome) => {
     const original = {
       profileId: modelAccountProfile.id,
       identity: { channelId: "telegram", accountId: "main", senderId: "12345" },
     };
+    let emitProfileIdentityChange = () => {};
     let links = [original];
     const request = vi.fn(async (method: string, params?: unknown) => {
       if (method === "users.self") {
@@ -65,6 +66,9 @@ it.each(["removed", "already absent", "ownership rejected"])(
       if (method === "users.listModelAccounts") {
         return { profileId: modelAccountProfile.id, accounts: [], links: [] };
       }
+      if (method === "users.prefs.get") {
+        return { status: "no_durable_identity" };
+      }
       if (method === "users.listChannelIdentities") {
         expect(params).toEqual({ profileId: modelAccountProfile.id });
         return { links };
@@ -72,6 +76,7 @@ it.each(["removed", "already absent", "ownership rejected"])(
       if (method === "users.linkChannelIdentity") {
         const linked = params as typeof original;
         links = [...links, linked];
+        emitProfileIdentityChange();
         return linked;
       }
       if (method === "users.unlinkChannelIdentity") {
@@ -88,11 +93,28 @@ it.each(["removed", "already absent", "ownership rejected"])(
               link.identity.senderId === unlinked.identity.senderId
             ),
         );
+        if (outcome === "removed") {
+          emitProfileIdentityChange();
+        }
         return { removed: outcome === "removed" };
       }
       throw new Error("unexpected method: " + method);
     });
     const harness = createChannelIdentityHarness(request as GatewayBrowserClient["request"]);
+    const eventListeners = new Set<Parameters<typeof harness.context.gateway.subscribeEvents>[0]>();
+    harness.context.gateway.subscribeEvents = (listener) => {
+      eventListeners.add(listener);
+      return () => eventListeners.delete(listener);
+    };
+    emitProfileIdentityChange = () => {
+      for (const listener of eventListeners) {
+        listener({
+          type: "event",
+          event: "sessions.changed",
+          payload: { reason: "profile-identity" },
+        });
+      }
+    };
     const page = mountProfilePage(harness.context);
     await waitForFast(() =>
       expect(page.querySelector("#settings-profile-channel-identities")?.textContent).toContain(
