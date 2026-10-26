@@ -235,7 +235,6 @@ describe("Gateway config selection before migration admission", () => {
         writeJson(`${selectedPath}.bak`, future);
       } else if (name === "discarded clobbered environment") {
         current = {
-          gateway: { mode: "local" },
           env: { vars: { OPENCLAW_GATEWAY_TOKEN: "discarded-test-token" } },
         };
         backup = healthy;
