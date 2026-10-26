@@ -617,9 +617,23 @@ describe("Goal child handoff retains scoped human authority at real effects", ()
             const message = asOptionalRecord(asOptionalRecord(event)?.message);
             return message?.role === "user" ? [message] : [];
           });
-          expect(userMessages, "only human request and child settlement persist").toMatchObject([
+          const goalContinuations =
+            scenario.gate === "none"
+              ? [
+                  { display: false, provenance: { kind: "internal_system" } },
+                  { display: false, provenance: { kind: "internal_system" } },
+                ]
+              : [];
+          expect(
+            userMessages,
+            "durable user inputs retain their authorized provenance and visibility",
+          ).toMatchObject([
             { provenance: { kind: "external_user" } },
-            { provenance: { kind: "inter_session", sourceTool: "subagent_settle" } },
+            {
+              display: false,
+              provenance: { kind: "inter_session", sourceTool: "subagent_settle" },
+            },
+            ...goalContinuations,
           ]);
           expect(JSON.stringify(userMessages[0])).toContain(scenario.prompt);
           expect(JSON.stringify(userMessages[1])).toContain(scenario.childResult);
