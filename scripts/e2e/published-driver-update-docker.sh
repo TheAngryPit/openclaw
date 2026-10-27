@@ -36,8 +36,41 @@ chmod a+rw "$ARTIFACT_DIR/phase.txt"
 IMAGE_NAME="$(docker_e2e_resolve_image openclaw-published-driver-update-e2e)"
 docker_e2e_build_or_reuse "$IMAGE_NAME" published-driver-update \
   "$ROOT_DIR/scripts/e2e/Dockerfile" "$ROOT_DIR" bare
+RUN_IMAGE="$IMAGE_NAME"
 docker_e2e_package_mount_args "$PACKAGE_TGZ"
-DRIVER_ARGS=(-e GITHUB_EVENT_NAME -e OPENCLAW_PUBLISHED_DRIVER_LEGACY_SQLITE -e OPENCLAW_PUBLISHED_DRIVER_SCOPED_RESTORE)
+DRIVER_ARGS=(-e GITHUB_EVENT_NAME -e OPENCLAW_PUBLISHED_DRIVER_LEGACY_SQLITE -e OPENCLAW_PUBLISHED_DRIVER_SCOPED_RESTORE -e OPENCLAW_PUBLISHED_DRIVER_PROFILE_UPGRADE)
+if [ "${OPENCLAW_PUBLISHED_DRIVER_PROFILE_UPGRADE:-0}" = "1" ]; then
+  PLAYWRIGHT_CORE_VERSION="$(node -p "require('./package.json').devDependencies?.['playwright-core'] ?? require('./package.json').dependencies?.['playwright-core']")"
+  PLAYWRIGHT_CORE_INTEGRITY="$(PLAYWRIGHT_CORE_VERSION="$PLAYWRIGHT_CORE_VERSION" node --input-type=module <<'NODE'
+import { readFileSync } from "node:fs";
+const version = process.env.PLAYWRIGHT_CORE_VERSION;
+const escaped = version.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+const lock = readFileSync("pnpm-lock.yaml", "utf8");
+const entry = new RegExp(`^  playwright-core@${escaped}:\\r?\\n    resolution: \\{integrity: ([^}]+)\\}`, "mu").exec(lock);
+const integrity = entry?.[1];
+if (typeof integrity !== "string" || !/^sha512-[A-Za-z0-9+/]+={0,2}$/u.test(integrity)) {
+  throw new Error("Could not resolve the pinned Playwright Core integrity from pnpm-lock.yaml");
+}
+process.stdout.write(integrity);
+NODE
+)"
+  PROFILE_IMAGE="$(docker_e2e_resolve_image openclaw-published-driver-browser-e2e)"
+  if [ "${OPENCLAW_SKIP_DOCKER_BUILD:-0}" = "1" ]; then
+    echo "Reusing Docker image: $PROFILE_IMAGE"
+    if ! docker_e2e_docker_cmd image inspect "$PROFILE_IMAGE" >/dev/null 2>&1; then
+      echo "Required local profile-upgrade Docker image not found: $PROFILE_IMAGE" >&2
+      exit 1
+    fi
+  else
+    docker_build_run published-driver-browser-build \
+      --build-arg "OPENCLAW_BASE_IMAGE=$IMAGE_NAME" \
+      --build-arg "PLAYWRIGHT_CORE_VERSION=$PLAYWRIGHT_CORE_VERSION" \
+      --build-arg "PLAYWRIGHT_CORE_INTEGRITY=$PLAYWRIGHT_CORE_INTEGRITY" \
+      -t "$PROFILE_IMAGE" \
+      -f "$ROOT_DIR/scripts/e2e/Dockerfile.published-driver-browser" "$ROOT_DIR"
+  fi
+  RUN_IMAGE="$PROFILE_IMAGE"
+fi
 if [ "${OPENCLAW_PUBLISHED_DRIVER_SCOPED_RESTORE:-0}" = "1" ]; then
   fixture_root="${DOCKER_E2E_HARNESS_ROOT_DIR:-$ROOT_DIR}"
   DRIVER_ARGS+=(-v "$fixture_root/test/fixtures/sqlite/openclaw-agent-schema-v26.sql:/app/test/fixtures/sqlite/openclaw-agent-schema-v26.sql:ro")
@@ -58,6 +91,6 @@ docker_e2e_run_with_harness \
   "${DRIVER_ARGS[@]}" \
   -v "$ARTIFACT_DIR:/tmp/published-driver-artifacts" \
   "${DOCKER_E2E_PACKAGE_ARGS[@]}" \
-  "$IMAGE_NAME" \
+  "$RUN_IMAGE" \
   node scripts/e2e/lib/upgrade-survivor/published-driver.mjs \
     /tmp/openclaw-current.tgz /tmp/published-driver-artifacts "$DRIVER_TAG"

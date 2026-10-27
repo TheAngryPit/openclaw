@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1.28.0@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
+ARG OPENCLAW_BASE_IMAGE
+FROM ${OPENCLAW_BASE_IMAGE}
+
+USER root
+ARG PLAYWRIGHT_CORE_VERSION
+ARG PLAYWRIGHT_CORE_INTEGRITY
+ENV PLAYWRIGHT_BROWSERS_PATH=/home/appuser/.cache/ms-playwright
+
+RUN set -eu; \
+  test -n "$PLAYWRIGHT_CORE_VERSION"; \
+  test -n "$PLAYWRIGHT_CORE_INTEGRITY"; \
+  mkdir -p /opt/openclaw-published-driver-browser/node_modules/playwright-core; \
+  npm pack "playwright-core@$PLAYWRIGHT_CORE_VERSION" --ignore-scripts --json --pack-destination /tmp >/tmp/playwright-pack.json; \
+  package="/tmp/$(node -e 'process.stdout.write(JSON.parse(require("node:fs").readFileSync(0,"utf8"))[0].filename)' </tmp/playwright-pack.json)"; \
+  actual="sha512-$(openssl dgst -sha512 -binary "$package" | openssl base64 -A)"; \
+  test "$actual" = "$PLAYWRIGHT_CORE_INTEGRITY"; \
+  tar -xzf "$package" -C /opt/openclaw-published-driver-browser/node_modules/playwright-core --strip-components=1; \
+  printf '{"private":true,"dependencies":{"playwright-core":"%s"}}\n' "$PLAYWRIGHT_CORE_VERSION" >/opt/openclaw-published-driver-browser/package.json; \
+  rm -f "$package" /tmp/playwright-pack.json
+
+RUN mkdir -p "$PLAYWRIGHT_BROWSERS_PATH" \
+ && DEBIAN_FRONTEND=noninteractive node /opt/openclaw-published-driver-browser/node_modules/playwright-core/cli.js install --with-deps chromium \
+ && chown -R appuser:appuser "$PLAYWRIGHT_BROWSERS_PATH" \
+ && rm -rf /var/lib/apt/lists/*
+
+USER appuser

@@ -29,6 +29,7 @@ import {
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..");
 const [candidateArg, artifactsArg, driverTag = "latest"] = process.argv.slice(2);
 const legacySqlite = process.env.OPENCLAW_PUBLISHED_DRIVER_LEGACY_SQLITE === "1";
+const profileUpgrade = process.env.OPENCLAW_PUBLISHED_DRIVER_PROFILE_UPGRADE === "1";
 assert.equal(process.platform, "linux", "The managed-service fixture requires Linux");
 assert(fs.existsSync("/.dockerenv"), "Run through the bare Docker E2E runner");
 const accountHome = os.userInfo().homedir;
@@ -89,7 +90,7 @@ function writeJson(name, value) {
   fs.writeFileSync(path.join(artifacts, `${name}.json`), `${JSON.stringify(value, null, 2)}\n`);
 }
 
-async function run(name, command, args, allowFailure = false) {
+async function run(name, command, args, allowFailure = false, commandEnv = {}) {
   const started = Date.now();
   const diagnostic = name === "recorded-run" || name === "stop-service";
   const deadline = diagnostic ? cellDeadline - 5_000 : workDeadline;
@@ -109,7 +110,7 @@ async function run(name, command, args, allowFailure = false) {
       bin: command,
       args,
       cwd: root,
-      env,
+      env: { ...env, ...commandEnv },
       stdio: ["ignore", out, err],
       signal: diagnostic ? undefined : commandSignal,
       timeoutMs,
@@ -241,26 +242,30 @@ process.exitCode = await runCancelableCommand(async (signal) => {
     await run("candidate-build", "tar", ["-xOf", candidate, "package/dist/build-info.json"]);
     let build = output("candidate-build");
     let candidatePackage = candidate;
+    if (profileUpgrade) {
+      assert.equal(driverTag, driverVersion, "Profile upgrade requires an exact stable baseline pin");
+      assert(
+        compareReleaseVersions(build.version, driverVersion) >= 0,
+        `Candidate ${build.version} is older than pinned stable ${driverVersion}`,
+      );
+      assert.equal(candidatePackage, candidate, "Profile upgrade must use the exact candidate artifact");
+    }
     // Between a release and its forward-port, main lags npm latest. The cell proves
     // the update mechanics, not the version label: relabel the candidate to the
     // driver version so the future-version guard sees an upgrade, not a downgrade.
-    if (compareReleaseVersions(build.version, driverVersion) < 0) {
+    if (!profileUpgrade && compareReleaseVersions(build.version, driverVersion) < 0) {
       candidatePackage = await relabelCandidate(build.version, driverVersion);
       // Match the relabeled dist/build-info.json exactly; the installed bytes carry no source label.
       build = { ...build, version: driverVersion };
     }
-    const driverBuild = legacySqlite
+    const driverBuild = legacySqlite || profileUpgrade
       ? readJson(path.join(packageRoot, "dist/build-info.json"))
       : undefined;
     writeJson("inputs", {
       driverVersion,
       candidate: build,
-      ...(legacySqlite
-        ? {
-            driverBuild,
-            expectedSqliteStores: publishedDriverSqliteTargets(state),
-          }
-        : {}),
+      ...(profileUpgrade ? { driverBuild } : {}),
+      ...(legacySqlite ? { expectedSqliteStores: publishedDriverSqliteTargets(state) } : {}),
     });
 
     const port = await freePort();
@@ -317,15 +322,37 @@ process.exitCode = await runCancelableCommand(async (signal) => {
     if (legacySqlite || process.env.GITHUB_EVENT_NAME !== "pull_request") {
       await run("seed-state", "openclaw", ["doctor", "--fix", "--non-interactive"]);
     }
+    const projectSettings = (value) => ({
+      gateway: {
+        mode: value.gateway.mode,
+        bind: value.gateway.bind,
+        port: value.gateway.port,
+        authMode: value.gateway.auth?.mode,
+      },
+      pluginsEnabled: value.plugins.enabled,
+      agentOwnership: value.agents.ownership,
+      heartbeatEvery: value.agents.defaults.heartbeat.every,
+      workspaces: Object.fromEntries(
+        Object.entries(value.agents.entries)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([id, agent]) => [id, agent.workspace]),
+      ),
+    });
+    const settingsBefore = projectSettings(readJson(env.OPENCLAW_CONFIG_PATH));
+    if (profileUpgrade) writeJson("settings-before-update", settingsBefore);
     if (legacySqlite) {
       writeJson("sqlite-seeded", seedPublishedDriverLegacySqlite(state));
     }
     await run("install-service", "openclaw", ["gateway", "install", "--force", "--json"]);
     await ready("before-ready", port);
-    if (legacySqlite) {
+    if (legacySqlite || profileUpgrade) {
       const serving = await probe("running-before", driverVersion);
       const buildComparable =
         typeof serving.server.buildId === "string" && typeof driverBuild.buildId === "string";
+      if (profileUpgrade) {
+        assert.equal(typeof driverBuild.buildId, "string", "Stable package build identity is missing");
+        assert.equal(typeof serving.server.buildId, "string", "Stable Gateway build identity is missing");
+      }
       if (buildComparable) {
         assert.equal(serving.server.buildId, driverBuild.buildId);
       }
@@ -359,6 +386,36 @@ process.exitCode = await runCancelableCommand(async (signal) => {
       ]);
       return output(name);
     };
+    let stableProfile;
+    const browserProfileDir = path.join(runtime, "control-ui-browser-profile");
+    if (profileUpgrade) {
+      await run(
+        "stable-profile-ui",
+        process.execPath,
+        [
+          "scripts/e2e/lib/upgrade-survivor/profile-upgrade-ui.mjs",
+          "stable-seed",
+          `http://127.0.0.1:${port}/`,
+          artifacts,
+          browserProfileDir,
+          "",
+          "Stable Upgrade Survivor",
+          "",
+        ],
+        false,
+        { OPENCLAW_GATEWAY_TOKEN: token },
+      );
+      const receipt = output("stable-profile-ui");
+      assert.equal(receipt.stableDisplayName, "Stable Upgrade Survivor");
+      const profiles = await gateway("stable-profile-list", "users.list", {});
+      stableProfile = profiles.profiles?.find((profile) => profile.id === receipt.profileId);
+      assert(stableProfile, "Stable users.list omitted the authenticated UI profile");
+      assert.equal(stableProfile.displayName, receipt.stableDisplayName);
+      writeJson("stable-profile", {
+        ...receipt,
+        profileCount: profiles.profiles.length,
+      });
+    }
     const sessions = [];
     for (const incognito of [false, true]) {
       const kind = incognito ? "incognito" : "durable";
@@ -489,9 +546,57 @@ process.exitCode = await runCancelableCommand(async (signal) => {
       }
     }
     inspectIncognito("incognito-artifacts-after");
-    if (sqliteBefore) {
+    let profileReceipt;
+    if (profileUpgrade) {
+      const settingsAfter = projectSettings(readJson(env.OPENCLAW_CONFIG_PATH));
+      assert.deepEqual(settingsAfter, settingsBefore, "Published update changed retained settings");
+      writeJson("settings-after-update", settingsAfter);
+
+      const profiles = await gateway("candidate-profile-list-before-ui", "users.list", {});
+      const retained = profiles.profiles?.find((profile) => profile.id === stableProfile.id);
+      assert(retained, "Candidate users.list lost the stable UI profile ID");
+      assert.equal(retained.displayName, "Stable Upgrade Survivor");
+      writeJson("candidate-profile-preserved", {
+        profileId: retained.id,
+        displayName: retained.displayName,
+        profileCount: profiles.profiles.length,
+        candidateBuildId: target.server.buildId,
+      });
+
+      await run(
+        "candidate-profile-ui",
+        process.execPath,
+        [
+          "scripts/e2e/lib/upgrade-survivor/profile-upgrade-ui.mjs",
+          "candidate-revisit",
+          `http://127.0.0.1:${port}/`,
+          artifacts,
+          browserProfileDir,
+          stableProfile.id,
+          "Stable Upgrade Survivor",
+          "Candidate Onboarding Survivor",
+        ],
+        false,
+        { OPENCLAW_GATEWAY_TOKEN: token },
+      );
+      profileReceipt = output("candidate-profile-ui");
+      assert.equal(profileReceipt.profileId, stableProfile.id);
+      assert.equal(profileReceipt.stableDisplayName, "Stable Upgrade Survivor");
+      assert.equal(profileReceipt.candidateDisplayName, "Candidate Onboarding Survivor");
+      const afterUi = await gateway("candidate-profile-list-after-ui", "users.list", {});
+      const saved = afterUi.profiles?.find((profile) => profile.id === stableProfile.id);
+      assert(saved, "Candidate users.list lost the UI profile after onboarding save");
+      assert.equal(saved.displayName, "Candidate Onboarding Survivor");
+      writeJson("candidate-profile-after-ui", {
+        ...profileReceipt,
+        profileCount: afterUi.profiles.length,
+      });
+    }
+    if (sqliteBefore || profileUpgrade) {
       assert.equal(typeof build.buildId, "string", "Candidate build identity is missing");
       assert.equal(target.server.buildId, build.buildId);
+    }
+    if (sqliteBefore) {
       const sqliteAfter = inspectPublishedDriverSqlite(state, 2);
       writeJson("sqlite-after-update", sqliteAfter);
       await run("stop-before-repeat", path.join(bin, "systemctl"), [
@@ -541,6 +646,14 @@ process.exitCode = await runCancelableCommand(async (signal) => {
       phase: recorded.phase,
       readyz: 200,
       runningVersion: target.server.version,
+      ...(profileUpgrade
+        ? {
+            stableProfileId: stableProfile.id,
+            profileNameAfterUpdate: "Stable Upgrade Survivor",
+            profileNameAfterOnboarding: profileReceipt.candidateDisplayName,
+            settingsPreserved: true,
+          }
+        : {}),
     });
     console.log(
       `PASS published ${driverVersion} → candidate ${build.version} (${build.commit}): finished, readyz=200, running version verified`,
