@@ -185,7 +185,7 @@ export class ProfileState {
       this.identityBusy = null;
       this.identityError = null;
       this.channelIdentityProfileReady = false;
-      this.resetChannelIdentityState(identityTargetChanged);
+      this.resetChannelIdentityState(identityTargetChanged, connectionScopesChanged);
       if (identityTargetChanged) {
         this.channelIdentityProfileId = null;
       }
@@ -512,8 +512,7 @@ export class ProfileState {
       return;
     }
     const mutationId = ++this.channelIdentityMutationId;
-    const listRequestId = ++this.channelIdentityListRequestId;
-    let operationTarget = target;
+    this.channelIdentityListRequestId += 1;
     let mutationStatus: string | null = null;
     let mutationError: string | null = null;
     this.channelIdentityMutation = { kind: "link", profileId: target.profileId, identity };
@@ -533,7 +532,6 @@ export class ProfileState {
       ) {
         return;
       }
-      operationTarget = currentTarget;
       if (
         result.profileId !== target.profileId ||
         !sameChannelIdentity(result.identity, identity)
@@ -551,22 +549,19 @@ export class ProfileState {
     } catch (error) {
       const currentTarget = await this.waitForCurrentChannelIdentityTarget(target);
       if (mutationId === this.channelIdentityMutationId && currentTarget) {
-        operationTarget = currentTarget;
         mutationError = formatUiError(error, t("profilePage.channelIdentities.linkFailed"));
       }
     } finally {
       if (mutationId === this.channelIdentityMutationId && target.client === this.client) {
-        const reloadCurrentTarget =
-          (this.channelIdentityListRequestId !== listRequestId ||
-            !this.isCurrentChannelIdentityTarget(operationTarget)) &&
-          this.currentChannelIdentityTarget() !== null;
+        const reloadTarget = this.currentChannelIdentityTarget();
         this.channelIdentityMutation = null;
-        if (reloadCurrentTarget) {
+        if (reloadTarget) {
           await this.loadChannelIdentityLinks();
         }
         if (
           mutationId === this.channelIdentityMutationId &&
-          this.isCurrentChannelIdentityTarget(operationTarget)
+          reloadTarget &&
+          this.isCurrentChannelIdentityTarget(reloadTarget)
         ) {
           if (mutationStatus) {
             this.channelIdentityStatus = mutationStatus;
@@ -593,8 +588,7 @@ export class ProfileState {
       return;
     }
     const mutationId = ++this.channelIdentityMutationId;
-    const listRequestId = ++this.channelIdentityListRequestId;
-    let operationTarget = target;
+    this.channelIdentityListRequestId += 1;
     let mutationStatus: string | null = null;
     let mutationError: string | null = null;
     this.channelIdentityMutation = {
@@ -618,7 +612,6 @@ export class ProfileState {
       ) {
         return;
       }
-      operationTarget = currentTarget;
       if (this.channelIdentityLinks !== null) {
         this.channelIdentityLinks = this.channelIdentityLinks.filter(
           (candidate) => !sameChannelIdentity(candidate.identity, link.identity),
@@ -628,22 +621,19 @@ export class ProfileState {
     } catch (error) {
       const currentTarget = await this.waitForCurrentChannelIdentityTarget(target);
       if (mutationId === this.channelIdentityMutationId && currentTarget) {
-        operationTarget = currentTarget;
         mutationError = formatUiError(error, t("profilePage.channelIdentities.unlinkFailed"));
       }
     } finally {
       if (mutationId === this.channelIdentityMutationId && target.client === this.client) {
-        const reloadCurrentTarget =
-          (this.channelIdentityListRequestId !== listRequestId ||
-            !this.isCurrentChannelIdentityTarget(operationTarget)) &&
-          this.currentChannelIdentityTarget() !== null;
+        const reloadTarget = this.currentChannelIdentityTarget();
         this.channelIdentityMutation = null;
-        if (reloadCurrentTarget) {
+        if (reloadTarget) {
           await this.loadChannelIdentityLinks();
         }
         if (
           mutationId === this.channelIdentityMutationId &&
-          this.isCurrentChannelIdentityTarget(operationTarget)
+          reloadTarget &&
+          this.isCurrentChannelIdentityTarget(reloadTarget)
         ) {
           if (mutationStatus) {
             this.channelIdentityStatus = mutationStatus;
@@ -703,15 +693,17 @@ export class ProfileState {
     );
   }
 
-  private resetChannelIdentityState(targetChanged: boolean) {
+  private resetChannelIdentityState(targetChanged: boolean, retireMutation = false) {
     this.channelIdentityListRequestId += 1;
     this.channelIdentityLinks = null;
     this.channelIdentityLoading = false;
     this.channelIdentityError = null;
     this.channelIdentityStatus = null;
-    if (targetChanged) {
+    if (targetChanged || retireMutation) {
       this.channelIdentityMutationId += 1;
       this.channelIdentityMutation = null;
+    }
+    if (targetChanged) {
       this.channelId = "";
       this.accountId = "";
       this.senderId = "";

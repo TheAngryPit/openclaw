@@ -828,3 +828,275 @@ it("does not report a pending link as successful after the admin grant is revoke
   );
   expect(section.querySelector('[role="status"]')).toBeNull();
 });
+
+it.each(["link", "unlink"] as const)(
+  "retires a pending %s across admin revoke-and-restore while preserving a fresh draft",
+  async (operation) => {
+    const profileId = modelAccountProfile.id;
+    const identity = { channelId: "telegram", accountId: "main", senderId: "retired-operation" };
+    const freshDraft = { channelId: "signal", accountId: "next", senderId: "fresh-draft" };
+    let links = operation === "unlink" ? [{ profileId, identity }] : [];
+    const pendingMutation = createDeferred<unknown>();
+    const request = vi.fn(async (method: string, params?: unknown) => {
+      if (method === "users.self") {
+        return { profile: modelAccountProfile };
+      }
+      if (method === "users.listModelAccounts") {
+        return { profileId, accounts: [], links: [] };
+      }
+      if (method === "users.listChannelIdentities") {
+        return { links };
+      }
+      if (method === "users.linkChannelIdentity" && operation === "link") {
+        links = [params as { profileId: string; identity: typeof identity }];
+        return pendingMutation.promise;
+      }
+      if (method === "users.unlinkChannelIdentity" && operation === "unlink") {
+        expect(params).toEqual({ profileId, identity });
+        return pendingMutation.promise;
+      }
+      throw new Error("unexpected method: " + method);
+    });
+    const harness = createChannelIdentityHarness(request as GatewayBrowserClient["request"]);
+    const page = mountProfilePage(harness.context);
+    try {
+      await waitForFast(() =>
+        expect(
+          page.querySelector<HTMLButtonElement>(
+            "#settings-profile-channel-identities button[type=submit]",
+          )?.disabled,
+        ).toBe(false),
+      );
+      let section = page.querySelector<HTMLElement>("#settings-profile-channel-identities")!;
+      if (operation === "link") {
+        for (const [label, value] of [
+          ["Channel ID", identity.channelId],
+          ["Configured account ID", identity.accountId],
+          ["Native sender ID", identity.senderId],
+        ] as const) {
+          const input = section.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+          input.value = value;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        section.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
+      } else {
+        section
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Remove link telegram, main, retired-operation"]',
+          )!
+          .click();
+      }
+      const method =
+        operation === "link" ? "users.linkChannelIdentity" : "users.unlinkChannelIdentity";
+      await waitForFast(() =>
+        expect(request.mock.calls.some(([name]) => name === method)).toBe(true),
+      );
+
+      harness.emitHello(gatewayHelloForMethods(channelIdentityMethods, ["operator.read"]));
+      flush();
+      expect(page.querySelector("#settings-profile-channel-identities")).toBeNull();
+
+      harness.emitHello(gatewayHelloForMethods(channelIdentityMethods, ["operator.admin"]));
+      await waitForFast(() =>
+        expect(
+          page.querySelector<HTMLButtonElement>(
+            "#settings-profile-channel-identities button[type=submit]",
+          )?.disabled,
+        ).toBe(false),
+      );
+      section = page.querySelector<HTMLElement>("#settings-profile-channel-identities")!;
+      for (const [label, value] of [
+        ["Channel ID", freshDraft.channelId],
+        ["Configured account ID", freshDraft.accountId],
+        ["Native sender ID", freshDraft.senderId],
+      ] as const) {
+        const input = section.querySelector<HTMLInputElement>('input[aria-label="' + label + '"]')!;
+        input.value = value;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+
+      pendingMutation.resolve(operation === "link" ? { profileId, identity } : { removed: true });
+      await pendingMutation.promise;
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      flush();
+
+      for (const [label, value] of [
+        ["Channel ID", freshDraft.channelId],
+        ["Configured account ID", freshDraft.accountId],
+        ["Native sender ID", freshDraft.senderId],
+      ] as const) {
+        expect(
+          page
+            .querySelector<HTMLInputElement>(
+              '#settings-profile-channel-identities input[aria-label="' + label + '"]',
+            )
+            ?.value,
+        ).toBe(value);
+      }
+      expect(page.querySelector("#settings-profile-channel-identities [role=status]")).toBeNull();
+      if (operation === "unlink") {
+        expect(page.querySelector("#settings-profile-channel-identities")?.textContent).toContain(
+          identity.senderId,
+        );
+      }
+    } finally {
+      pendingMutation.resolve(operation === "link" ? { profileId, identity } : { removed: true });
+      await Promise.resolve();
+      await Promise.resolve();
+      flush();
+    }
+  },
+);
+
+it.each(["link", "unlink"] as const)(
+  "reconciles the full channel list when a %s commits during a profile preference save",
+  async (operation) => {
+    const profileId = modelAccountProfile.id;
+    const linked = {
+      profileId,
+      identity: { channelId: "discord", accountId: "main", senderId: "new-link" },
+    };
+    const removed = {
+      profileId,
+      identity: { channelId: "telegram", accountId: "main", senderId: "removed-link" },
+    };
+    const retained = {
+      profileId,
+      identity: { channelId: "matrix", accountId: "main", senderId: "retained-link" },
+    };
+    const concurrent = {
+      profileId,
+      identity: { channelId: "signal", accountId: "main", senderId: "concurrent-link" },
+    };
+    let links = operation === "link" ? [retained] : [removed, retained];
+    const canonicalLinks =
+      operation === "link" ? [retained, linked, concurrent] : [retained, concurrent];
+    const pendingMutation = createDeferred<unknown>();
+    const pendingPreference = createDeferred<{ status: "ok" }>();
+    const request = vi.fn(async (method: string, params?: unknown) => {
+      if (method === "users.self") {
+        return { profile: modelAccountProfile };
+      }
+      if (method === "users.listModelAccounts") {
+        return { profileId, accounts: [], links: [] };
+      }
+      if (method === "users.prefs.get") {
+        return { status: "ok", entries: {} };
+      }
+      if (method === "users.prefs.set") {
+        return pendingPreference.promise;
+      }
+      if (method === "users.listChannelIdentities") {
+        return { links };
+      }
+      if (method === "users.linkChannelIdentity" && operation === "link") {
+        links = canonicalLinks;
+        expect(params).toEqual({ profileId, identity: linked.identity });
+        return pendingMutation.promise;
+      }
+      if (method === "users.unlinkChannelIdentity" && operation === "unlink") {
+        links = canonicalLinks;
+        expect(params).toEqual({ profileId, identity: removed.identity });
+        return pendingMutation.promise;
+      }
+      throw new Error("unexpected method: " + method);
+    });
+    const harness = createChannelIdentityHarness(request as GatewayBrowserClient["request"]);
+    const eventListeners = new Set<Parameters<typeof harness.context.gateway.subscribeEvents>[0]>();
+    harness.context.gateway.subscribeEvents = (listener) => {
+      eventListeners.add(listener);
+      return () => eventListeners.delete(listener);
+    };
+    const emitProfileIdentityChange = () => {
+      for (const listener of eventListeners) {
+        listener({
+          type: "event",
+          event: "sessions.changed",
+          payload: { reason: "profile-identity" },
+        });
+      }
+    };
+    const page = mountProfilePage(harness.context);
+    try {
+      await waitForFast(() =>
+        expect(
+          page.querySelector<HTMLButtonElement>(
+            "#settings-profile-channel-identities button[type=submit]",
+          )?.disabled,
+        ).toBe(false),
+      );
+      const section = page.querySelector<HTMLElement>("#settings-profile-channel-identities")!;
+      if (operation === "link") {
+        for (const [label, value] of [
+          ["Channel ID", linked.identity.channelId],
+          ["Configured account ID", linked.identity.accountId],
+          ["Native sender ID", linked.identity.senderId],
+        ] as const) {
+          const input = section.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+          input.value = value;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        section.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
+      } else {
+        section
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Remove link telegram, main, removed-link"]',
+          )!
+          .click();
+      }
+      const mutationMethod =
+        operation === "link" ? "users.linkChannelIdentity" : "users.unlinkChannelIdentity";
+      await waitForFast(() =>
+        expect(request.mock.calls.some(([method]) => method === mutationMethod)).toBe(true),
+      );
+
+      const preference = page.querySelector<HTMLInputElement>("input.settings-toggle__input")!;
+      const preferenceResult = !preference.checked;
+      preference.checked = preferenceResult;
+      preference.dispatchEvent(new Event("change", { bubbles: true }));
+      await waitForFast(() =>
+        expect(request.mock.calls.some(([method]) => method === "users.prefs.set")).toBe(true),
+      );
+
+      const selfReadsBeforeEvent = request.mock.calls.filter(
+        ([method]) => method === "users.self",
+      ).length;
+      emitProfileIdentityChange();
+      flush();
+      expect(request.mock.calls.filter(([method]) => method === "users.self")).toHaveLength(
+        selfReadsBeforeEvent,
+      );
+      pendingMutation.resolve(operation === "link" ? linked : { removed: true });
+      await pendingMutation.promise;
+      await Promise.resolve();
+      await Promise.resolve();
+      await waitForFast(() =>
+        expect(
+          page.querySelector("#settings-profile-channel-identities")?.textContent,
+        ).toContain(concurrent.identity.senderId),
+      );
+
+      pendingPreference.resolve({ status: "ok" });
+      await waitForFast(() => {
+        expect(preference.disabled).toBe(false);
+        expect(preference.checked).toBe(preferenceResult);
+      });
+      const finalSection = page.querySelector<HTMLElement>("#settings-profile-channel-identities")!;
+      expect(finalSection.textContent).toContain(retained.identity.senderId);
+      if (operation === "link") {
+        expect(finalSection.textContent).toContain(linked.identity.senderId);
+      } else {
+        expect(finalSection.textContent).not.toContain(removed.identity.senderId);
+      }
+      expect(finalSection.textContent).toContain(concurrent.identity.senderId);
+    } finally {
+      pendingMutation.resolve(operation === "link" ? linked : { removed: true });
+      pendingPreference.resolve({ status: "ok" });
+      await Promise.resolve();
+      await Promise.resolve();
+      flush();
+    }
+  },
+);
