@@ -40,7 +40,12 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function createContext(request: GatewayRequestHandler, signedIn = true, multipleProfiles = true) {
+function createContext(
+  request: GatewayRequestHandler,
+  signedIn = true,
+  multipleProfiles = true,
+  scopes: string[] = hello.auth.scopes,
+) {
   const harness = createConnectedContext(
     request,
     signedIn ? { id: "profile-1", name: "Ada" } : null,
@@ -48,6 +53,7 @@ function createContext(request: GatewayRequestHandler, signedIn = true, multiple
   const base = harness.context;
   harness.emitHello({
     ...hello,
+    auth: { ...hello.auth, scopes },
     policy: { hasMultipleSessionSharingIdentities: multipleProfiles },
   });
   const agents = base.agents;
@@ -62,8 +68,13 @@ function createContext(request: GatewayRequestHandler, signedIn = true, multiple
     emit: (patch: Parameters<typeof harness.emitSnapshot>[0]) => harness.emitSnapshot(patch),
   };
 }
-function mount(request: GatewayRequestHandler, signedIn = true, multipleProfiles = true) {
-  const harness = createContext(request, signedIn, multipleProfiles);
+function mount(
+  request: GatewayRequestHandler,
+  signedIn = true,
+  multipleProfiles = true,
+  scopes: string[] = hello.auth.scopes,
+) {
+  const harness = createContext(request, signedIn, multipleProfiles, scopes);
   const provider = createSolidApplicationContextProvider(harness.context);
   const { container: element } = mountSolid(() => <PersonalInstructions />, {
     wrapper: provider.wrapper,
@@ -84,8 +95,8 @@ function replies(...results: (Partial<PersonalFile> | Promise<PersonalFile> | Er
   }
   return request;
 }
-async function loaded(request = replies({})) {
-  const harness = mount(request);
+async function loaded(request = replies({}), scopes: string[] = hello.auth.scopes) {
+  const harness = mount(request, true, true, scopes);
   await idle(harness.element);
   return { ...harness, request };
 }
@@ -131,25 +142,28 @@ async function input(element: HTMLElement, content: string) {
   flush();
 }
 
-it("creates the signed-in personal file", async () => {
-  const initial = { ...file, content: "", hash: null, missing: true };
-  const content = "New file";
-  const request = replies(initial, { content, hash: "hash-2" });
-  const { element } = await loaded(request);
-  expect(request).toHaveBeenCalledWith("users.personalFile.get", { agentId: "main" });
-  expect(button(element, "Save").disabled).toBe(true);
-  expect(button(element, "Reload")).toBeUndefined();
-  const editor = textarea(element);
-  expect(editor?.getAttribute("aria-label")).toBe("Personal instructions");
-  expect(editor?.getAttribute("aria-describedby")).toBe("personal-instructions-guidance");
-  expect(element.textContent).toContain("created when you save");
-  await input(element, "x".repeat(4001));
-  expect(button(element, "Save").disabled).toBe(true);
-  expect(alert(element)?.textContent).toContain("4,000");
-  await save(element, content);
-  expectSave(request, content, initial.hash);
-  expect(element.textContent).toContain("Saved");
-});
+it.each(["operator.read", "operator.sessions.read"])(
+  "creates the signed-in personal file with %s",
+  async (scope) => {
+    const initial = { ...file, content: "", hash: null, missing: true };
+    const content = "New file";
+    const request = replies(initial, { content, hash: "hash-2" });
+    const { element } = await loaded(request, [scope]);
+    expect(request).toHaveBeenCalledWith("users.personalFile.get", { agentId: "main" });
+    expect(button(element, "Save").disabled).toBe(true);
+    expect(button(element, "Reload")).toBeUndefined();
+    const editor = textarea(element);
+    expect(editor?.getAttribute("aria-label")).toBe("Personal instructions");
+    expect(editor?.getAttribute("aria-describedby")).toBe("personal-instructions-guidance");
+    expect(element.textContent).toContain("created when you save");
+    await input(element, "x".repeat(4001));
+    expect(button(element, "Save").disabled).toBe(true);
+    expect(alert(element)?.textContent).toContain("4,000");
+    await save(element, content);
+    expectSave(request, content, initial.hash);
+    expect(element.textContent).toContain("Saved");
+  },
+);
 
 it.each([
   [false, true],
