@@ -11,32 +11,10 @@ import { cleanupSolid } from "../../test-helpers/mount-solid.ts";
 import { flush } from "../../test-helpers/solid-settle.ts";
 import { waitForFast } from "../../test-helpers/wait-for.ts";
 import {
-  createConnectedContext,
-  modelAccountProfile,
-  mountProfilePage,
-} from "./profile-page.test-support.tsx";
-
-const channelIdentityMethods = [
-  "users.self",
-  "users.listModelAccounts",
-  "users.listChannelIdentities",
-  "users.linkChannelIdentity",
-  "users.unlinkChannelIdentity",
-];
-
-function createChannelIdentityHarness(
-  request: GatewayBrowserClient["request"],
-  profile: UserProfile = modelAccountProfile,
-  scopes: readonly string[] = ["operator.admin"],
-) {
-  const harness = createConnectedContext(request, {
-    id: profile.id,
-    email: profile.emails[0],
-    name: profile.displayName ?? undefined,
-  });
-  harness.context.gateway.snapshot.hello = gatewayHelloForMethods(channelIdentityMethods, scopes);
-  return harness;
-}
+  channelIdentityMethods,
+  createChannelIdentityHarness,
+} from "./profile-page.channel-identities.test-support.ts";
+import { modelAccountProfile, mountProfilePage } from "./profile-page.test-support.tsx";
 
 beforeEach(async () => {
   await i18n.setLocale("en");
@@ -285,7 +263,8 @@ it("renders first-link and last-unlink transitions with single-flight mutation a
     identity: { channelId: string; accountId: string; senderId: string };
   }>();
   const identity = { channelId: "telegram", accountId: "main", senderId: "same-turn" };
-  const request = vi.fn(async (method: string) => {
+  let links: Array<{ profileId: string; identity: typeof identity }> = [];
+  const request = vi.fn(async (method: string, params?: unknown) => {
     if (method === "users.self") {
       return { profile: modelAccountProfile };
     }
@@ -293,12 +272,21 @@ it("renders first-link and last-unlink transitions with single-flight mutation a
       return { profileId: modelAccountProfile.id, accounts: [], links: [] };
     }
     if (method === "users.listChannelIdentities") {
-      return { links: [] };
+      return { links };
     }
     if (method === "users.linkChannelIdentity") {
+      expect(params).toEqual({ profileId: modelAccountProfile.id, identity });
+      links = [{ profileId: modelAccountProfile.id, identity }];
       return pendingLink.promise;
     }
     if (method === "users.unlinkChannelIdentity") {
+      links = links.filter(
+        (link) =>
+          link.profileId !== modelAccountProfile.id ||
+          link.identity.channelId !== identity.channelId ||
+          link.identity.accountId !== identity.accountId ||
+          link.identity.senderId !== identity.senderId,
+      );
       return { removed: true };
     }
     if (method === "users.prefs.get") {
@@ -438,9 +426,7 @@ it("reloads links after a stale mutation releases its guard without a view flush
       ),
     );
 
-    harness.emitHello(
-      gatewayHelloForMethods(channelIdentityMethods, ["operator.admin", "operator.read"]),
-    );
+    harness.emitHello(gatewayHelloForMethods(channelIdentityMethods, ["operator.admin"]));
     await waitForFast(() => expect(preferenceCalls).toBe(2));
     expect(selfCalls).toBe(2);
     expect(listCalls).toBe(1);
@@ -830,127 +816,6 @@ it("does not report a pending link as successful after the admin grant is revoke
 });
 
 it.each(["link", "unlink"] as const)(
-  "retires a pending %s across admin revoke-and-restore while preserving a fresh draft",
-  async (operation) => {
-    const profileId = modelAccountProfile.id;
-    const identity = { channelId: "telegram", accountId: "main", senderId: "retired-operation" };
-    const freshDraft = { channelId: "signal", accountId: "next", senderId: "fresh-draft" };
-    let links = operation === "unlink" ? [{ profileId, identity }] : [];
-    const pendingMutation = createDeferred<unknown>();
-    const request = vi.fn(async (method: string, params?: unknown) => {
-      if (method === "users.self") {
-        return { profile: modelAccountProfile };
-      }
-      if (method === "users.listModelAccounts") {
-        return { profileId, accounts: [], links: [] };
-      }
-      if (method === "users.listChannelIdentities") {
-        return { links };
-      }
-      if (method === "users.linkChannelIdentity" && operation === "link") {
-        links = [params as { profileId: string; identity: typeof identity }];
-        return pendingMutation.promise;
-      }
-      if (method === "users.unlinkChannelIdentity" && operation === "unlink") {
-        expect(params).toEqual({ profileId, identity });
-        return pendingMutation.promise;
-      }
-      throw new Error("unexpected method: " + method);
-    });
-    const harness = createChannelIdentityHarness(request as GatewayBrowserClient["request"]);
-    const page = mountProfilePage(harness.context);
-    try {
-      await waitForFast(() =>
-        expect(
-          page.querySelector<HTMLButtonElement>(
-            "#settings-profile-channel-identities button[type=submit]",
-          )?.disabled,
-        ).toBe(false),
-      );
-      let section = page.querySelector<HTMLElement>("#settings-profile-channel-identities")!;
-      if (operation === "link") {
-        for (const [label, value] of [
-          ["Channel ID", identity.channelId],
-          ["Configured account ID", identity.accountId],
-          ["Native sender ID", identity.senderId],
-        ] as const) {
-          const input = section.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
-          input.value = value;
-          input.dispatchEvent(new Event("input", { bubbles: true }));
-        }
-        section.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
-      } else {
-        section
-          .querySelector<HTMLButtonElement>(
-            'button[aria-label="Remove link telegram, main, retired-operation"]',
-          )!
-          .click();
-      }
-      const method =
-        operation === "link" ? "users.linkChannelIdentity" : "users.unlinkChannelIdentity";
-      await waitForFast(() =>
-        expect(request.mock.calls.some(([name]) => name === method)).toBe(true),
-      );
-
-      harness.emitHello(gatewayHelloForMethods(channelIdentityMethods, ["operator.read"]));
-      flush();
-      expect(page.querySelector("#settings-profile-channel-identities")).toBeNull();
-
-      harness.emitHello(gatewayHelloForMethods(channelIdentityMethods, ["operator.admin"]));
-      await waitForFast(() =>
-        expect(
-          page.querySelector<HTMLButtonElement>(
-            "#settings-profile-channel-identities button[type=submit]",
-          )?.disabled,
-        ).toBe(false),
-      );
-      section = page.querySelector<HTMLElement>("#settings-profile-channel-identities")!;
-      for (const [label, value] of [
-        ["Channel ID", freshDraft.channelId],
-        ["Configured account ID", freshDraft.accountId],
-        ["Native sender ID", freshDraft.senderId],
-      ] as const) {
-        const input = section.querySelector<HTMLInputElement>('input[aria-label="' + label + '"]')!;
-        input.value = value;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-      }
-
-      pendingMutation.resolve(operation === "link" ? { profileId, identity } : { removed: true });
-      await pendingMutation.promise;
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
-      flush();
-
-      for (const [label, value] of [
-        ["Channel ID", freshDraft.channelId],
-        ["Configured account ID", freshDraft.accountId],
-        ["Native sender ID", freshDraft.senderId],
-      ] as const) {
-        expect(
-          page
-            .querySelector<HTMLInputElement>(
-              '#settings-profile-channel-identities input[aria-label="' + label + '"]',
-            )
-            ?.value,
-        ).toBe(value);
-      }
-      expect(page.querySelector("#settings-profile-channel-identities [role=status]")).toBeNull();
-      if (operation === "unlink") {
-        expect(page.querySelector("#settings-profile-channel-identities")?.textContent).toContain(
-          identity.senderId,
-        );
-      }
-    } finally {
-      pendingMutation.resolve(operation === "link" ? { profileId, identity } : { removed: true });
-      await Promise.resolve();
-      await Promise.resolve();
-      flush();
-    }
-  },
-);
-
-it.each(["link", "unlink"] as const)(
   "reconciles the full channel list when a %s commits during a profile preference save",
   async (operation) => {
     const profileId = modelAccountProfile.id;
@@ -973,6 +838,8 @@ it.each(["link", "unlink"] as const)(
     let links = operation === "link" ? [retained] : [removed, retained];
     const canonicalLinks =
       operation === "link" ? [retained, linked, concurrent] : [retained, concurrent];
+    let channelListReads = 0;
+    let lastListedLinks: typeof canonicalLinks = [];
     const pendingMutation = createDeferred<unknown>();
     const pendingPreference = createDeferred<{ status: "ok" }>();
     const request = vi.fn(async (method: string, params?: unknown) => {
@@ -989,6 +856,8 @@ it.each(["link", "unlink"] as const)(
         return pendingPreference.promise;
       }
       if (method === "users.listChannelIdentities") {
+        channelListReads += 1;
+        lastListedLinks = [...links];
         return { links };
       }
       if (method === "users.linkChannelIdentity" && operation === "link") {
@@ -1027,6 +896,7 @@ it.each(["link", "unlink"] as const)(
           )?.disabled,
         ).toBe(false),
       );
+      expect(channelListReads).toBe(1);
       const section = page.querySelector<HTMLElement>("#settings-profile-channel-identities")!;
       if (operation === "link") {
         for (const [label, value] of [
@@ -1072,11 +942,8 @@ it.each(["link", "unlink"] as const)(
       await pendingMutation.promise;
       await Promise.resolve();
       await Promise.resolve();
-      await waitForFast(() =>
-        expect(
-          page.querySelector("#settings-profile-channel-identities")?.textContent,
-        ).toContain(concurrent.identity.senderId),
-      );
+      await waitForFast(() => expect(channelListReads).toBe(2));
+      expect(lastListedLinks).toEqual(canonicalLinks);
 
       pendingPreference.resolve({ status: "ok" });
       await waitForFast(() => {

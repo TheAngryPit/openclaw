@@ -89,6 +89,7 @@ export function ProfilePage() {
     return state;
   };
   const canWrite = createMemo(() => view().canWrite);
+  const canManageChannelIdentities = createMemo(() => view().canManageChannelIdentities());
   const identityScope = createMemo(() => view().identityScope);
   const presentation = createMemo(() => {
     const scope = identityScope();
@@ -569,7 +570,10 @@ export function ProfilePage() {
                 <IdentityContent pending={isPending(identityRead)} />
               </Loading>
             </Errored>
-            <ProfileChannelIdentities getState={view} />
+            <ProfileChannelIdentities
+              getState={view}
+              canManage={() => latest(canManageChannelIdentities)}
+            />
           </Show>
           <PersonalInstructions
             hidden={

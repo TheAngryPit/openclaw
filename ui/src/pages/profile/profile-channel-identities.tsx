@@ -13,6 +13,7 @@ registerEnglishCatalog(registerProfileEnglish);
 
 export type ProfileChannelIdentitiesProps = {
   getState: () => ProfileState;
+  canManage: () => boolean;
 };
 
 export function ProfileChannelIdentities(props: ProfileChannelIdentitiesProps) {
@@ -20,7 +21,7 @@ export function ProfileChannelIdentities(props: ProfileChannelIdentitiesProps) {
 
   return (
     <openclaw-profile-channel-identities style={{ display: "contents" }}>
-      <Show when={state().canManageChannelIdentities()}>
+      <Show when={props.canManage()}>
         <form
           id="settings-profile-channel-identities"
           aria-busy={

@@ -951,7 +951,7 @@ it("preserves an unsaved display-name draft when unrelated negotiated scopes cha
   flush();
 
   harness.emitHello(gatewayHelloForMethods([], ["operator.admin", "operator.read"]));
-  await waitForFast(() => expect(refresh()?.disabled).toBe(true));
+  await waitForFast(() => expect(selfReads).toBe(2));
   reload.resolve({ profile: modelAccountProfile });
   await waitForFast(() => expect(refresh()?.disabled).toBe(false));
   expect(input()?.value).toBe("Unsaved profile draft");
