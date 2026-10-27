@@ -8,7 +8,7 @@ import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import { i18n } from "../../i18n/index.ts";
 import { gatewayHelloForMethods } from "../../test-helpers/gateway-methods.ts";
 import { cleanupSolid } from "../../test-helpers/mount-solid.ts";
-import { flush } from "../../test-helpers/solid-settle.ts";
+import { flush, waitForSolid } from "../../test-helpers/solid-settle.ts";
 import { waitForFast } from "../../test-helpers/wait-for.ts";
 import {
   channelIdentityMethods,
@@ -946,18 +946,26 @@ it.each(["link", "unlink"] as const)(
       expect(lastListedLinks).toEqual(canonicalLinks);
 
       pendingPreference.resolve({ status: "ok" });
-      await waitForFast(() => {
-        expect(preference.disabled).toBe(false);
-        expect(preference.checked).toBe(preferenceResult);
+      await waitForSolid(() => {
+        const finalPreference = page.querySelector<HTMLInputElement>(
+          "input.settings-toggle__input",
+        );
+        expect(finalPreference).not.toBeNull();
+        expect(finalPreference?.disabled).toBe(false);
+        expect(finalPreference?.checked).toBe(preferenceResult);
+        const finalSection = page.querySelector<HTMLElement>(
+          "#settings-profile-channel-identities",
+        );
+        expect(finalSection).not.toBeNull();
+        expect(finalSection?.getAttribute("aria-busy")).toBe("false");
+        expect(finalSection?.textContent).toContain(retained.identity.senderId);
+        if (operation === "link") {
+          expect(finalSection?.textContent).toContain(linked.identity.senderId);
+        } else {
+          expect(finalSection?.textContent).not.toContain(removed.identity.senderId);
+        }
+        expect(finalSection?.textContent).toContain(concurrent.identity.senderId);
       });
-      const finalSection = page.querySelector<HTMLElement>("#settings-profile-channel-identities")!;
-      expect(finalSection.textContent).toContain(retained.identity.senderId);
-      if (operation === "link") {
-        expect(finalSection.textContent).toContain(linked.identity.senderId);
-      } else {
-        expect(finalSection.textContent).not.toContain(removed.identity.senderId);
-      }
-      expect(finalSection.textContent).toContain(concurrent.identity.senderId);
     } finally {
       pendingMutation.resolve(operation === "link" ? linked : { removed: true });
       pendingPreference.resolve({ status: "ok" });
