@@ -3,12 +3,7 @@ import type { Client, Tool } from "@modelcontextprotocol/client";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import type { SessionToolOverrides } from "../config/sessions/types.js";
 import type { McpServerConfig } from "../config/types.mcp.js";
-import type {
-  McpCatalogTool,
-  McpServerCatalog,
-  McpToolCatalog,
-  McpToolCatalogDiagnostic,
-} from "./agent-bundle-mcp-types.js";
+import type { McpCatalogTool, McpServerCatalog, McpToolCatalog } from "./agent-bundle-mcp-types.js";
 import {
   readMcpAppIcons,
   readMcpAppSettingsCapability,
@@ -26,17 +21,6 @@ import {
 import { isMcpToolAllowed, normalizeMcpToolFilter } from "./mcp-tool-filter.js";
 import { normalizeMcpToolCatalog } from "./mcp-tool-metadata.js";
 
-export function projectBundleMcpCatalogFailure(
-  catalog: McpToolCatalog | undefined,
-  diagnostic: McpToolCatalogDiagnostic,
-): McpToolCatalog {
-  return {
-    ...(catalog ?? { version: 1, servers: {}, tools: [] }),
-    generatedAt: Date.now(),
-    diagnostics: [diagnostic],
-  };
-}
-
 export function projectBundleMcpServerCatalog({
   serverName,
   safeServerName,
@@ -48,6 +32,7 @@ export function projectBundleMcpServerCatalog({
   capabilities,
   serverVersion,
   serverCapabilities,
+  instructions,
   pluginId,
   connection,
 }: {
@@ -61,6 +46,7 @@ export function projectBundleMcpServerCatalog({
   capabilities: ReturnType<typeof summarizeServerCapabilities>;
   serverVersion: ReturnType<Client["getServerVersion"]>;
   serverCapabilities: ReturnType<Client["getServerCapabilities"]>;
+  instructions?: string;
   pluginId?: string;
   connection: { requestTimeoutMs: number; supportsParallelToolCalls: boolean };
 }): { catalog: McpToolCatalog; metadata: ReturnType<typeof normalizeMcpToolCatalog>["metadata"] } {
@@ -82,6 +68,7 @@ export function projectBundleMcpServerCatalog({
     pluginId,
     title: serverVersion?.title,
     icons: readMcpAppIcons(serverVersion?.icons),
+    ...(instructions ? { instructions } : {}),
     settings: readMcpAppSettingsCapability(serverCapabilities),
     toolCount: exposedTools.length,
     requestTimeoutMs: connection.requestTimeoutMs,
