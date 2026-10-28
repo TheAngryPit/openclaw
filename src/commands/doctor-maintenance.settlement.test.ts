@@ -747,13 +747,27 @@ it.each([false, true])(
   },
 );
 
-it("leaves an already stopped Gateway with its legacy update parent after repair", async () => {
-  vi.stubEnv("OPENCLAW_UPDATE_IN_PROGRESS", "1");
-  boundary.stop.mockImplementation(async () => ({ ...settlement.stopped, stopped: false }));
-  const maintenance = await begin();
-  await maintenance!.finish({});
-  expectCalls(0, "restart", "health");
-});
+it.each([false, true])(
+  "leaves an already stopped Gateway stopped after update repair (public repair: %s)",
+  async (reportStoppedService) => {
+    vi.stubEnv("OPENCLAW_UPDATE_IN_PROGRESS", "1");
+    boundary.stop.mockImplementation(async () => ({ ...settlement.stopped, stopped: false }));
+    const maintenance = await beginDoctorMaintenance({
+      root,
+      options: { repair: true, nonInteractive: true },
+      runtime: { log: boundary.log, error: vi.fn(), exit: vi.fn() },
+      reportStoppedService,
+    });
+    await maintenance!.finish({});
+    expectCalls(0, "restart", "health");
+    // A legacy update parent restarts its own stop; only public repair names the next step.
+    expect(maintenance!.warnings).toEqual(
+      reportStoppedService
+        ? [expect.stringMatching(/Gateway service is stopped.*openclaw gateway start/)]
+        : [],
+    );
+  },
+);
 
 const leaseGuidance =
   "Doctor could not enter maintenance. An agent database is in use. Stop the Gateway and other OpenClaw processes or reboot, then rerun openclaw doctor --fix.";
@@ -764,23 +778,25 @@ const privateCause =
 
 it("refuses an external active agent lease before serving-Gateway coordinator contention", async () => {
   boundary.external.mockReturnValue(true);
-  boundary.readLeases.mockReturnValue([
-    {
+  boundary.readLeases.mockReturnValue(
+    [4242, 4242, 4243, 4244, 4245].map((owner_pid) => ({
       agent_id: "private-agent",
       lease_id: "private-lease",
-      owner_pid: 4242,
+      owner_pid,
       owner_start_time: 123,
       opened_at: 1,
       provenance: null,
       path: "/synthetic/private-state/private.db",
-    },
-  ]);
+    })),
+  );
   boundary.gatewayAcquire.mockImplementation(() => {
     throw new Error("another OpenClaw process owns gateway-lifecycle");
   });
   const refusal: unknown = await begin().catch((error: unknown) => error);
   expect(refusal).toBeInstanceOf(UpdateDoctorError);
-  expect(refusal).toMatchObject({ message: leaseGuidance });
+  expect(refusal).toMatchObject({
+    message: `${leaseGuidance} Observed lease holder PIDs 4242, 4243, 4244, ...`,
+  });
   const facts = collectUpdateDoctorFailureFacts(refusal);
   expect(facts).toEqual([leaseFact]);
   expect(await projectPublicUpdateFailureIdentifiers(facts[0]!)).toEqual({

@@ -4,7 +4,7 @@ import type {
   SessionsPatchParams,
 } from "../../../packages/gateway-protocol/src/index.js";
 import type { AdmittedRunOperatorAuthority } from "../../agents/admitted-run-context.js";
-import { resolveSessionModelRef } from "../../agents/session-model-ref.js";
+import { resolveSessionSubmittedModelRef } from "../../agents/session-model-ref.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import { isInternalSessionEffectsKey } from "../../config/sessions/internal-session-key.js";
 import type { SqliteLifecycleTargetSnapshot } from "../../config/sessions/session-accessor.sqlite-entry-equality.js";
@@ -124,7 +124,11 @@ export async function executeSessionPatchMutations(params: {
     length: params.targets.length,
   });
   for (const [index, { input, key, requestedAgent, resolved }] of discovery.value.entries()) {
-    const unreadAckError = validateSessionUnreadAck(params.patch, input);
+    // Commit guards are core control state; construct the protocol patch from
+    // its public identity fields so closures can never reach hooks or entries.
+    const { commitGuard: _commitGuard, ...identity } = input;
+    const fullPatch: SessionsPatchParams = { ...params.patch, ...identity };
+    const unreadAckError = validateSessionUnreadAck(fullPatch, input);
     if (unreadAckError) {
       outcomes[index] = invalidSessionRequest(unreadAckError);
       continue;
@@ -160,10 +164,6 @@ export async function executeSessionPatchMutations(params: {
       outcomes[index] = invalidSessionRequest(missingHarnessSessionError);
       continue;
     }
-    // Commit guards are core control state; construct the protocol patch from
-    // its public identity fields so closures can never reach hooks or entries.
-    const { commitGuard: _commitGuard, ...identity } = input;
-    const fullPatch: SessionsPatchParams = { ...params.patch, ...identity };
     const expectationError =
       sessionPatchExpectations.resolveSessionPatchExpectationError(fullPatch);
     if (expectationError) {
@@ -364,9 +364,9 @@ export async function executeSessionPatchMutations(params: {
                         store: workingStore,
                         ...(target.requestedAgentId ? { agentId: target.requestedAgentId } : {}),
                       });
-                      const previousModel =
-                        target.fullPatch.model !== undefined && existingEntry
-                          ? resolveSessionModelRef(cfg, existingEntry, target.targetAgentId)
+                      const submittedModel =
+                        target.fullPatch.model !== undefined
+                          ? resolveSessionSubmittedModelRef(existingEntry)
                           : undefined;
                       const accessError = targetAccessError(
                         existingEntry,
@@ -555,6 +555,14 @@ export async function executeSessionPatchMutations(params: {
                       if (runtimeSelection.validate) {
                         commitGuards.add(runtimeSelection.validate);
                       }
+                      if (
+                        submittedModel &&
+                        !projected.entry.lastSubmittedModel &&
+                        (submittedModel.provider !== projected.entry.modelProvider ||
+                          submittedModel.model !== projected.entry.model)
+                      ) {
+                        projected.entry.lastSubmittedModel = submittedModel;
+                      }
                       const replacement = prepareSessionPatchReplacement({
                         existingEntry,
                         projectedEntry: projected.entry,
@@ -565,9 +573,6 @@ export async function executeSessionPatchMutations(params: {
                         labelOwners,
                         assertCurrent: assertCommitAllowed,
                       });
-                      if (previousModel) {
-                        replacement.outcome.previousModel = previousModel;
-                      }
                       if (replacement.replacement) {
                         replacements.push(replacement.replacement);
                         if (!existingEntry && params.onCreatedSessionCommitted) {
@@ -637,17 +642,13 @@ export async function executeSessionPatchMutations(params: {
                     recordSessionStatusModelPatchOutcome(outcome.applied);
                   }
                   if (outcome.ok && outcome.applied) {
-                    await patchEffects.applySessionPatchModelEffects({
+                    modelSelection.refreshSessionPatchQueuedSelection({
                       cfg,
                       entry: outcome.entry,
                       patch: target.fullPatch,
-                      previousModel: outcome.previousModel,
                       sessionKey: target.canonicalKey,
                       agentId: target.targetAgentId,
-                      storePath: target.storePath,
-                      env: storage?.env,
                       catalog: (await catalogs.available(target.targetAgentId))?.entries,
-                      assertCurrent: assertCommitAllowed,
                     });
                   }
                 }

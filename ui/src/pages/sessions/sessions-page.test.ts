@@ -571,6 +571,23 @@ describe("sessions page lifecycle", () => {
     expect(sessions.deleteMany).toHaveBeenCalledWith([capturedTarget(target)]);
   });
 
+  it("warns about automations added to a selected conversation after selection", async () => {
+    vi.mocked(showConfirmDialog).mockResolvedValue(false);
+    const target = sessionRow("gained-automation");
+    const { page, sessions } = await mountMutation();
+    page.result = sessionsResult([target], 1);
+    // Selecting captures a row copy through the page's real selection owner.
+    selectRows(page, target);
+    // A refreshed row for the same incarnation keeps the captured selection copy.
+    page.result = sessionsResult([{ ...target, hasAutomation: true }], 2);
+    await page.deleteSelected();
+    expect(showConfirmDialog).toHaveBeenCalledOnce();
+    expect(showConfirmDialog).toHaveBeenCalledWith(
+      expect.objectContaining({ confirmLabel: "Delete anyway" }),
+    );
+    expect(sessions.deleteMany).not.toHaveBeenCalled();
+  });
+
   it("publishes unrelated roster updates while an optimistic deletion is pending", async () => {
     const target = sessionRow("before");
     const arrived = sessionRow("arrived", { updatedAt: 2 });
@@ -709,24 +726,29 @@ describe("sessions page lifecycle", () => {
     expect(context.navigate).not.toHaveBeenCalled();
   });
 
-  it("forks an active session from its last completed message", async () => {
-    const { page, sessions } = await mountMutation({
-      createResult: vi.fn<SessionCapability["createResult"]>(async () => ({
-        key: "active-fork",
-        entry: { sessionId: "active-fork-id" },
-        initialRun: { status: "idle" },
-      })),
-    });
-    await page.forkSession("main", true);
-    expect(sessions.createResult).toHaveBeenCalledWith(
-      {
-        parentSessionKey: "main",
-        fork: true,
-        forkFrom: "last-completed",
-      },
-      { signal: expect.any(AbortSignal) },
-    );
-  });
+  it.each(["operator.write", "operator.sessions.write"])(
+    "forks an active owned session with %s",
+    async (scope) => {
+      const { page, sessions, connection } = await mountMutation({
+        createResult: vi.fn<SessionCapability["createResult"]>(async () => ({
+          key: "active-fork",
+          entry: { sessionId: "active-fork-id" },
+          initialRun: { status: "idle" },
+        })),
+      });
+      connection.emit({ hello: gatewayHelloForMethods(["sessions.create"], [scope]) });
+      page.result = sessionsResult([sessionRow("main", { key: "main", sharingRole: "owner" })], 1);
+      await page.forkSession("main", true);
+      expect(sessions.createResult).toHaveBeenCalledWith(
+        {
+          parentSessionKey: "main",
+          fork: true,
+          forkFrom: "last-completed",
+        },
+        { signal: expect.any(AbortSignal) },
+      );
+    },
+  );
 });
 
 describe("sessions page new group", () => {
