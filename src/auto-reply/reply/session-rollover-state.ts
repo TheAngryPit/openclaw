@@ -32,6 +32,7 @@ export function resolveReplySessionRolloverState(
     responseUsage: entry.responseUsage,
     ...selectSessionModelOverride(preservedSelection),
     communication: preservedSelection.communication,
+    cyberAccessProgram: preservedSelection.cyberAccessProgram,
     authProfileOverride: preservedSelection.authProfileOverride,
     authProfileOverrideSource: preservedSelection.authProfileOverrideSource,
     authProfileOverrideCompactionCount: preservedSelection.authProfileOverrideCompactionCount,
@@ -40,6 +41,7 @@ export function resolveReplySessionRolloverState(
     displayName: entry.displayName,
     category: entry.category,
     sidebarRoot: entry.sidebarRoot,
+    deviceFolder: entry.deviceFolder ? { ...entry.deviceFolder } : undefined,
     // Notice debt survives rollover: erasing it here would recreate the
     // silent ambiguous-loss outcome the debt exists to prevent.
     pendingDeliveryNotice: entry.pendingDeliveryNotice,
@@ -57,6 +59,18 @@ export function resolveReplySessionRolloverState(
           spawnDepth: entry.spawnDepth,
           subagentRole: entry.subagentRole,
           subagentControlScope: entry.subagentControlScope,
+          blindPrompt: entry.blindPrompt,
+        }
+      : {}),
+    // Native worktrees and registered projects belong to the logical session, not its
+    // conversation context. Plain New Chat detaches separately through clearSpawnedCwd
+    // and lifecycle cleanup.
+    ...(entry.worktree || entry.projectId
+      ? {
+          worktree: entry.worktree,
+          projectId: entry.projectId,
+          spawnedCwd: entry.spawnedCwd,
+          sessionRoot: entry.sessionRoot,
         }
       : {}),
     parentSessionKey: entry.parentSessionKey,

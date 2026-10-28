@@ -1,5 +1,4 @@
 import type { JSX } from "@solidjs/web";
-import type { nothing, TemplateResult } from "lit";
 import { isSensitiveConfigPath } from "../../../src/config/sensitive-paths.js";
 import type { ConfigUiHints } from "../api/types.ts";
 import {
@@ -46,18 +45,6 @@ export type ConfigTierGroupsProps = {
   commonPrelude?: JSX.Element;
 };
 
-export type LegacyConfigFormProps = Omit<ConfigFormProps, "sectionActions" | "sectionPrelude"> & {
-  sectionActions?: TemplateResult;
-  sectionPrelude?: TemplateResult;
-};
-export type LegacyConfigTierGroupsProps = Omit<
-  ConfigTierGroupsProps,
-  "commonPrelude" | "renderTier"
-> & {
-  commonPrelude?: TemplateResult;
-  renderTier: (node: ConfigTierGroupsProps["schema"]) => TemplateResult | typeof nothing;
-};
-
 export {
   hintForPath,
   humanize,
@@ -89,10 +76,6 @@ export function configFieldId(path: Array<string | number>, suffix: string): str
 const MAX_SENSITIVE_SCAN_DEPTH = 64;
 const MAX_SENSITIVE_SCAN_NODES = 20_000;
 
-type SensitiveScanState = {
-  visited: number;
-};
-
 export function hasSensitiveConfigData(
   value: unknown,
   path: Array<string | number>,
@@ -113,7 +96,9 @@ function countSensitiveConfigValuesInner(
   value: unknown,
   path: Array<string | number>,
   hints: ConfigUiHints,
-  scan: SensitiveScanState,
+  scan: {
+    visited: number;
+  },
   depth: number,
   limit: number,
 ): number {
