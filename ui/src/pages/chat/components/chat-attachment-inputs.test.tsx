@@ -259,28 +259,22 @@ it("rejects stale or cancelled attachment returns and admits a fresh reopened se
   const currentScope = new AbortController().signal;
   const view = mountInputs({ ...draft.props, readSignal: firstScope });
   const file = new File(["synthetic"], "qa.txt", { type: "text/plain" });
-  const select = () => {
+  const selectAndExpect = async (expectedFileNames: string[]) => {
     Object.defineProperty(view.file, "files", { configurable: true, value: [file] });
     view.file.dispatchEvent(new Event("change", { bubbles: true }));
+    await waitForSolid(() => expect(draft.reads.pendingReads).toBe(0));
+    expect(draft.attachments().map((entry) => entry.fileName)).toEqual(expectedFileNames);
   };
   view.file.click();
   await view.draw({ ...draft.props, readSignal: currentScope });
   flush();
-  select();
-  await waitForSolid(() => expect(draft.reads.pendingReads).toBe(0));
-  expect(draft.attachments()).toHaveLength(0);
-  select();
-  await waitForSolid(() => expect(draft.reads.pendingReads).toBe(0));
-  expect(draft.attachments()).toHaveLength(0);
+  await selectAndExpect([]);
+  await selectAndExpect([]);
   view.file.click();
   view.file.dispatchEvent(new Event("cancel", { bubbles: true }));
-  select();
-  await waitForSolid(() => expect(draft.reads.pendingReads).toBe(0));
-  expect(draft.attachments()).toHaveLength(0);
+  await selectAndExpect([]);
   view.file.click();
-  select();
-  await waitForSolid(() => expect(draft.reads.pendingReads).toBe(0));
-  expect(draft.attachments().map((entry) => entry.fileName)).toEqual(["qa.txt"]);
+  await selectAndExpect(["qa.txt"]);
 });
 
 it("keeps attachment actions after tools and respects a close veto before native activation", async () => {
