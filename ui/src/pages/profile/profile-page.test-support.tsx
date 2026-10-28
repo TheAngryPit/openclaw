@@ -6,7 +6,10 @@ import type {
 import { createAgentSelectionCapability } from "../../app/agent-selection.ts";
 import type { ApplicationContext, ApplicationGatewaySnapshot } from "../../app/context.ts";
 import type { AuthenticatedUser } from "../../app/user-profile.ts";
-import { createApplicationGatewaySnapshot } from "../../test-helpers/application-context-fixtures.ts";
+import {
+  createApplicationGatewaySnapshot,
+  hiddenScopeUpgradeCapability,
+} from "../../test-helpers/application-context-fixtures.ts";
 import {
   createTestGatewayClient,
   type GatewayRequestHandler,
@@ -36,6 +39,7 @@ export function createConnectedContext(
         return () => routeListeners.delete(listener);
       },
     },
+    scopeUpgrade: hiddenScopeUpgradeCapability,
     runtimeConfig: { subscribe, state: {}, ensureLoaded: async () => undefined },
     gateway: {
       connect: vi.fn(),
