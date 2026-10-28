@@ -308,6 +308,10 @@ export function createTextProjector(filters: readonly TextFilter[]) {
           const identity = next === input || next.text === input.text;
           if (!identity) {
             project.boundaryWhitespaceOnly = false;
+            if (input.retained && !next.retained) {
+              // A rewrite cannot attest where an upstream mutable tail maps in its output.
+              next = { ...next, retained: { prefix: "", tail: next.text } };
+            }
           } else if (input.retained && (!next.retained || next.retained === input.retained)) {
             const retained =
               stage.identity === false ? { prefix: "", tail: next.text } : input.retained;
@@ -336,6 +340,7 @@ export function createTextProjection(filters: readonly TextFilter[]) {
   let text = "";
   let trimStart = 0;
   let trimEnd = 0;
+  let settledLength = 0;
   let matchesTrimmedSource: boolean | undefined;
   return {
     get source() {
@@ -343,6 +348,10 @@ export function createTextProjection(filters: readonly TextFilter[]) {
     },
     get text() {
       return text;
+    },
+    /** Prefix settled by retaining filters; filters without checkpoints preserve legacy behavior. */
+    get settledLength() {
+      return settledLength;
     },
     get matchesTrimmedSource(): boolean {
       // Padding-only stages preserve the source span. Real transforms still need
@@ -364,6 +373,7 @@ export function createTextProjection(filters: readonly TextFilter[]) {
       source = preparedSource ?? source + delta;
       matchesTrimmedSource = undefined;
       const next = project({ text: source, delta });
+      settledLength = next.retained?.prefix.length ?? next.text.length;
       // A downstream filter can cancel an intermediate replacement without changing the final prefix.
       if (next.delta === null && next.text.startsWith(text)) {
         next.delta = next.text.slice(text.length);
@@ -377,6 +387,7 @@ export function createTextProjection(filters: readonly TextFilter[]) {
       trimEnd = value.trimEnd().length;
       matchesTrimmedSource = undefined;
       const next = project({ text: source, delta: null });
+      settledLength = next.retained?.prefix.length ?? next.text.length;
       next.delta = null;
       text = next.text;
       return next.retained ? { text: next.text, delta: next.delta } : next;
@@ -409,7 +420,7 @@ export function trimTextFilter(
         const retained = input.retained;
         if (!retained || leading || retained.prefix.length <= removedLeadingLength) {
           retainedInput = undefined;
-          return undefined;
+          return retained ? { prefix: "", tail: text } : undefined;
         }
         if (retainedInput && retained.prefix.length >= retainedInput.prefix.length) {
           const growth = retained.prefix.length - retainedInput.prefix.length;
@@ -545,9 +556,9 @@ function collapseDuplicateParagraphs(
 }
 
 function createDuplicateParagraphProjector(protectCode = true): TextProjector {
-  let active = false;
   let sourceTail = "";
-  let trailingNewline = false;
+  let activationTail = "";
+  let separator: string | undefined;
   let text = "";
   let completed = "";
   let lastNormalized: string | null = null;
@@ -562,16 +573,19 @@ function createDuplicateParagraphProjector(protectCode = true): TextProjector {
   let wasDuplicate = false;
   return (input) => {
     let appended = input.delta ?? input.text;
-    if (!active) {
-      active = (trailingNewline && appended.startsWith("\n")) || appended.includes("\n\n");
-      trailingNewline = appended ? appended.endsWith("\n") : trailingNewline;
-      if (!active) {
+    if (!separator) {
+      const probe = activationTail + appended;
+      const boundary = /\r?\n\r?\n/.exec(probe);
+      // Retain a CRLF paragraph boundary split across appends.
+      activationTail = probe.slice(-3);
+      if (!boundary) {
         text = input.text;
         if (protectCode) {
           sourceTail = (sourceTail + appended).slice(-2048);
         }
         return input;
       }
+      separator = boundary[0];
       appended = input.text;
     }
     let completedParagraph = false;
@@ -588,7 +602,7 @@ function createDuplicateParagraphProjector(protectCode = true): TextProjector {
           } else if (equal && normalizedLength === lastNormalized?.length) {
             hasDuplicate = true;
           } else {
-            completed += (completed ? "\n\n" : "") + paragraph;
+            completed += (completed ? separator : "") + paragraph;
             lastNormalized = paragraph.replace(/\s+/g, " ");
           }
           paragraph = "";
@@ -601,7 +615,10 @@ function createDuplicateParagraphProjector(protectCode = true): TextProjector {
         newlines += part[0].length;
         continue;
       }
-      newlines = 0;
+      // A CR between LF tokens can begin a split CRLF boundary.
+      if (part[0] !== "\r") {
+        newlines = 0;
+      }
       const raw = paragraph ? part[0] : part[0].trimStart();
       const content = raw.trimEnd();
       if (!content) {
@@ -611,14 +628,14 @@ function createDuplicateParagraphProjector(protectCode = true): TextProjector {
       const piece = pending + content;
       pending = raw.slice(content.length);
       if (!paragraph) {
-        const empty = "\n\n".repeat(pendingEmpty);
+        const empty = separator.repeat(pendingEmpty);
         if (pendingEmpty) {
           completed += empty;
           pendingEmpty = 0;
           lastNormalized = "";
           equal = false;
         }
-        added += completed ? empty + "\n\n" : "";
+        added += completed ? empty + separator : "";
       }
       paragraph += piece;
       added += piece;
@@ -646,7 +663,7 @@ function createDuplicateParagraphProjector(protectCode = true): TextProjector {
         delta === null
           ? protectCode
             ? collapseDuplicateParagraphs(input.text)
-            : completed + (paragraph && !duplicate ? (completed ? "\n\n" : "") + paragraph : "")
+            : completed + (paragraph && !duplicate ? (completed ? separator : "") + paragraph : "")
           : text + delta;
     } else {
       text = input.text;

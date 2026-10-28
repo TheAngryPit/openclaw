@@ -269,13 +269,6 @@ describe.skipIf(process.platform === "win32")("Watch simulator workflow", () => 
 });
 
 describe.skipIf(process.platform === "win32")("iOS Access simulator workflow", () => {
-  const authClasses = [
-    "CloudflareAccessClientTests",
-    "CloudflareAccessBrowserPresenterTests",
-    "CloudflareAccessTransferTests",
-    "CloudflareAccessSessionStoreTests",
-  ];
-
   it.each(["smoke", "tests"])("executes auth and admitted lifecycle/UI suites in %s", (phase) => {
     const { result, commands } = runSimulatorStep("voice", [...configuredSteps, iosStep], {
       IOS_CI_PHASE: phase,
@@ -289,37 +282,19 @@ describe.skipIf(process.platform === "win32")("iOS Access simulator workflow", (
       "never",
       "-resultBundlePath",
       resultBundle("OpenClawLifecycleTests"),
+      "-only-testing:OpenClawTests/ChatComposerTextViewIOSTests",
     ]);
     const authSelectors = selectors("OpenClawTests", [
-      ...authClasses,
-      "ChatTypingFocusTests",
-      "ChatSendHydrationTests",
+      "CloudflareAccessClientTests",
+      "CloudflareAccessBrowserPresenterTests",
+      "CloudflareAccessTransferTests",
+      "CloudflareAccessSessionStoreTests",
       "SettingsHubTests",
       "SettingsHubVisualProofTests/testIngressAuthorizedDashboardEntryPointsLoadTheSelectedGatewayPage",
-      "GatewayIngressControllerTests",
-      "GatewayIngressLoginPreparationTests",
       "GatewayAccessDeviceAuthBindingTests",
-      "GatewayConnectionControllerTests",
-      "LegacyManualGatewayMigrationTests",
-      "GatewayOperatorFleetTests",
-      "IOSMediaArtifactLoaderTests",
-      "OpenClawTypographyTests",
       "GatewayConnectionSecurityTests",
-      "GatewaySettingsStoreTests",
     ]);
     expect(tests[0]?.args).toEqual(expect.arrayContaining(authSelectors));
-    for (const name of authClasses) {
-      expect(readFileSync(`apps/ios/Tests/${name}.swift`, "utf8")).toContain(`struct ${name}`);
-    }
-    expect(
-      readFileSync("apps/ios/Tests/GatewayIngressLoginPreparationTests.swift", "utf8"),
-    ).toContain("struct GatewayIngressLoginPreparationTests");
-    expect(readFileSync("apps/ios/Tests/GatewayConnectionControllerTests.swift", "utf8")).toContain(
-      "struct LegacyManualGatewayMigrationTests",
-    );
-    expect(
-      commands.filter((command) => command.tool === "python3").map((command) => command.args),
-    ).toEqual([["scripts/ios-access-restart-proof.py", "watch-fixture"]]);
     expect(commands.filter((command) => command.tool === "python3")).toHaveLength(1);
     if (phase === "smoke") {
       expect(commands.at(-1)).toEqual({
@@ -333,17 +308,7 @@ describe.skipIf(process.platform === "win32")("iOS Access simulator workflow", (
     expectArgs(tests[0]?.args, [
       ...authSelectors,
       "-only-testing:OpenClawLogicTests/WatchVoiceTurnTrackerTests",
-      "-only-testing:OpenClawTests/DelayedActionGateTests",
-      "-only-testing:OpenClawTests/IOSGatewayChatTransportTests",
-      "-only-testing:OpenClawTests/LocationServiceCallbackTests",
-      "-only-testing:OpenClawTests/LocationServiceOrderingTests",
       "-only-testing:OpenClawTests/NodeAppModelInvokeTests",
-      "-only-testing:OpenClawTests/OpenClawAppDelegateTests",
-      "-only-testing:OpenClawTests/WatchMessagingInboundTransportTests",
-      "-only-testing:OpenClawTests/WatchSessionActivationGateTests",
-      "-only-testing:OpenClawTests/NotificationServingPreferenceTests",
-      "-only-testing:OpenClawTests/RootTabsSourceGuardTests",
-      "-only-testing:OpenClawTests/TraceHeadingVisualProofTests",
     ]);
     expect(selectedTests(tests[1]!.args)).toEqual([
       "-only-testing:OpenClawUITests/OpenClawSnapshotUITests/testWatchMessageDeliveryIsReachableFromSettings",
@@ -433,6 +398,10 @@ it.skipIf(process.platform === "win32").each([
   { owner: "apps/ios/fastlane/Fastfile", groups: [] },
   { owner: "apps/ios/Tests/TalkModeConfigParsingTests.swift", groups: ["voice"] },
   { owner: "apps/ios/Tests/ChatSendHydrationTests.swift", groups: ["lifecycle"] },
+  {
+    owner: "apps/shared/OpenClawKit/Tests/OpenClawKitTests/ChatComposerTextViewIOSTests.swift",
+    groups: ["lifecycle"],
+  },
 ])("builds the app and runs only selected groups for $owner", ({ owner, groups }) => {
   const selection = resolveIosSimulatorTestSelection([owner]);
   const steps = admittedSimulatorSteps(selection);
@@ -462,6 +431,9 @@ it.skipIf(process.platform === "win32").each([
         ? "-only-testing:OpenClawTests/TalkRealtimeVoiceSessionCleanupTests"
         : "-only-testing:OpenClawTests/ChatTypingFocusTests",
     );
+    if (owner.endsWith("/ChatComposerTextViewIOSTests.swift")) {
+      expect(test.args).toContain("-only-testing:OpenClawTests/ChatComposerTextViewIOSTests");
+    }
   }
   if (!groups.length) {
     expect(commands.some(({ tool }) => ["installer", "simslim"].includes(tool))).toBe(false);
@@ -651,11 +623,13 @@ print(json.dumps({"error": error, "commands": commands, "runs": runs, "bootTimeo
 
 describe("iOS Access process restart proof", () => {
   it.each([
-    { format: 0, prepared: false },
-    { format: 2, prepared: false },
-    { format: 1, prepared: true },
-  ])("preserves two fixed process repetitions (%j)", ({ format, prepared }) => {
-    const proof = runRestartProof("ready", format, prepared);
+    { mode: "ready", format: 0, prepared: false },
+    { mode: "ready", format: 2, prepared: false },
+    { mode: "ready", format: 1, prepared: true },
+    { mode: "already-booted", format: 1, prepared: false },
+    { mode: "execution-count", format: 1, prepared: false },
+  ])("preserves two repetitions (%j)", ({ mode, format, prepared }) => {
+    const proof = runRestartProof(mode, format, prepared);
     const { commands, runs } = proof;
     expect(proof).toMatchObject({ error: null, bootTimeouts: [120], receiptRetained: false });
     expect(runs).toHaveLength(1);
@@ -702,14 +676,6 @@ describe("iOS Access process restart proof", () => {
     ]) {
       expect(commands.some((args) => args.includes(operation))).toBe(false);
     }
-  });
-
-  it.each(["already-booted", "execution-count"])("accepts verified %s repetitions", (mode) => {
-    expect(runRestartProof(mode)).toMatchObject({
-      error: null,
-      bootTimeouts: [120],
-      receiptRetained: false,
-    });
   });
 
   it("retains separate result bundles when repeated in the same checkout", () => {

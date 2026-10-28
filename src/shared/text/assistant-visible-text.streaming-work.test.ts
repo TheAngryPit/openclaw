@@ -1,5 +1,6 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { expect, it, vi } from "vitest";
+import * as toolCallRepair from "../../../packages/tool-call-repair/src/payload.js";
 import {
   createAssistantVisibleStreamText,
   sanitizeAssistantVisibleStreamText,
@@ -8,6 +9,39 @@ import { assistantVisibleTextFilters } from "./assistant-visible-text.js";
 import { canReuseMarkdownOwnership, findCodeOwnership } from "./code-regions.js";
 import { expectPrefixParity, regexWork, streamChunks } from "./streaming.test-support.js";
 import { createTextProjection } from "./text-projection.js";
+
+vi.mock("../../../packages/tool-call-repair/src/payload.js", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../../../packages/tool-call-repair/src/payload.js")>();
+  return {
+    ...actual,
+    projectPlainTextToolCallBlocks: vi.fn(actual.projectPlainTextToolCallBlocks),
+  };
+});
+
+it.each([
+  ["pretty-printed JSON", `{\n${'  {"id":0,"label":"ordinary value"},\n'.repeat(128)}}`],
+  ["brace-heavy prose", 'Configure {"mode":"fast"} and continue. '.repeat(128)],
+])("does not checkpoint ordinary %s", (_shape, input) => {
+  const source = input.slice(0, 4096);
+  const project = vi.mocked(toolCallRepair.projectPlainTextToolCallBlocks);
+  project.mockClear();
+  const stream = createAssistantVisibleStreamText("final_answer");
+  for (let offset = 0; offset < source.length; offset += 4) {
+    stream.append(source.slice(offset, offset + 4));
+  }
+  expect(stream.text).toBe(source.trimEnd());
+  expect(project.mock.calls.length).toBe(0);
+});
+
+it("keeps a split tool header across an unbounded whitespace gap", () => {
+  const chunks = ["Before\n[too", "l:write]", "\r\n" + " ".repeat(5000), '{"content":"ok"}\nDone.'];
+  const stream = createAssistantVisibleStreamText("final_answer");
+  for (const chunk of chunks) {
+    stream.append(chunk);
+  }
+  expect(stream.text).toBe("Before\nDone.");
+});
 
 const markdownOwnershipWork = vi.hoisted(() => ({ scannedCharacters: 0 }));
 
@@ -73,6 +107,7 @@ function expectOwnershipCorrection(
   }
   expect(corrected.text).toBe(sanitizeAssistantVisibleStreamText(chunks.join(""), "final_answer"));
   expect(corrected.text.includes("[tool:read] {}")).toBe(!(options.visibleBefore ?? true));
+  return corrected.text;
 }
 
 it.each(["mixed", "leading", "repeated literal", "repeated hidden"])(
@@ -227,11 +262,26 @@ it.each([
   expect(markdownOwnershipWork.scannedCharacters - before).toBeLessThan(source.length * 16);
 });
 
-it("hides a completed tool call", () => {
-  const source = '[tool:write]\n{"path":"notes.txt","content":"safe"}\n\n';
-  const stream = createAssistantVisibleStreamText("final_answer");
-  streamChunks(source, 4, stream);
-  expect(stream.text).toBe("");
+it.each([
+  [
+    "an open image description when its inline destination closes",
+    "![example `x\n[tool:read] {}\nx` label",
+    "](/url)\n",
+  ],
+  [
+    "a multiline reference title when its closing quote arrives",
+    '[id]: /url\n"title\n`x\n[tool:read] {}\nx` trailing\n',
+    '"',
+  ],
+  [
+    "a reference image when its next-line destination arrives",
+    "![example `x\n[tool:read] {}\nx`][id]\n\n[id]:\n",
+    "/url\n",
+  ],
+])("recomputes final-answer ownership after %s", (_name, prefix, suffix) => {
+  expect(expectOwnershipCorrection([prefix, suffix], { replaces: true })).not.toContain(
+    "[tool:read]",
+  );
 });
 
 it.each([
