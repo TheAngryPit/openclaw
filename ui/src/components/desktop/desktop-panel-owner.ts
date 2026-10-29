@@ -67,7 +67,6 @@ export function createDesktopPanel(
   // Automatic resolution follows the session; an explicit choice owns its pop-out target.
   let selection: "pending" | "resolved" | "explicit" | "picker" = "pending";
   const usesAutomaticSource = () => selection === "pending" || selection === "resolved";
-  const automaticPicker = () => usesAutomaticSource() && host.embedded && host.sessionKey !== null;
   const sessionSource = new DesktopSessionOwner(
     host,
     notify,
