@@ -28,8 +28,7 @@ export function useNativeAttachmentSourceMenu(): boolean {
   return /AppleWebKit\//u.test(ua) && /Version\/[\d.]+(?: Mobile\/\S+)? Safari\/[\d.]+$/u.test(ua);
 }
 
-// Optional capability: unlike an unrestricted file input, this API requests the
-// document browser directly on Chromium Android. The OS still owns its providers.
+// The OS owns the providers exposed by this optional browser API.
 export function getDirectAttachmentFilePicker() {
   const browser: Window & {
     showOpenFilePicker?: (options: {

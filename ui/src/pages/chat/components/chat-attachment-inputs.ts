@@ -64,8 +64,7 @@ export function createChatAttachmentInputHandle() {
     const stopAbort = listen(lifetime, "abort", () => retired.resolve(null), { once: true });
     updatePending?.(1);
     try {
-      // Invoke synchronously in the menu gesture. No accept/type filter: arbitrary
-      // documents and provider access must remain available.
+      // The browser requires the picker call within the menu's user gesture.
       const handles = await Promise.race([
         picker.call(window, { multiple: true }),
         retired.promise,
@@ -74,8 +73,6 @@ export function createChatAttachmentInputHandle() {
         return;
       }
       failureMessage = "chat.attachments.readFailed";
-      // Providers may resolve at different speeds or lose access. Keep selection
-      // order and readable siblings; admission still owns type/size validation.
       const expired = new Promise<never>((_resolve, reject) => {
         timeout = setTimeout(() => reject(new Error("File provider timed out")), 15_000);
       });

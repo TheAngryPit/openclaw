@@ -12,8 +12,7 @@ const video = {
   buffer: readFileSync(new URL("./fixtures/video-poster.mp4", import.meta.url)),
 };
 
-// Browser API fixture only: production menu, draft admission, FileReader,
-// attachment cards, and explicit send run unchanged. This cannot certify OS menus.
+// This browser API fixture cannot certify OS menus.
 suite.define(() => {
   it.each(["chat", "new"])(
     "keeps media and unrestricted documents through cancellation and reselection in %s",

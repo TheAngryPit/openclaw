@@ -262,7 +262,6 @@ suite.define(() => {
         if (!input) {
           throw new Error("file input missing");
         }
-        // Exercise capability-menu dispatch into the retained input route.
         Object.defineProperty(window, "showOpenFilePicker", {
           configurable: true,
           value: undefined,

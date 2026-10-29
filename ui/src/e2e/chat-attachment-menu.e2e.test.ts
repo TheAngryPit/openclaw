@@ -68,7 +68,6 @@ function withChat(
           }
         }, options.preview);
       }
-      // This suite covers the retained input route; direct Files has its own browser proof.
       await page.addInitScript(() => {
         Object.defineProperty(window, "showOpenFilePicker", {
           configurable: true,
