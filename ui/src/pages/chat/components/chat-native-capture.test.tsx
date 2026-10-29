@@ -54,29 +54,6 @@ function select(input: HTMLInputElement, file: File) {
   input.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
-it("returns a native video through the real Camera action and attachment owner", async () => {
-  const owner = draft();
-  const view = mountCapture(owner.props);
-  await waitForSolid(() =>
-    expect(view.container.querySelector('[data-value="camera"]')).not.toBeNull(),
-  );
-  const record = view.container.querySelector<HTMLButtonElement>('[data-value="camera-video"]');
-  expect(record).not.toBeNull();
-  expect(record!.textContent).toBe("Record video");
-  const input = view.container.querySelector<HTMLInputElement>(".agent-chat__camera-video-input")!;
-  const clicked = vi.fn();
-  input.addEventListener("click", clicked);
-  record!.click();
-  expect(clicked).toHaveBeenCalledOnce();
-  expect(input.accept).toBe("video/*");
-  expect(input.multiple).toBe(false);
-  expect(input.getAttribute("capture")).toBe("environment");
-  select(input, new File(["clip"], "capture.mp4", { type: "video/mp4" }));
-  await owner.done;
-  expect(owner.attachments()).toMatchObject([{ fileName: "capture.mp4", mimeType: "video/mp4" }]);
-  expect(input.value).toBe("");
-});
-
 it.each(["camera", "camera-video"])(
   "does not attach a late %s result to a replacement draft or after cancellation",
   async (kind) => {

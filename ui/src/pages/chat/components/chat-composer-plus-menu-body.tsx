@@ -40,7 +40,6 @@ import {
   menuSection,
 } from "./chat-composer-menu-rows.tsx";
 import { connectorItems } from "./chat-composer-plugins-menu.tsx";
-import { attachmentSourceGroup } from "./chat-composer-plus-menu-attachment-sources.tsx";
 import type {
   ChatComposerPlusMenuContentProps,
   ChatComposerPlusMenuResolvedProps,
@@ -125,9 +124,30 @@ function rootItems(menu: ChatComposerPlusMenuContentProps): MenuEntry[] {
   const canUpload = uploadsEnabled(menu.attachments.uploadConfig);
   if (canUpload) {
     const nativeSourceMenu = useNativeAttachmentSourceMenu();
-    const nativeVideoCapture =
-      !nativeSourceMenu && !menu.attachments.imagesOnly && useNativeAttachmentCapture();
-    entries.push(attachmentSourceGroup(menu, nativeSourceMenu, nativeVideoCapture));
+    const imagesOnly = menu.attachments.imagesOnly;
+    const sources = nativeSourceMenu
+      ? ([["file", "paperclip", "attach"]] as const)
+      : ([
+          ["camera", "camera", "cameraInput"],
+          ...(!imagesOnly && useNativeAttachmentCapture()
+            ? ([["camera-video", "camera", "recordVideo"]] as const)
+            : []),
+          [imagesOnly ? "photo" : "media", "image", imagesOnly ? "attachPhoto" : "attachMedia"],
+          ...(imagesOnly ? [] : ([["file", "paperclip", "attachFileOption"]] as const)),
+        ] as const);
+    entries.push({
+      kind: "group",
+      id: "attachment-sources",
+      class: sources.length === 1 ? undefined : "agent-chat__attachment-sources",
+      items: sources.map(([id, icon, label]) => ({
+        id,
+        label: t(`chat.composer.${label}`),
+        class: nativeSourceMenu
+          ? "agent-chat__attach-menu-option agent-chat__capability-menu-item"
+          : "agent-chat__attach-menu-option",
+        icon: <Icon name={icon} />,
+      })),
+    });
   }
   if (menu.showCapabilities || menu.rootToggles?.length) {
     if (canUpload) {
@@ -210,15 +230,11 @@ function handleMenuSelection(
   const props = ownerProps.menu;
   const overlay = menu.overlay;
   const { surface } = overlay;
-  if (
-    uploadsEnabled(props.attachments.uploadConfig) &&
-    (value === "camera" ||
-      value === "camera-video" ||
-      value === "photo" ||
-      value === "file" ||
-      value === "media")
-  ) {
-    props.inputHandle.open(value);
+  const attachmentSource = (["camera", "camera-video", "photo", "file", "media"] as const).find(
+    (kind) => kind === value,
+  );
+  if (uploadsEnabled(props.attachments.uploadConfig) && attachmentSource) {
+    props.inputHandle.open(attachmentSource);
     return;
   }
   const rootToggle = props.rootToggles?.find((toggle) => toggle.value === value);
