@@ -1973,11 +1973,6 @@ export function isSessionsTitlePrepareParams(
 ): value is import("typebox").Static<
   typeof import("../../schema-modules.js").SessionsTitlePrepareParamsSchema
 >;
-export function isSessionsRecoverParams(
-  value: unknown,
-): value is import("typebox").Static<
-  typeof import("../../schema-modules.js").SessionsRecoverParamsSchema
->;
 export function isSessionsSendParams(
   value: unknown,
 ): value is import("typebox").Static<
@@ -2177,6 +2172,16 @@ export function isSessionGitHubActionParams(
   value: unknown,
 ): value is import("typebox").Static<
   typeof import("../../schema-modules.js").SessionGitHubActionParamsSchema
+>;
+export function isSessionGitHubReadinessParams(
+  value: unknown,
+): value is import("typebox").Static<
+  typeof import("../../schema-modules.js").SessionGitHubReadinessParamsSchema
+>;
+export function isSessionGitHubReadinessResult(
+  value: unknown,
+): value is import("typebox").Static<
+  typeof import("../../schema-modules.js").SessionGitHubReadinessResultSchema
 >;
 export function isSessionGitHubOptionsParams(
   value: unknown,
