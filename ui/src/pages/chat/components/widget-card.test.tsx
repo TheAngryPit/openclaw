@@ -162,7 +162,13 @@ afterEach(async () => {
 describe("widget-card", () => {
   it("retains saved geometry while active widget content waits for admission", () => {
     const preview = documentPreview("saved-widget", { sandbox: "strict" });
-    const widgetLayout = { read: vi.fn(() => 700), write: vi.fn() };
+    const widgetLayout = {
+      read: vi.fn(() => 700),
+      readRows: () => undefined,
+      write: vi.fn(),
+      writeRows: vi.fn(),
+      invalidateRow: vi.fn(),
+    };
     const host = mountWidget(preview, { mediaReadAllowed: false, widgetLayout });
     const shell = host.querySelector('[data-content-kind="canvas-html"]');
     expect(shell).not.toBeNull();
@@ -292,6 +298,7 @@ describe("widget-card", () => {
       url: "https://youtu.be/AbCdEfGhI_1",
     };
     const host = mountWidget(preview, { sessionKey: "agent:main:video" });
+    await vi.dynamicImportSettled();
     await waitForSolid(() =>
       expect(host.querySelector('button[aria-label="Play Synthetic video"]')).not.toBeNull(),
     );
@@ -415,6 +422,7 @@ describe("widget-card", () => {
           source: original.contentWindow,
         }),
       );
+      flush();
       expect(original.style.height).toBe("48px");
       showCapability(preview, host, "one");
       expect(original.getAttribute("style")).toContain("48px");
