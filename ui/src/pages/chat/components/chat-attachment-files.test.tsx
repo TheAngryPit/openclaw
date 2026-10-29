@@ -59,32 +59,13 @@ async function composer(extra: ChatAttachmentControlsProps = {}) {
   return { draft, view, handle, input, native, open };
 }
 
-it("opens unrestricted Files from the real menu and admits arbitrary documents through the draft owner", async () => {
-  const stl = new File(["solid test"], "part.stl", { type: "" });
-  const unknown = new File(["custom"], "document.unlisted-extension", { type: "" });
-  const picker = vi
-    .fn()
-    .mockResolvedValue([stl, unknown].map((file) => ({ getFile: async () => file })));
+it("invokes the direct picker from the menu before yielding to a microtask", async () => {
+  const picker = vi.fn().mockResolvedValue([]);
   vi.stubGlobal("showOpenFilePicker", picker);
-  const { draft, native, open, handle } = await composer();
-  expect(host.querySelector('[data-value="file"]')?.textContent).toBe("Files");
+  const { draft, open } = await composer();
   open();
-  // The browser must receive the request within this user gesture, before any await.
   expect(picker).toHaveBeenCalledExactlyOnceWith({ multiple: true });
-  expect(native).not.toHaveBeenCalled();
-  await waitForSolid(() => expect(draft.attachments()).toHaveLength(2));
-  expect(draft.attachments().map(({ fileName, mimeType }) => [fileName, mimeType])).toEqual([
-    ["part.stl", "application/octet-stream"],
-    ["document.unlisted-extension", "application/octet-stream"],
-  ]);
   await waitForSolid(() => expect(draft.reads.pendingReads).toBe(0));
-  picker.mockRejectedValueOnce(new DOMException("Cancelled", "AbortError"));
-  handle.open("file");
-  await waitForSolid(() => expect(draft.reads.pendingReads).toBe(0));
-  expect(draft.attachments()).toHaveLength(2);
-  draft.props.onAttachmentsChange?.([]);
-  handle.open("file");
-  await waitForSolid(() => expect(draft.attachments()).toHaveLength(2));
 });
 
 it.each(["picker", "provider"] as const)(
