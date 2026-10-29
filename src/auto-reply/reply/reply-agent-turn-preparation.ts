@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { renderAgentHarnessPreflightUserMessage } from "../../agents/embedded-agent-helpers/user-facing-text.js";
 import { normalizeChatType } from "../../channels/chat-type.js";
+import { selectLiveRuntimeConfig } from "../../config/runtime-snapshot.js";
 import { captureRuntimeConfig } from "../../config/runtime-source-projection.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import { readSessionEntryInWorker } from "../../config/sessions/session-entry-read-runtime.js";
@@ -34,17 +35,17 @@ import type { ReplyPayload } from "../types.js";
 import { resolveRunAfterAutoFallbackPrimaryProbeRecheck } from "./agent-runner-auto-fallback.js";
 import { buildPreflightCompactionFailureText } from "./agent-runner-failure-reply.js";
 import { runMemoryFlushIfNeeded, runSessionCompactionIfNeeded } from "./agent-runner-memory.js";
-import {
-  resolveQueuedReplyExecutionConfig,
-  resolveQueuedReplyRuntimeConfig,
-} from "./agent-runner-utils.js";
+import { resolveQueuedReplyExecutionConfig } from "./agent-runner-utils.js";
 import {
   shouldNotifyUserAboutCompaction,
   type CompactionNoticePhase,
 } from "./compaction-notice.js";
 import { settleQueuedFollowupPresentation } from "./followup-presentation.js";
 import type { InternalGetReplyOptions } from "./get-reply.types.js";
-import { isGoalContinuationCurrent, isSupportedWorkerGoalPlacement } from "./goal-continuation.js";
+import {
+  isGoalContinuationCurrent,
+  isGoalContinuationPlacementCurrent,
+} from "./goal-continuation.js";
 import { refreshActiveGoalContext } from "./inbound-meta.js";
 import { getFollowupQueueDepth } from "./queue/enqueue.js";
 import {
@@ -55,7 +56,6 @@ import {
 import { prepareReplySourceAdmission } from "./reply-source-admission.js";
 import { admitReplyTurn } from "./reply-turn-admission.js";
 import type { createReplyTurnRotationEvidence } from "./reply-turn-rotation.js";
-import type { ReplyRestartRecoveryClaimController } from "./restart-recovery-claim.types.js";
 import { createReplySessionEntryHandle } from "./session-entry-handle.js";
 import type { TypingController } from "./typing.js";
 
@@ -86,9 +86,9 @@ export type AdmittedFollowupTurn = {
   sessionStore?: Record<string, SessionEntry>;
   sendPolicy: "allow" | "deny";
   preflightCompactionApplied: boolean;
+  memoryFlushAttempted?: boolean;
   preflightFailurePayload?: ReplyPayload;
   preflightError?: Error;
-  restartRecovery?: ReplyRestartRecoveryClaimController;
   releaseSourceAdmission?: () => Promise<void>;
 };
 
@@ -108,7 +108,6 @@ type PrepareReplyAgentTurnParams<TConfigured> = {
   queued: FollowupRun;
   defaults: FollowupRunnerParams;
   kind?: ReplyTurnKind;
-  recoveryAdmissionRunId?: string;
   resetTriggered?: boolean;
   routeThreadId?: string | number;
   providedReplyOperation?: ReplyOperation;
@@ -148,8 +147,7 @@ export async function prepareReplyAgentTurn<TConfigured>(
   const assertOperatorCurrent = () => params.queued.operatorAuthority?.assertCurrent();
   assertOperatorCurrent();
   const readAdmissionConfig = () =>
-    params.queued.readAdmissionConfig?.() ??
-    resolveQueuedReplyRuntimeConfig(params.queued.run.config);
+    params.queued.readAdmissionConfig?.() ?? selectLiveRuntimeConfig(params.queued.run.config);
   let config = captureRuntimeConfig(params.queued.run.config);
   const existingClaim = params.queued.controllerInput?.claim;
   const claimQueuedFirst = !params.providedReplyOperation && !params.claimSource;
@@ -188,7 +186,6 @@ export async function prepareReplyAgentTurn<TConfigured>(
         }
       : await admitReplyTurn({
           mailboxClaim,
-          recoveryAdmissionRunId: params.recoveryAdmissionRunId,
           rotationEvidence: params.rotationEvidence,
           runId: params.queued.controllerInput?.protocolRunId,
           onDatabaseRegistration: params.defaults.opts?.onDatabaseRegistration,
@@ -219,10 +216,20 @@ export async function prepareReplyAgentTurn<TConfigured>(
                 : undefined,
               hasSessionModelOverride: selected.hasSessionModelOverride,
               modelOverrideSource: selected.modelOverrideSource,
+              // Scheduled fallback policy is derived from the selection; its authority stays bound.
+              ...(run.scheduledAutomation
+                ? {
+                    scheduledAutomation: {
+                      ...run.scheduledAutomation,
+                      modelFallbackPolicy: selected.scheduledAutomation?.modelFallbackPolicy,
+                    },
+                  }
+                : {}),
               authProfileId: selected.authProfileId,
               authProfileIdSource: selected.authProfileIdSource,
               thinkLevel: selected.thinkLevel,
               thinkingCatalog: selected.thinkingCatalog,
+              cyberAccessProgram: selected.cyberAccessProgram,
             };
           },
           resetTriggered: params.resetTriggered === true,
@@ -263,6 +270,10 @@ export async function prepareReplyAgentTurn<TConfigured>(
     }
     const selectionEntry = admission.sessionEntry ?? initialEntry;
     const admittedSelectionEntry = selectionEntry ? { ...selectionEntry } : undefined;
+    // An edit before enqueue can miss the queue refresh; admission owns the saved preference.
+    if (kind === "queued_followup" && admission.sessionEntry) {
+      run.cyberAccessProgram = admittedSelectionEntry?.cyberAccessProgram;
+    }
     let queuedFollowupAdmitted = false;
     let admissionFailed = false;
     let callerOwnsOperation = false;
@@ -539,6 +550,7 @@ export async function prepareReplyAgentTurn<TConfigured>(
                     sessionEntry: entry,
                   }),
                 );
+                turn.memoryFlushAttempted ||= flushed.outcome !== "skipped";
                 session.publish(flushed.sessionEntry);
                 operation.abortSignal.throwIfAborted();
                 if (flushed.outcome === "exhausted") {
@@ -623,17 +635,16 @@ export async function prepareReplyAgentTurn<TConfigured>(
                 sessionKey: replySessionKey,
               })
             : session.current();
-        const workerPlacementCurrent =
-          !goalContinuation.workerGoal ||
-          (Boolean(params.queued.operatorAuthority) &&
-            (await isSupportedWorkerGoalPlacement({
-              agentId: run.agentId,
-              sessionKey: replySessionKey ?? "",
-              sessionId: goalContinuation.sessionId,
-            })));
+        const placementCurrent = await isGoalContinuationPlacementCurrent({
+          continuation: goalContinuation,
+          agentId: run.agentId,
+          sessionKey: replySessionKey ?? "",
+          hasOperatorAuthority: Boolean(params.queued.operatorAuthority),
+          requiresWorker: Boolean(run.config?.cloudWorkers?.requiredProfile),
+        });
         assertOperatorCurrent();
         if (
-          !workerPlacementCurrent ||
+          !placementCurrent ||
           operation.abortSignal.aborted ||
           !isGoalContinuationCurrent(goalContinuation, currentEntry) ||
           getFollowupQueueDepth(replySessionKey ?? "") > 0

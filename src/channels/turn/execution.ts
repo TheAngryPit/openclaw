@@ -178,9 +178,13 @@ export async function runPreparedChannelTurnCore<
           ...(event === "error" ? { error } : {}),
         });
       try {
-        const agentId =
+        const sourceAgentId =
           params.ctxPayload.AgentId ?? parseAgentSessionKey(params.routeSessionKey)?.agentId;
-        if (agentId) {
+        const recordAgentId = parseAgentSessionKey(recordSessionKey)?.agentId ?? sourceAgentId;
+        for (const agentId of new Set([sourceAgentId, recordAgentId])) {
+          if (!agentId) {
+            continue;
+          }
           const preparation = waitForAgentDatabaseWriteAdmission(agentId, {
             signal: getPluginServiceSchedulerBinding()?.().signal,
           });
@@ -198,11 +202,12 @@ export async function runPreparedChannelTurnCore<
             await preparation;
           }
         }
+        params.assertAuthority?.();
         if (params.ctxPayload.SessionTranscriptContext) {
           const { mergeSessionTranscriptContext } =
             await import("../inbound-event/session-transcript-context.runtime.js");
           await mergeSessionTranscriptContext({
-            agentId: params.ctxPayload.AgentId,
+            agentId: recordAgentId,
             ctx: params.ctxPayload,
             sessionKey: recordSessionKey,
             storePath: params.storePath,
@@ -223,7 +228,7 @@ export async function runPreparedChannelTurnCore<
         });
         emitStage("record", "done");
         await params.afterRecord?.();
-        await deliverPendingDeliveryNotice(recordSessionKey, params.storePath);
+        await deliverPendingDeliveryNotice(recordSessionKey, params.storePath, recordAgentId);
       } catch (err) {
         emitStage("record", "error", err);
         try {

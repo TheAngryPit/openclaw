@@ -66,7 +66,7 @@ type ActiveReplySteerParams = {
   queueKey: string;
   replyOperationRunState: ReplyOperationRunState | undefined;
   resolvedQueue: RunReplyAgentParams["resolvedQueue"];
-  restartRecoverySourceTurnId: string | undefined;
+  sourceTurnId: string | undefined;
   runFollowup: (run: FollowupRun) => Promise<void>;
   sessionCtx: RunReplyAgentParams["sessionCtx"];
   sessionKey: string | undefined;
@@ -79,7 +79,7 @@ type ActiveReplySteerParams = {
 function resolveAcceptedSteerRunId(params: ActiveReplySteerParams): string {
   const { followupRun, sessionCtx } = params;
   return expectDefined(
-    params.restartRecoverySourceTurnId ??
+    params.sourceTurnId ??
       buildChannelSourceTurnId({
         provider:
           followupRun.originatingChannel ?? followupRun.run.messageProvider ?? sessionCtx.Provider,
@@ -161,6 +161,7 @@ export async function runActiveReplySteer(
   const fallback = async (
     reason: ActiveReplySteerFallbackReason,
     activeRunId?: string,
+    error?: string,
   ): Promise<"handled"> => {
     assertReadCurrent();
     parked.fallback();
@@ -172,15 +173,18 @@ export async function runActiveReplySteer(
       replyOperationRunState.admission = {
         status: "accepted",
         mode: "followup",
-        ...(reason === "requester-mismatch"
-          ? { reason }
-          : isInboundUserMessage
-            ? { reason: "steering-unavailable" as const }
-            : {}),
+        ...(reason === "collaborative_steering_disabled"
+          ? { reason: "collaborative-steering-disabled" as const }
+          : reason === "requester-mismatch"
+            ? { reason }
+            : isInboundUserMessage
+              ? { reason: "steering-unavailable" as const }
+              : {}),
       };
     }
     diagnosticLogger.warn("steering rejected; applying follow-up policy", {
       reason,
+      ...(error ? { error } : {}),
       disposition: queueCapRejected ? "skipped-queue-cap" : "followup-policy",
       channel:
         followupRun.originatingChannel ??
@@ -239,6 +243,9 @@ export async function runActiveReplySteer(
       if (!canInjectReplyMessageTarget(injectionTarget)) {
         return await fallback("injection_unavailable", injectionTarget.runId);
       }
+      if (followupRun.run.config.messages?.queue?.collaborativeSteeringFallback !== "reject") {
+        return await fallback("collaborative_steering_disabled", injectionTarget.runId);
+      }
       await refuseCollaborativeSteering(followupRun, replyOperationRunState, () => {
         custodyFinished = true;
         parked.consume("consumed");
@@ -249,8 +256,6 @@ export async function runActiveReplySteer(
       agentId: followupRun.run.agentId,
       sessionKey,
       storePath: params.storePath,
-      sessionId: steerSessionId,
-      sourceTurnId: injectionTarget.sourceTurnId,
       entry: params.sessionEntry,
       assertCurrent: assertReadCurrent,
     });
@@ -267,8 +272,6 @@ export async function runActiveReplySteer(
           operatorAuthority: followupRun.operatorAuthority,
           toolsAllow: followupRun.toolsAllow,
           disableTools: followupRun.disableTools === true,
-          forceRestartSafeTools: followupRun.forceRestartSafeTools,
-          forceCodeModeTools: followupRun.forceCodeModeTools,
         })
       : undefined;
     const collaborativeCaller =
@@ -287,11 +290,11 @@ export async function runActiveReplySteer(
       target: injectionTarget,
       assertCurrent: assertReadCurrent,
       collaborativeCaller,
+      delivery: steeringDelivery,
       continuation:
         inboundCaller && params.steeringIntent?.kind === "continue-existing"
           ? {
               kind: "continuation",
-              delivery: steeringDelivery,
               caller: {
                 ...caller,
                 senderIsOwner: inboundCaller.senderIsOwner,
@@ -309,7 +312,11 @@ export async function runActiveReplySteer(
           : undefined,
     });
     if (steeringAuthority.kind === "deferred") {
-      return await fallback(steeringAuthority.reason, injectionTarget.runId);
+      return await fallback(
+        steeringAuthority.reason,
+        injectionTarget.runId,
+        steeringAuthority.errorMessage,
+      );
     }
     releaseToolAuthority = steeringAuthority.toolAuthority.release;
     assertReadCurrent();
