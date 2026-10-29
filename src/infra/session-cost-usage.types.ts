@@ -38,8 +38,6 @@ export type ParsedTranscriptEntry = {
 };
 
 export type CostUsageTotals = {
-  /** Unavailable means numeric fields are known subtotals, not complete usage. */
-  usageReport?: Usage["usageReport"];
   input: number;
   output: number;
   cacheRead: number;
@@ -71,6 +69,7 @@ export type CostUsageSummary = {
     pendingFiles: number;
     staleFiles: number;
     refreshedAt?: number;
+    partial?: { reason: "aggregate-boundary"; message: string };
   };
 };
 
@@ -96,7 +95,6 @@ export type SessionUtcQuarterHourMessageCounts = SessionMessageCounts & {
 };
 
 export type SessionUtcQuarterHourTokenUsage = {
-  usageReport?: Usage["usageReport"];
   date: string; // YYYY-MM-DD (UTC)
   quarterIndex: number; // 0-95, UTC quarter-hour bucket (index = floor((utcH * 60 + utcM) / 15))
   input: number;
@@ -122,7 +120,6 @@ export type SessionDailyLatency = SessionLatencyStats & {
 };
 
 export type SessionDailyModelUsage = {
-  usageReport?: Usage["usageReport"];
   date: string; // YYYY-MM-DD
   provider?: string;
   model?: string;

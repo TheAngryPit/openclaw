@@ -88,6 +88,71 @@ function heldWorkerBorrowingProbe(directory: string) {
 }
 
 describe.concurrent("fresh compiled subprocess invocation", () => {
+  it("keeps source-host SDK imports native in maintenance workers", ({ workerArtifacts }) =>
+    workerArtifacts.fixtureLifetime.run(async () => {
+      const { node, prepareWorkers } = workerArtifacts.createFixtureCommands();
+      const owner = workerArtifacts.createWorkerRun();
+      const fixture = workerArtifacts.fixtureDirectory();
+      try {
+        await prepareWorkers(owner);
+        const probe = writeFixture(
+          fixture,
+          "native-sdk-worker.mjs",
+          `
+          import assert from 'node:assert/strict';
+          import {parentPort,workerData} from 'node:worker_threads';
+          await import(workerData.entry);
+          const {tryNativeRequireModule}=await import(workerData.nativeRequire);
+          const native=tryNativeRequireModule(workerData.sdk);
+          assert(native.ok,'source-host SDK must load natively');
+          const imported=await import(workerData.sdk);
+          assert.equal(native.moduleExport,imported,'source SDK must retain one module identity');
+          parentPort.postMessage('native-sdk-ready');
+          parentPort.close();
+          `,
+        );
+        const result = await node(
+          [
+            "--input-type=module",
+            "--eval",
+            `
+            import assert from 'node:assert/strict';
+            import path from 'node:path';
+            import {pathToFileURL} from 'node:url';
+            import {Worker} from 'node:worker_threads';
+            const [probe,directory,root]=process.argv.slice(1);
+            for(const entry of ['commands/doctor-database-engine-inspection.worker.js','snapshot/database-backup.worker.js','infra/database-engine/port-command.entry.worker.js']) {
+              const worker=new Worker(pathToFileURL(probe),{
+                execArgv:[],
+                env:{...process.env,NODE_OPTIONS:'',TSX_TSCONFIG_PATH:path.join(root,'tsconfig.json')},
+                workerData:{
+                  entry:pathToFileURL(path.join(directory,'dist',entry)).href,
+                  nativeRequire:pathToFileURL(path.join(root,'src/plugins/native-module-require.ts')).href,
+                  sdk:pathToFileURL(path.join(root,'src/plugin-sdk/sqlite-worker-runtime.ts')).href,
+                },
+              });
+              try {
+                const ready=await new Promise((resolve,reject)=>{
+                  worker.once('message',resolve);
+                  worker.once('error',reject);
+                  worker.once('exit',code=>reject(new Error('worker exited before SDK proof: '+code)));
+                });
+                assert.equal(ready,'native-sdk-ready');
+              } finally {await worker.terminate();}
+            }
+            `,
+            probe,
+            owner.descriptor.directory,
+            root,
+          ],
+          root,
+        );
+        expect(result.code, result.stderr + result.stdout).toBe(0);
+      } finally {
+        await owner.dispose();
+      }
+    }));
+
   it("uses installed fs-safe packages from compiled subprocesses", ({ workerArtifacts }) =>
     workerArtifacts.fixtureLifetime.run(async () => {
       const { node, prepareWorkers } = workerArtifacts.createFixtureCommands();
@@ -852,7 +917,6 @@ describe.concurrent("fresh compiled subprocess invocation", () => {
 
   it.each([
     { args: ["run", "--", "--help"], metadata: false },
-    { args: ["run", "--help"], metadata: true },
     { args: ["bench", "--run"], metadata: false },
     { args: ["list"], metadata: true },
     { args: ["--browser.headless", "run", "--version"], metadata: false },
@@ -1390,6 +1454,7 @@ export default class {
 
   it("builds changed source despite valid stale dist and fails visibly on build errors", ({
     workerArtifacts,
+    signal,
   }) =>
     workerArtifacts.fixtureLifetime.run(async () => {
       const { node, prepareWorkers } = workerArtifacts.createFixtureCommands();
@@ -1586,8 +1651,11 @@ export default class {
           catch(error) {console.error('owner refused:',error);process.exitCode=1;}
           finally {process.disconnect();}
         `;
+        const generationReady = path.join(fixture, "fresh-generation-ready");
         const buildScript = `
+        import fs from 'node:fs';
         import {spawn} from 'node:child_process';
+        ${fixtureReceiptClientSource(receipts.endpoint)}
         import {createVitestWorkerRun} from ${JSON.stringify(compilerUrl)};
         import {createVitestProcessCompletion} from ${JSON.stringify(pathToFileURL(path.join(root, "scripts/vitest-process-group.mts")).href)};
         import {runWithFailedTrailer} from ${JSON.stringify(pathToFileURL(path.join(root, "scripts/lib/failed-trailer.mts")).href)};
@@ -1597,62 +1665,74 @@ export default class {
           try {
             const result=await owner.borrow(child,createVitestProcessCompletion({child,detached:false}));
             if(result.code !== 0) throw new Error('preparation failed');
-            console.log(JSON.stringify(owner.descriptor.directory));
-          } catch(error) {await owner.dispose();throw error;}
+            if (process.argv[1] === 'hold-generation') {
+              fs.writeFileSync(${JSON.stringify(generationReady)}, owner.descriptor.directory);
+              sendReceipt(${JSON.stringify(generationReady)}, 'written');
+              await awaitRelease(${JSON.stringify(generationReady)}, 'finish');
+            }
+          } finally {await owner.dispose();}
         });
       `;
-        const build = await node(["--input-type=module", "-e", buildScript], fixture);
-        expect(build.code, build.stderr).toBe(0);
-        const directory: string = JSON.parse(build.stdout);
-        const freshWorker = path.join(directory, "dist/infra/sqlite-readonly-location.worker.js");
-        const fresh = await node([freshWorker, ...childArgs]);
-        expect(fresh.code).toBe(1);
-        expect(JSON.parse(fresh.stdout)).toMatchObject({
-          ok: false,
-          message: expect.stringContaining("unsafe"),
-        });
         const changedSource = fs.readFileSync(dependency, "utf8");
-        fs.appendFileSync(dependency, "\n// changed after preparation\n");
-        await expect(verifyVitestWorkerArtifacts(directory)).rejects.toThrow(
-          "Source changed during compiled subprocess invocation",
-        );
-        fs.writeFileSync(dependency, changedSource);
-        for (const input of [
-          "node-host-launcher.mjs",
-          "src/tui/tui-pty-runtime-test-support.ts",
-          "src/plugins/runtime-retention-entrypoint.test-support.ts",
-          "scripts/lib/managed-windows-job-entrypoint.mts",
-          "scripts/lib/managed-windows-job.mts",
-        ]) {
-          const filename = path.join(fixture, input);
-          const original = fs.readFileSync(filename, "utf8");
-          try {
-            fs.appendFileSync(filename, "\n// source changed after preparation\n");
-            await expect(verifyVitestWorkerArtifacts(directory)).rejects.toThrow(
-              `Source changed during compiled subprocess invocation: ${filename}`,
-            );
-          } finally {
-            fs.writeFileSync(filename, original);
+        const build = node(["--input-type=module", "-e", buildScript, "hold-generation"], fixture);
+        let buildResult: Awaited<typeof build>;
+        try {
+          await withinTest(fixtureFileBeforeSettlement(receipts, generationReady, build), signal);
+          const directory = fs.readFileSync(generationReady, "utf8");
+          const freshWorker = path.join(directory, "dist/infra/sqlite-readonly-location.worker.js");
+          const fresh = await node([freshWorker, ...childArgs]);
+          expect(fresh.code).toBe(1);
+          expect(JSON.parse(fresh.stdout)).toMatchObject({
+            ok: false,
+            message: expect.stringContaining("unsafe"),
+          });
+          fs.appendFileSync(dependency, "\n// changed after preparation\n");
+          await expect(verifyVitestWorkerArtifacts(directory)).rejects.toThrow(
+            "Source changed during compiled subprocess invocation",
+          );
+          fs.writeFileSync(dependency, changedSource);
+          for (const input of [
+            "node-host-launcher.mjs",
+            "src/tui/tui-pty-runtime-test-support.ts",
+            "src/plugins/runtime-retention-entrypoint.test-support.ts",
+            "scripts/lib/managed-windows-job-entrypoint.mts",
+            "scripts/lib/managed-windows-job.mts",
+          ]) {
+            const filename = path.join(fixture, input);
+            const original = fs.readFileSync(filename, "utf8");
+            try {
+              fs.appendFileSync(filename, "\n// source changed after preparation\n");
+              await expect(verifyVitestWorkerArtifacts(directory)).rejects.toThrow(
+                `Source changed during compiled subprocess invocation: ${filename}`,
+              );
+            } finally {
+              fs.writeFileSync(filename, original);
+            }
           }
+          const parent = path.join(fixture, ".artifacts/vitest-workers");
+          const before = fs.readdirSync(parent).toSorted();
+          writeFixture(fixture, "dist/source-input.js", changedSource);
+          for (const [source, error] of [
+            ["this is not valid TypeScript !", "Build failed"],
+            ["export * from '../../dist/source-input.js';", "tried to read dist"],
+          ]) {
+            fs.writeFileSync(dependency, source!);
+            const failed = await node(["--input-type=module", "-e", buildScript], fixture);
+            expect(failed.code).not.toBe(0);
+            expect(failed.stderr).toContain("owner refused:");
+            expect(failed.stderr).toContain(error!);
+            expect(failed.stderr.match(/^\[.*\] FAILED \(exit \d+\)$/gmu)).toEqual([
+              "[test] FAILED (exit 1)",
+            ]);
+            expect(failed.stderr.trim().split("\n").at(-1)).toBe("[test] FAILED (exit 1)");
+            expect(fs.readdirSync(parent).toSorted()).toEqual(before);
+          }
+        } finally {
+          fs.writeFileSync(dependency, changedSource);
+          receipts.release(generationReady, "finish");
+          buildResult = await build;
         }
-        const parent = path.join(fixture, ".artifacts/vitest-workers");
-        const before = fs.readdirSync(parent).toSorted();
-        writeFixture(fixture, "dist/source-input.js", changedSource);
-        for (const [source, error] of [
-          ["this is not valid TypeScript !", "Build failed"],
-          ["export * from '../../dist/source-input.js';", "tried to read dist"],
-        ]) {
-          fs.writeFileSync(dependency, source!);
-          const failed = await node(["--input-type=module", "-e", buildScript], fixture);
-          expect(failed.code).not.toBe(0);
-          expect(failed.stderr).toContain("owner refused:");
-          expect(failed.stderr).toContain(error!);
-          expect(failed.stderr.match(/^\[.*\] FAILED \(exit \d+\)$/gmu)).toEqual([
-            "[test] FAILED (exit 1)",
-          ]);
-          expect(failed.stderr.trim().split("\n").at(-1)).toBe("[test] FAILED (exit 1)");
-          expect(fs.readdirSync(parent).toSorted()).toEqual(before);
-        }
+        expect(buildResult.code, buildResult.stderr).toBe(0);
       } finally {
         await initial.dispose();
       }

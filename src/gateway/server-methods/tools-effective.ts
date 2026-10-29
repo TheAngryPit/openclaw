@@ -1,7 +1,6 @@
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import {
   ErrorCodes,
-  errorShape,
   validateToolsEffectiveParams,
 } from "../../../packages/gateway-protocol/src/index.js";
 import {
@@ -16,23 +15,22 @@ import {
   resolveSessionAgentId,
 } from "../../agents/agent-scope.js";
 import { prepareConversationCapabilityProfile } from "../../agents/conversation-capability-profile.js";
-import {
-  buildConversationToolPolicyPipelineSteps,
-  resolveConversationToolPolicies,
-} from "../../agents/conversation-tool-policy-pipeline.js";
+import { resolveConversationToolPolicies } from "../../agents/conversation-tool-policy-pipeline.js";
 import { applyFinalEffectiveToolPolicy } from "../../agents/embedded-agent-runner/effective-tool-policy.js";
 import { getRegisteredAgentHarness } from "../../agents/harness/registry.js";
+import { listCoreToolSections } from "../../agents/tool-catalog.js";
 import { readToolAllowlistIntersection } from "../../agents/tool-policy-shared.js";
+import type { ToolPolicyLike } from "../../agents/tool-policy.js";
 import { buildEffectiveToolInventoryGroups } from "../../agents/tools-effective-inventory-groups.js";
+import { buildEffectiveToolInventory } from "../../agents/tools-effective-inventory-shared.js";
 import {
   resolveEffectiveToolInventory,
   acquireEffectiveToolInventoryRuntimeModelContext,
 } from "../../agents/tools-effective-inventory.js";
-import type { EffectiveToolInventoryResult } from "../../agents/tools-effective-inventory.types.js";
-import {
-  buildMcpCatalogNotices,
-  buildRuntimeCompatibleMcpToolInventory,
-} from "../../agents/tools-effective-mcp-inventory.js";
+import type {
+  EffectiveToolInventoryNotice,
+  EffectiveToolInventoryResult,
+} from "../../agents/tools-effective-inventory.types.js";
 import { resolveReplyToMode } from "../../auto-reply/reply/reply-threading.js";
 import { resolveRuntimeConfigCacheKey } from "../../config/config.js";
 import { captureSessionEntryMetadataRead } from "../../config/sessions/session-entry-source-authority.js";
@@ -44,15 +42,19 @@ import {
   getActivePluginChannelRegistryVersion,
   getActivePluginRegistryVersion,
 } from "../../plugins/runtime.js";
+import { getPluginToolMeta } from "../../plugins/tool-metadata.js";
 import {
   deliveryContextFromSession,
   sessionDeliveryOrigin,
 } from "../../utils/delivery-context.read.js";
 import { getConnectedNodePluginToolsVersion } from "../node-plugin-tool-snapshot.js";
+import { SessionMutationAuthorizationChangedError } from "../session-mutation-authorization-error.js";
 import { resolveRequestedSessionAgentId } from "../session-request-agent.js";
 import { withGatewaySessionEntryReadOnly } from "../session-utils-read-lifetime.js";
 import { resolveSessionModelRef, type GatewaySessionEntryRead } from "../session-utils.js";
+import { respondError } from "./response.js";
 import { readGatewayRequestMutationAuthority } from "./session-mutation-guards.js";
+import { retainSessionScopedRead } from "./session-scoped-read.js";
 import type { GatewayRequestHandlers, RespondFn } from "./types.js";
 import { defineValidatedGatewayHandler } from "./validation.js";
 
@@ -65,8 +67,50 @@ const TOOLS_EFFECTIVE_STALE_TTL_MS = 120_000;
 const TOOLS_EFFECTIVE_SLOW_LOG_MS = 250;
 const TOOLS_EFFECTIVE_CACHE_LIMIT = 128;
 const MCP_CONFIG_SUMMARY_CACHE_LIMIT = 128;
+const BUNDLE_MCP_PLUGIN_ID = "bundle-mcp";
 
-let nowForToolsEffectiveCache = () => Date.now();
+// Static presentation only: the effective inventory still owns tool selection.
+const coreToolDescriptions = new Map(
+  listCoreToolSections({ swarmEnabled: true, personalInstructionsEnabled: true }).flatMap(
+    (section) => section.tools.map((tool) => [tool.id, tool.description] as const),
+  ),
+);
+
+function projectSessionToolPreview(
+  inventory: EffectiveToolInventoryResult,
+): EffectiveToolInventoryResult {
+  return {
+    agentId: inventory.agentId,
+    profile: inventory.profile,
+    groups: inventory.groups.map((group) => ({
+      id: group.id,
+      label: group.label,
+      source: group.source,
+      tools: group.tools.map((tool) => {
+        // Runtime descriptions and notices can contain MCP launch details or host paths.
+        const description =
+          tool.source !== "core"
+            ? ""
+            : tool.id === "github_publish"
+              ? tool.rawDescription // Its owner renders only the policy-filtered action names.
+              : (coreToolDescriptions.get(tool.id) ?? "");
+        return {
+          id: tool.id,
+          label: tool.id,
+          source: tool.source,
+          description,
+          rawDescription: description,
+          ...(tool.pluginId ? { pluginId: tool.pluginId } : {}),
+          ...(tool.channelId ? { channelId: tool.channelId } : {}),
+          ...(tool.source === "mcp"
+            ? { mcpServer: tool.mcpServer, mcpToolName: tool.mcpToolName }
+            : {}),
+          ...(tool.deniedBySession ? { deniedBySession: true as const } : {}),
+        };
+      }),
+    })),
+  };
+}
 
 type ToolsEffectiveCacheEntry = {
   value: EffectiveToolInventoryResult;
@@ -107,13 +151,12 @@ function buildToolsEffectiveCacheKey(context: TrustedToolsEffectiveContext): str
     groupChannel: optionalCacheString(context.groupChannel),
     groupSpace: optionalCacheString(context.groupSpace),
     replyToMode: optionalCacheString(context.replyToMode),
+    webSearchEnabled: context.toolOverrides?.webSearch !== false,
     // Prepared session ceilings can change without a config or session-id change.
-    policy: buildConversationToolPolicyPipelineSteps({
-      capabilityProfile: context.capabilityProfile,
-      policies: resolveConversationToolPolicies({ capabilityProfile: context.capabilityProfile }),
-      includeRuntimeToolPolicy: true,
-    }).map(
-      ({ policy }) =>
+    policy: Object.values<ToolPolicyLike | undefined>(
+      resolveConversationToolPolicies({ capabilityProfile: context.capabilityProfile }),
+    ).map(
+      (policy) =>
         policy && {
           allow: policy.allow && (readToolAllowlistIntersection(policy.allow) ?? policy.allow),
           deny: policy.deny,
@@ -160,15 +203,15 @@ function scheduleBaseToolsEffectiveRefresh(
   if (existing) {
     return existing;
   }
-  const startedAt = nowForToolsEffectiveCache();
+  const startedAt = Date.now();
   const task = new Promise<EffectiveToolInventoryResult>((resolve, reject) => {
     setImmediate(() => {
       void resolveBaseToolsEffectiveInventory(context)
         .then((value) => {
           toolsEffectiveCache.delete(key);
-          toolsEffectiveCache.set(key, { value, createdAtMs: nowForToolsEffectiveCache() });
+          toolsEffectiveCache.set(key, { value, createdAtMs: Date.now() });
           pruneMapToMaxSize(toolsEffectiveCache, TOOLS_EFFECTIVE_CACHE_LIMIT);
-          const durationMs = nowForToolsEffectiveCache() - startedAt;
+          const durationMs = Date.now() - startedAt;
           if (durationMs >= TOOLS_EFFECTIVE_SLOW_LOG_MS) {
             logDebug(
               `tools-effective: refresh durationMs=${durationMs} agent=${context.agentId} session=${context.sessionKey} tools=${value.groups.reduce((sum, group) => sum + group.tools.length, 0)}`,
@@ -188,7 +231,7 @@ async function resolveCachedBaseToolsEffective(
   context: TrustedToolsEffectiveContext,
 ): Promise<EffectiveToolInventoryResult> {
   const key = buildToolsEffectiveCacheKey(context);
-  const now = nowForToolsEffectiveCache();
+  const now = Date.now();
   const cached = toolsEffectiveCache.get(key);
   if (cached) {
     const ageMs = now - cached.createdAtMs;
@@ -287,6 +330,7 @@ async function resolveBaseToolsEffectiveInventory(
         groupChannel: context.groupChannel,
         groupSpace: context.groupSpace,
         replyToMode: context.replyToMode,
+        webSearchEnabled: context.toolOverrides?.webSearch,
       }),
     );
   } finally {
@@ -379,7 +423,14 @@ async function projectMcpCatalog(params: {
   context: TrustedToolsEffectiveContext;
   workspaceDir: string;
 }): Promise<EffectiveToolInventoryResult> {
-  const catalogNotices = buildMcpCatalogNotices(params.catalog);
+  const catalogNotices = (params.catalog.diagnostics ?? []).map(
+    (diagnostic): EffectiveToolInventoryNotice => ({
+      id: `mcp-server-diagnostic:${diagnostic.serverName}`,
+      severity: "warning",
+      message: `MCP server "${diagnostic.serverName}": ${diagnostic.message}`,
+      servers: [diagnostic.serverName],
+    }),
+  );
   const base =
     catalogNotices.length > 0
       ? { ...params.base, notices: [...(params.base.notices ?? []), ...catalogNotices] }
@@ -405,15 +456,36 @@ async function projectMcpCatalog(params: {
   });
   try {
     return acquired.run((runtimeModelContext) => {
-      const mcpInventory = buildRuntimeCompatibleMcpToolInventory({
-        tools: filteredMcpTools,
-        cfg: params.context.cfg,
-        workspaceDir: params.workspaceDir,
-        modelProvider: params.context.modelProvider,
-        modelId: params.context.modelId,
-        modelApi: runtimeModelContext.modelApi,
-        runtimeModel: runtimeModelContext.runtimeModel,
-      });
+      const mcpInventory = buildEffectiveToolInventory(
+        {
+          tools: filteredMcpTools,
+          cfg: params.context.cfg,
+          workspaceDir: params.workspaceDir,
+          modelProvider: params.context.modelProvider,
+          modelId: params.context.modelId,
+          modelApi: runtimeModelContext.modelApi,
+          runtimeModel: runtimeModelContext.runtimeModel,
+        },
+        {
+          allowProviderRuntimePluginLoad: false,
+          rawDescriptionFallback: "summary",
+          diagnosticOwner: () => ` from plugin "${BUNDLE_MCP_PLUGIN_ID}"`,
+          createToolProjection: () => (tool) => {
+            const mcp = getPluginToolMeta(tool)?.mcp;
+            return {
+              source: "mcp",
+              pluginId: BUNDLE_MCP_PLUGIN_ID,
+              ...(mcp
+                ? {
+                    mcpServer: mcp.serverName,
+                    mcpToolName: mcp.toolName,
+                    ...(mcp.deniedBySession ? { deniedBySession: true } : {}),
+                  }
+                : {}),
+            };
+          },
+        },
+      );
       const notices = [...(base.notices ?? []), ...mcpInventory.notices];
       if (mcpInventory.entries.length === 0) {
         return notices.length > 0 ? { ...base, notices } : base;
@@ -440,10 +512,10 @@ async function resolveTrustedToolsEffectiveContext(
   // The effective tools request is read-only but security-sensitive. Derive
   // routing/account/model context from the persisted session, not client params.
   if (!loaded.entry) {
-    params.respond(
-      false,
-      undefined,
-      errorShape(ErrorCodes.INVALID_REQUEST, `unknown session key "${params.sessionKey}"`),
+    respondError(
+      params.respond,
+      ErrorCodes.INVALID_REQUEST,
+      `unknown session key "${params.sessionKey}"`,
     );
     return null;
   }
@@ -455,13 +527,10 @@ async function resolveTrustedToolsEffectiveContext(
     ...(params.requestedAgentId ? { agentId: params.requestedAgentId } : {}),
   });
   if (params.requestedAgentId && params.requestedAgentId !== sessionAgentId) {
-    params.respond(
-      false,
-      undefined,
-      errorShape(
-        ErrorCodes.INVALID_REQUEST,
-        `agent id "${params.requestedAgentId}" does not match session agent "${sessionAgentId}"`,
-      ),
+    respondError(
+      params.respond,
+      ErrorCodes.INVALID_REQUEST,
+      `agent id "${params.requestedAgentId}" does not match session agent "${sessionAgentId}"`,
     );
     return null;
   }
@@ -535,11 +604,7 @@ export const toolsEffectiveHandlers: GatewayRequestHandlers = {
       const knownAgents = listAgentIds(cfg);
       const requestedAgentId = normalizeOptionalString(params.agentId);
       if (requestedAgentId && !knownAgents.includes(requestedAgentId)) {
-        respond(
-          false,
-          undefined,
-          errorShape(ErrorCodes.INVALID_REQUEST, `unknown agent id "${requestedAgentId}"`),
-        );
+        respondError(respond, ErrorCodes.INVALID_REQUEST, `unknown agent id "${requestedAgentId}"`);
         return;
       }
       const sessionOwner = resolveRequestedSessionAgentId(cfg, params.sessionKey, requestedAgentId);
@@ -548,6 +613,7 @@ export const toolsEffectiveHandlers: GatewayRequestHandlers = {
         return;
       }
       const authority = readGatewayRequestMutationAuthority(options);
+      const sessionOnly = authority.sessionScope === "operator.sessions.read";
       const consume = async (
         loaded: Pick<GatewaySessionEntryRead, "entry" | "canonicalKey" | "cfg">,
         assertSourceCurrent: () => void,
@@ -566,9 +632,20 @@ export const toolsEffectiveHandlers: GatewayRequestHandlers = {
         const inventory = await resolveReadOnlyToolsEffectiveInventory(trustedContext);
         authority.assertCurrent();
         assertSourceCurrent();
-        respond(true, inventory, undefined);
+        respond(true, sessionOnly ? projectSessionToolPreview(inventory) : inventory, undefined);
       };
+      let scopedRead: Awaited<ReturnType<typeof retainSessionScopedRead>>;
       try {
+        scopedRead = await retainSessionScopedRead(
+          options,
+          params.sessionKey,
+          sessionOwner.agentId,
+          { requireMaterialized: true },
+        );
+        if (scopedRead) {
+          await consume(scopedRead.prepared, scopedRead.assertCurrent);
+          return;
+        }
         const memory = captureSessionEntryMetadataRead(
           {
             agentId: sessionOwner.agentId,
@@ -599,11 +676,22 @@ export const toolsEffectiveHandlers: GatewayRequestHandlers = {
           );
         }
       } catch (err) {
-        respond(
-          false,
-          undefined,
-          errorShape(ErrorCodes.UNAVAILABLE, `tools.effective failed: ${String(err)}`),
+        if (err instanceof SessionMutationAuthorizationChangedError) {
+          respond(false, undefined, err.error);
+          return;
+        }
+        if (sessionOnly) {
+          logWarn(`tools-effective: preview failed: ${String(err)}`);
+        }
+        respondError(
+          respond,
+          ErrorCodes.UNAVAILABLE,
+          sessionOnly
+            ? "Tool preview is unavailable. Retry the request."
+            : `tools.effective failed: ${String(err)}`,
         );
+      } finally {
+        scopedRead?.release();
       }
     },
   ),
@@ -614,8 +702,5 @@ export const testing = {
     toolsEffectiveCache.clear();
     toolsEffectiveInflight.clear();
     mcpConfigSummaryCache.clear();
-  },
-  setToolsEffectiveNowForTest(now: () => number = () => Date.now()) {
-    nowForToolsEffectiveCache = now;
   },
 } as const;

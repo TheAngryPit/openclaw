@@ -2,7 +2,6 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import path from "node:path";
 import { cloneEnvWithPlatformSemantics } from "../config/config-env-vars.js";
 import { resolveStateDir } from "../config/state-dir.js";
-import { assertExistingDatabaseIdentity } from "../infra/sqlite-worker-identity.js";
 import { isStateDatabaseReadAdmissionInvalidatedError } from "./openclaw-state-db-async-lifecycle.js";
 import { captureOpenClawStateDatabaseReadAdmission } from "./openclaw-state-db-cache.js";
 import { resolveOpenClawStateSqlitePath } from "./openclaw-state-db.paths.js";
@@ -49,10 +48,7 @@ export function prepareOpenClawStateReadSource(input: { path: string; env?: Node
 
   const refresh = () => {
     original.maintenanceScope?.assertAdmission();
-    const identity = original.admission.identity;
-    if (identity.key.startsWith("file:")) {
-      assertExistingDatabaseIdentity(options.path, identity.key, identity.birthtime);
-    } else {
+    if (!original.admission.identity.key.startsWith("file:")) {
       original.admission.assertCurrent();
     }
     const next = captureOpenClawStateReadContext(options.path);
@@ -61,7 +57,8 @@ export function prepareOpenClawStateReadSource(input: { path: string; env?: Node
       next.admission.identity.key !== source.key ||
       next.admission.identity.birthtime !== source.birthtime ||
       next.maintenanceScope !== original.maintenanceScope ||
-      next.existingSchemaPath !== original.existingSchemaPath
+      next.existingSchemaPath !== original.existingSchemaPath ||
+      next.gatewayServiceInstallation !== original.gatewayServiceInstallation
     ) {
       throw new Error("Prepared state read source changed before read admission");
     }
@@ -82,7 +79,6 @@ export function prepareOpenClawStateReadSource(input: { path: string; env?: Node
     return inSourceContext(refresh);
   };
   const prepareWorker = () => {
-    // Actual reads verify the file even when no local publication revoked its admission.
     const next = refresh();
     worker ??= captureOpenClawStateWorkerContext(options);
     if (worker.admission !== next.admission) {

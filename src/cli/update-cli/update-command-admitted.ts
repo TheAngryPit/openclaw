@@ -111,17 +111,16 @@ export async function runAdmittedUpdate(
           run.executorFence = await executor.enter(resolveUpdateCommandAdmissionRoot(prepared), {
             preflight: true,
             serviceRoot,
-            activationTimeoutMs: Math.max(1, deadline.remainingMs()),
           });
         }
         const execute = () => {
           executionStarted = true;
-          if (refusal) {
-            assertInitializationCurrent?.();
-            throw refusal;
-          }
           return withUpdateCommandRecoveryUnwind(opts, recoveryState, () =>
             withCommandProcessScope(async () => {
+              if (refusal) {
+                assertInitializationCurrent?.();
+                throw refusal;
+              }
               deadline?.signal.throwIfAborted();
               await executeUpdate(opts, presentation, executor);
               deadline?.signal.throwIfAborted();
