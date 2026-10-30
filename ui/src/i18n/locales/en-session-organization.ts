@@ -52,6 +52,7 @@ const enSessionOrganization = {
     personalGroupChanged: sharedSessions.personalGroupChanged,
     personalGroupCapacity: sharedSessions.personalGroupCapacity,
     pullRequestCount: en.sessionsView.pullRequestCount,
+    mainSession: en.sessionsView.mainSession,
     advanced: "Advanced",
     searchGroups: "Search groups",
     unassigned: "Unassigned",

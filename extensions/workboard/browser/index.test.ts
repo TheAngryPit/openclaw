@@ -13,6 +13,12 @@ import type { WorkboardBoardSummary } from "./lib/workboard/types.ts";
 import { workboardTestHost } from "./test/host.setup.ts";
 import { createViewContext } from "./test/host.ts";
 
+vi.mock("./i18n/locales/translated.json", () => ({
+  default: {
+    sv: { workboard: { title: "Workboard title locale fixture", defaultBoard: "Standardtavla" } },
+  },
+}));
+
 let fixture: ReturnType<typeof workboardTestHost>;
 let stopPlugin: (() => void) | undefined;
 let stopView: (() => void) | undefined;
@@ -98,11 +104,23 @@ it("refreshes catalog labels when a deferred locale loads and when the locale ch
   await activate();
   await vi.dynamicImportSettled();
   await tick();
+  const page = fixture.registrations.get("page/workboard") as ControlUiPage;
+  const topNavigation = fixture.registrations.get(
+    "navigation/workboard",
+  ) as ControlUiNavigationItem;
+  expect(page.label).toBe("Workboard title locale fixture");
+  expect(topNavigation.label).toBe("Workboard title locale fixture");
+  expect(page.id).toBe("workboard");
+  expect(topNavigation.id).toBe("workboard");
   expect(navigation("default").label).toBe("Standardtavla");
 
   Object.assign(fixture.host, { locale: "en" });
   fixture.notify();
   await tick();
+  expect(fixture.registrations.get("page/workboard")).toBe(page);
+  expect(fixture.registrations.get("navigation/workboard")).toBe(topNavigation);
+  expect(page.label).toBe("Workboard");
+  expect(topNavigation.label).toBe("Workboard");
   expect(navigation("default").label).toBe("Default board");
   expect(request).toHaveBeenCalledTimes(1);
 
