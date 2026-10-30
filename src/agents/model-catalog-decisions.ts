@@ -7,6 +7,7 @@ import {
   resolveProviderAuthScope,
 } from "../plugins/provider-auth-scope.js";
 import { resolveLoadedProviderRuntimePlugin } from "../plugins/provider-hook-runtime.js";
+import { resolveProviderRefOwnership } from "../plugins/providers.js";
 import { withPluginRuntimeRegistryScope } from "../plugins/runtime/gateway-request-scope.js";
 import { withPluginRuntimeGenerationScope } from "../plugins/runtime/generation-scope.js";
 import { getActiveSecretsRuntimeSnapshotRevisionState } from "../secrets/runtime-state.js";
@@ -134,7 +135,9 @@ export function createModelCatalogDecisions(params: ModelCatalogDecisionParams) 
   const modelKeyOf = createModelCatalogIdentityKeyResolver();
   const primaryKey = modelKeyOf(primaryEntry);
   const configuredPinForEntry = (entry: Pick<ModelCatalogEntry, "provider" | "id">) =>
-    modelKeyOf(entry) === primaryKey ? configuredProfileId : undefined;
+    configuredProfileId !== undefined && modelKeyOf(entry) === primaryKey
+      ? configuredProfileId
+      : undefined;
   // Runtime choices are read after preparation; CLI backends belong to the owner's registry.
   const cliRuntimeBindings = params.pluginRegistry
     ? withPluginRuntimeRegistryScope(params.pluginRegistry, () =>
@@ -688,6 +691,12 @@ export function createModelCatalogDecisions(params: ModelCatalogDecisionParams) 
               modelId: entry.id,
               requestedRuntime: runtimeId,
               contextManagement: harness.contextManagement,
+              providerOwnership: resolveProviderRefOwnership({
+                provider: entry.provider,
+                config: params.cfg,
+                workspaceDir,
+                metadataSnapshot,
+              }),
               modelProvider: {
                 api: route?.api ?? entry.api,
                 baseUrl: route?.baseUrl ?? entry.baseUrl,

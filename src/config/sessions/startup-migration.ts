@@ -264,10 +264,13 @@ export async function runSessionStartupMigration(params: {
           undefined,
           params.assertCurrent,
         ),
-    migrateLegacyMainSessionKeys({ cfg: params.cfg, env, mode: "detect" }),
+    // Fleet-wide guidance belongs to boot; a deferred agent must not wait on other stores.
+    params.agentIds
+      ? undefined
+      : migrateLegacyMainSessionKeys({ cfg: params.cfg, env, mode: "detect" }),
   ] as const);
   params.assertCurrent?.();
-  if (result.warnings.length > 0) {
+  if (result && result.warnings.length > 0) {
     params.log.warn(
       `session: retired main-agent session migration warnings:\n${result.warnings.map((warning) => `- ${warning}`).join("\n")}`,
     );
@@ -373,6 +376,7 @@ export async function runSessionStartupMigration(params: {
             embeddedAcpSessionKey = row.session_key;
           }
         },
+        params.log.warn,
       );
       // Canonical refusal is readiness failure. Drain before runtime visitors can
       // otherwise parse a whole migrated store on the main thread.
@@ -441,7 +445,7 @@ export async function runSessionStartupMigration(params: {
   }
   throwSqliteLifecycleErrors([...errors], "Session startup migration and cleanup failed");
   if (interruptedSessions > 0) {
-    params.log.info(`session: normalized ${interruptedSessions} legacy run(s) to interrupted`);
+    params.log.info(`session: settled ${interruptedSessions} legacy run(s)`);
   }
   params.assertCurrent?.();
 }
