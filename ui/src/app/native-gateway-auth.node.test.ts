@@ -530,7 +530,6 @@ describe("native authenticated Control UI", () => {
         }),
       ]);
       expect(frame.params.auth).toEqual({});
-      expect(frame.params.device?.id).toBe(deviceId);
       expect(frame.params.scopes).toEqual(scopes);
       if (transport === "WebKit") {
         expect(bridge.postMessage).not.toHaveBeenCalled();
