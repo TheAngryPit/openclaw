@@ -125,7 +125,10 @@ suite.define(() => {
     await gateway.waitForRequest("config.patch");
     const patches = await gateway.getRequests("config.patch");
     expect(patchPrefs(patches[0]!)).toMatchObject({ locale: "pt-PT" });
-    gateway.setMethodResponse("config.get", configResponse({ locale: "pt-PT" }, "pt-pt-after"));
+    await gateway.setMethodResponse(
+      "config.get",
+      configResponse({ locale: "pt-PT" }, "pt-pt-after"),
+    );
 
     await page.reload();
     await expect.poll(() => page.evaluate(() => document.documentElement.lang)).toBe("pt-PT");
