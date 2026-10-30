@@ -434,6 +434,17 @@ const reviewed = new Map([
 // Match lexical operation paths, not moving line numbers or whole mixed modules.
 const reviewedOperations = new Map([
   [
+    "src/agents/bash-durable-process-store.ts",
+    [
+      {
+        tier: "W",
+        operations: ["writeDurableProcess", "listDurableProcesses"],
+        evidence:
+          "Only openclaw-state-worker-registry.ts loads durableProcessOperations for durableProcess.write (writeDurableProcess), and openclaw-state-read-operation-registry.ts loads durableProcessReadOperations for durableProcess.list (listDurableProcesses). The main-thread createDurableProcessStore facade only awaits those worker operations; the native store fixture forbids host SQL during its warm read/write flow.",
+      },
+    ],
+  ],
+  [
     "src/config/sessions/session-accessor.sqlite-read.ts",
     [
       {
@@ -718,14 +729,13 @@ const reviewedOperations = new Map([
       {
         tier: "T3",
         operations: [
-          "everySessionTranscriptUserInputFrom.read",
           "readSessionTranscriptVisibleMessageDeltaCore",
           "resolveVisibleDeltaRange",
           "readVisibleDeltaMetadata",
           "readVisibleDeltaPayload",
         ],
         evidence:
-          "Harness completion reaches the predicate only through session-history-read-operation.worker.ts or openclaw-agent-execution.worker.ts -> session-actor.worker.ts -> session-actor-phase.worker.ts. Visible delta has only session-history-read-operation.worker.ts and the registered execution-worker visibleDelta operation as callers; the accessor reexport adds no native value caller. Its private range, metadata, and payload helpers are called only by the visible delta core.",
+          "Visible delta has only session-history-read-operation.worker.ts and the registered execution-worker visibleDelta operation as callers; the accessor reexport adds no native value caller. Its private range, metadata, and payload helpers are called only by the visible delta core.",
       },
     ],
   ],
