@@ -286,14 +286,10 @@ describe("user profiles", () => {
     const profile = ensureProfileForTailscaleIdentity({ login: "first-name@github" }, options);
     setDisplayName(profile.id, " \t ", options);
 
-    const originalTransaction = stateDatabase.runOpenClawStateWriteTransaction;
     let firstWriter: ReturnType<typeof setDisplayName> | undefined;
-    vi.spyOn(stateDatabase, "runOpenClawStateWriteTransaction").mockImplementationOnce(
-      (operation, databaseOptions, transactionOptions) => {
-        firstWriter = setDisplayName(profile.id, "First name", options, true);
-        return originalTransaction(operation, databaseOptions, transactionOptions);
-      },
-    );
+    duringWriterAdmission(() => {
+      firstWriter = setDisplayName(profile.id, "First name", options, true);
+    });
     expect(setDisplayName(profile.id, "Competing name", options, true)).toMatchObject({
       id: profile.id,
       displayName: "First name",

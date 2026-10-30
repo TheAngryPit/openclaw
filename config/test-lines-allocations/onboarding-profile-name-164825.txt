@@ -1,3 +1,1 @@
-# Optional profile name: atomic only-if-unset writes, stale UI results,
-# local skip/retry, real-Gateway persistence, and responsive prompt coverage.
-652
+646
