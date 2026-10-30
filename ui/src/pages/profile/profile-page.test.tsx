@@ -13,7 +13,7 @@ import type { AuthenticatedUser } from "../../app/user-profile.ts";
 // These tests own identity loading, not the lazy preference reader; settle that module at setup
 // so its cold transform cannot consume the one-second UI waits on a loaded CI runner.
 import "../../app/user-prefs-request.ts";
-import { i18n, t } from "../../i18n/index.ts";
+import { i18n, t, translateActive } from "../../i18n/index.ts";
 import { setAvatarGatewayOrigin } from "../../lib/identity-avatar-context.ts";
 import { uploadsDisabledMessage } from "../../lib/uploads.ts";
 import { gatewayHelloForMethods } from "../../test-helpers/gateway-methods.ts";
@@ -125,6 +125,9 @@ it("refreshes translated copy when the locale changes while mounted", async () =
   const englishNote = note?.textContent?.trim();
 
   await i18n.setLocale("de");
+  expect(i18n.getLocale()).toBe("de");
+  expect(translateActive("profilePage.offline")).toBeDefined();
+  expect(translateActive("profilePage.offline")).not.toBe(englishNote);
   flush();
 
   expect(note?.textContent?.trim()).toBe(t("profilePage.offline"));
@@ -269,6 +272,7 @@ it("falls back to the text avatar when the hero image fails to load", async () =
   const avatar = page.querySelector(".profile-hero__avatar .identity-avatar--agent")!;
   const image = avatar.querySelector("img");
   expect(image?.getAttribute("src")).toBe("data:image/png;base64,unloadable");
+  expect(avatar.getAttribute("data-avatar-state")).toBe("loaded");
   expect(avatar.classList).not.toContain("is-pending");
 
   image?.dispatchEvent(new Event("error"));
