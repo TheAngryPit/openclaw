@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { brotliDecompressSync, gunzipSync } from "node:zlib";
 import { createServer, type Alias } from "vite";
-import { expect, it, vi } from "vitest";
+import { expect, it, onTestFinished, vi } from "vitest";
 import {
   hashControlUiTranslationText,
   loadControlUiTranslationMemory,
@@ -294,31 +294,32 @@ it("uses the supplied artifact identity without reading Git metadata", () => {
   expect(childProcessMocks.execFileSync).not.toHaveBeenCalled();
 });
 
-it("selects a polling watcher when the existing environment opt-in is enabled", async ({
-  onTestFinished,
-}) => {
-  vi.stubEnv("CHOKIDAR_USEPOLLING", "1");
-  onTestFinished(() => {
-    vi.unstubAllEnvs();
-  });
-  const root = await mkdtemp(path.join(os.tmpdir(), "openclaw-ui-watcher-"));
-  onTestFinished(() => rm(root, { recursive: true, force: true }));
-  const config = controlUiViteConfig({ command: "serve", buildInfo: resolveBuildInfo() });
-  const server = await createServer({
-    configFile: false,
-    root,
-    logLevel: "silent",
-    optimizeDeps: { noDiscovery: true },
-    server: { ...config.server, middlewareMode: true, hmr: false },
-  });
-  try {
-    // Chokidar can report polling enabled while still choosing FSEvents on macOS.
-    expect(server.watcher.options.usePolling).toBe(true);
-    expect(server.watcher.options.useFsEvents).toBe(false);
-  } finally {
-    await server.close();
-  }
-});
+it.each(["", "1"])(
+  "selects the development watcher with CHOKIDAR_USEPOLLING=%j",
+  async (polling) => {
+    vi.stubEnv("CHOKIDAR_USEPOLLING", polling);
+    onTestFinished(() => {
+      vi.unstubAllEnvs();
+    });
+    const root = await mkdtemp(path.join(os.tmpdir(), "openclaw-ui-watcher-"));
+    onTestFinished(() => rm(root, { recursive: true, force: true }));
+    const config = controlUiViteConfig({ command: "serve", buildInfo: resolveBuildInfo() });
+    const server = await createServer({
+      configFile: false,
+      root,
+      logLevel: "silent",
+      optimizeDeps: { noDiscovery: true },
+      server: { ...config.server, middlewareMode: true, hmr: false },
+    });
+    try {
+      // Chokidar can report polling enabled while still choosing FSEvents on macOS.
+      expect(server.watcher.options.usePolling).toBe(polling === "1");
+      expect(server.watcher.options.useFsEvents).toBe(false);
+    } finally {
+      await server.close();
+    }
+  },
+);
 
 it("embeds one canonical artifact identity from explicit build inputs", () => {
   expect(
@@ -436,25 +437,21 @@ it.each([
   ).toThrow(`${key} ${error}`);
 });
 
-it("resolves root tsconfig package aliases for source imports", () => {
-  const alias = resolveTsconfigPathAliasesForVite().find(
-    ({ find }) => find === "@openclaw/net-policy/ip",
-  );
-  expect(alias?.replacement).toBe(path.join(repoRoot, "packages/net-policy/src/ip.ts"));
-});
-
-it("resolves Control UI dev-server source aliases for internal packages", () => {
-  const aliases = resolveSourcePackageAliasesForVite();
-  const moduleId = "@openclaw/normalization-core/agent-id";
-  expect(aliases.find((alias) => alias.find === moduleId)?.replacement).toBe(
-    path.join(repoRoot, "packages/normalization-core/src/agent-id.ts"),
-  );
-  expectBefore(
-    aliases.map((alias) => alias.find),
-    moduleId,
-    "@openclaw/normalization-core",
-  );
-});
+it.each(["agent-id", "error-coercion", "expect"])(
+  "resolves internal source aliases for %s",
+  (subpath) => {
+    const aliases = resolveSourcePackageAliasesForVite();
+    const moduleId = `@openclaw/normalization-core/${subpath}`;
+    expect(aliases.find((alias) => alias.find === moduleId)?.replacement).toBe(
+      path.join(repoRoot, `packages/normalization-core/src/${subpath}.ts`),
+    );
+    expectBefore(
+      aliases.map((alias) => alias.find),
+      moduleId,
+      "@openclaw/normalization-core",
+    );
+  },
+);
 
 it("uses Node package resolution for external packages inherited by worktrees", () => {
   const resolvePackage = vi.fn((specifier: string) => path.join("/parent/node_modules", specifier));
@@ -567,13 +564,9 @@ it("bootstraps only an absent locale memory from the English catalog", async () 
 });
 
 it.each([
-  {
-    name: "empty",
-    memory: "",
-    expected: "Control UI fr translation memory is missing or empty",
-  },
-  { name: "malformed", memory: "{", expected: SyntaxError },
-])("rejects $name locale memory", async ({ memory, expected }) => {
+  ["empty", "", "Control UI fr translation memory is missing or empty"],
+  ["malformed", "{", SyntaxError],
+] as const)("rejects %s locale memory", async (_name, memory, expected) => {
   const { load } = await localeHooks();
   await fsMocks.readFileSync.withImplementation(
     () => memory,
@@ -584,10 +577,10 @@ it.each([
 });
 
 it.each([
-  { name: "stale resolved", outcome: "resolve" as const, invalidate: true },
-  { name: "stale rejected", outcome: "reject" as const, invalidate: true },
-  { name: "current rejected", outcome: "reject" as const, invalidate: false },
-])("recovers a $name source-catalog generation", async ({ outcome, invalidate }) => {
+  ["stale resolved", "resolve", true],
+  ["stale rejected", "reject", true],
+  ["current rejected", "reject", false],
+] as const)("recovers a %s source-catalog generation", async (_name, outcome, invalidate) => {
   const staleImport = deferred<ReturnType<typeof catalogImport>>();
   const currentCatalog = labeledCatalog("current");
   let imports = 0;

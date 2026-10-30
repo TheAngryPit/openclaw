@@ -272,13 +272,6 @@ it.each<InvalidRequest>([
   },
 );
 
-function connectedProfileClient() {
-  return {
-    authenticatedUserProfile: { ...profileBinding },
-    connect: { scopes: ["operator.write"] },
-  };
-}
-
 it("keeps unresolved users.self unavailable and retryable when GitHub lookup fails", async () => {
   const providerClient: Record<string, unknown> = {
     authenticatedUserId: "ada@github",
@@ -403,9 +396,12 @@ it("refreshes from the current catalog when an older name write returns late", a
   const refresh = vi.fn();
   const params = { profileId: profile.id, displayName: "First name", onlyIfUnset: true };
   expect(validateUsersSetDisplayNameParams(params)).toBe(true);
-  const pending = runUsersHandler("users.setDisplayName", params, connectedProfileClient(), {
-    refreshConnectedUserProfile: refresh,
-  });
+  const pending = runUsersHandler(
+    "users.setDisplayName",
+    params,
+    { connect: selfClient.connect, authenticatedUserProfile: { ...profileBinding } },
+    { refreshConnectedUserProfile: refresh },
+  );
   const respond = await finishWrite(gate, pending, () => {
     expectUntouched(refresh);
     readResidentUserProfileRevision.mockReturnValue({
@@ -593,7 +589,8 @@ it.each(
 )("settles $method before publishing after $change", async ({ method, change }) => {
   const connection = new AbortController();
   const client = {
-    ...connectedProfileClient(),
+    connect: selfClient.connect,
+    authenticatedUserProfile: { ...profileBinding },
     connectionSignal: connection.signal,
   };
   const avatar = method === "users.setAvatar";

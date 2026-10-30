@@ -162,6 +162,13 @@ is the generic embedding surface for reusable vector generation. Memory search
 consumes this generic provider surface. The older memory-specific registrar and
 manifest contract were removed after their August 2026 migration window.
 
+Bundled embedding providers can receive an optional host-injected
+`acquireLocalService` hook matching the existing public
+`PluginRuntime["llm"]["acquireLocalService"]` shape. It leases only the configured
+local service. Forward the caller's signal, observe readiness through the optional
+target callback `onReadinessWait`, and release the lease after the provider request
+settles.
+
 Embedding providers can type their asynchronous `batchEmbed(...)` capability with
 `EmbeddingProviderBatchRuntime` from
 `openclaw/plugin-sdk/embedding-provider-runtime-contract`. The public contract
@@ -202,6 +209,15 @@ The four explicit codecs are `decisionBatchV1ToV2`,
 `undefined` instead of being coerced. Malformed batch input throws
 `DecisionContractError`. They preserve values rather than performing inference,
 thresholding, argmax, probability normalization, or accounting estimates.
+
+System One adapters can share `encodeSystemOneQuestions` and
+`decodeSystemOneResponse` from the same entrypoint. Encoding renames Boolean
+questions to native `noul`; the caller still owns input and question admission.
+The strict decoder preserves native labels, scores, distributions, model identity,
+and usage, requiring token counts and bounded confidence for Choice/Score/Box.
+It returns an untrusted candidate, not an admitted result: always call
+`validateDecisionResultV2(batch, candidate, capabilities)` before returning it.
+These helpers perform no HTTP, auth, retries, or accounting.
 
 For example, an explicit V2 JSON string cannot become V1 text without losing its
 evidence kind. Rich answers, abstention, or accounting that V1 cannot represent

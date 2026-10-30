@@ -211,6 +211,7 @@ export async function readCheckoutDiffRevision(
     ...installation.config,
   ];
   let hasExcludesFile = false;
+  let hasSparseCheckoutConfig = false;
   for (const file of configFiles) {
     if (!nodePath.isAbsolute(file)) {
       return unavailableDiffRevision(timing, "no-revision-config");
@@ -230,6 +231,7 @@ export async function readCheckoutDiffRevision(
       return unavailableDiffRevision(timing, "no-revision-config");
     }
     hasExcludesFile ||= /excludesfile\s*=/i.test(config);
+    hasSparseCheckoutConfig ||= /sparsecheckout/i.test(config);
   }
   if (hasExcludesFile) {
     // Git owns precedence, quoting and ~/ expansion; the external ignore file
@@ -283,6 +285,15 @@ export async function readCheckoutDiffRevision(
   const semanticBudget = remaining;
   const fingerprint = (() => {
     try {
+      // Sparse configuration can pair a large index with a small working tree.
+      // Otherwise skip likely oversized censuses; Git still establishes freshness.
+      if (
+        !summaryOnly &&
+        !hasSparseCheckoutConfig &&
+        (readStat(nodePath.join(gitDir, "index"))?.size ?? 0n) > 1_048_576n
+      ) {
+        return undefined;
+      }
       const files = [root];
       const pending = [root];
       let hasNestedRepository = false;
@@ -360,6 +371,7 @@ export async function readCheckoutDiffRevision(
   const untrackedSet = createHash("sha256");
   const worktreeMtime = createHash("sha256");
   const paths = new Set<string>();
+  const untrackedPaths: string[] = [];
   let cleanHead: string | undefined;
   for (const record of status.stdout.split("\0").filter(Boolean)) {
     if (record.startsWith("# ")) {
@@ -373,6 +385,7 @@ export async function readCheckoutDiffRevision(
     if (record.startsWith("? ")) {
       file = record.slice(2);
       untrackedSet.update(file).update("\0");
+      untrackedPaths.push(file);
     } else {
       // Porcelain v2 preserves index object/mode identity without index stat-cache bytes.
       const entry = /^1 (..) (....) (\d+) (\d+) (\d+) ([a-f0-9]+) ([a-f0-9]+) (.*)$/su.exec(record);
@@ -402,7 +415,9 @@ export async function readCheckoutDiffRevision(
     // dirtiness above. Neither publishes nested working-tree file contents.
     observe(nodePath.join(root, file), true, worktreeMtime);
   }
-  const cleanWorktree = paths.size === 0 && cleanHead ? { root, head: cleanHead } : undefined;
+  const worktreeStatus = cleanHead
+    ? { root, head: cleanHead, clean: paths.size === 0, untrackedPaths }
+    : undefined;
   // Clean committed previews still depend on file type and hardlink eligibility.
   for (const file of previousPaths.toSorted()) {
     if (!paths.has(file)) {
@@ -431,7 +446,7 @@ export async function readCheckoutDiffRevision(
       worktreeMtime: worktreeMtime.digest("hex"),
       metadata: hash.digest("hex"),
     }),
-    ...(cleanWorktree ? { cleanWorktree } : {}),
+    ...(worktreeStatus ? { worktreeStatus } : {}),
   };
   if (fingerprint) {
     smallDiffRevisions.set(memoKey, { fingerprint, revision });

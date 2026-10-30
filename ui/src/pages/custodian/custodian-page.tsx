@@ -463,140 +463,146 @@ function CustodianPageContent(props: Props, host: SolidBridgeElement<Props>) {
         },
       ]}
     >
-      <header
-        class={[
-          "custodian__header custodian__column",
-          { "custodian__header--minimal": props.onboarding },
-        ]}
-      >
-        <Show when={!props.onboarding}>
-          <div class="custodian__identity">
-            <div class="custodian__mark" aria-hidden="true">
-              <openclaw-mascot mood={store.read().sending ? "thinking" : "idle"} prop:size={38} />
-            </div>
-            <div>
-              <h1>{t("custodian.title")}</h1>
-              <p>{t("custodian.subtitleCaretaker")}</p>
-            </div>
-          </div>
-        </Show>
-        <div class="custodian__header-actions">
-          <Show when={props.onboarding}>
-            <Errored
-              fallback={(error, reset) => <LazyViewError error={error()} onRetry={reset} inline />}
-            >
-              <Loading>
-                <SidebarAttention />
-              </Loading>
-            </Errored>
-          </Show>
-          <Show when={historyAvailable()}>
-            <button
-              class="btn btn--ghost custodian__history-toggle"
-              type="button"
-              aria-expanded={historyOpen() ? "true" : "false"}
-              onClick={() => {
-                const open = !historyOpen();
-                setHistoryOpen(open);
-                if (open && !historyOwner().busy) {
-                  loadHistory(true);
-                }
-              }}
-            >
-              {t("custodian.history.button")}
-            </button>
-          </Show>
-          <Show when={props.onboarding}>
-            <button class="btn btn--ghost" type="button" onClick={() => props.store.exitSetup()}>
-              {t("custodian.exitSetup")}
-            </button>
-          </Show>
-        </div>
-      </header>
-      <Show when={shouldRenderOnboardingNamePrompt()}>
-        <section
-          class="custodian__name-prompt custodian__column"
-          aria-labelledby={onboardingNameProfile() ? "custodian-name-title" : undefined}
+      <div class="custodian__column">
+        <header
+          class={[
+            "custodian__header custodian__column",
+            { "custodian__header--minimal": props.onboarding },
+          ]}
         >
-          <Show
-            when={onboardingNameProfile()}
-            fallback={
-              <p class="custodian__error" role="alert">
-                <span>{onboardingNameError()}</span>
-                <button
-                  class="btn btn--sm"
-                  type="button"
-                  disabled={onboardingNameLoading()}
-                  onClick={() => {
-                    if (onboardingOwner) {
-                      void loadOnboardingProfile(onboardingOwner);
-                    }
-                  }}
-                >
-                  {onboardingNameLoading() ? t("common.loading") : t("common.retry")}
-                </button>
-              </p>
-            }
-          >
-            <div>
-              <h2 id="custodian-name-title">{t("custodian.onboardingName.title")}</h2>
-              <p id="custodian-name-description">{t("custodian.onboardingName.description")}</p>
-            </div>
-            <form
-              class="custodian__name-form"
-              aria-busy={onboardingNameBusy() ? "true" : "false"}
-              onSubmit={(event) => {
-                event.preventDefault();
-                void saveOnboardingName();
-              }}
-            >
-              <label for="custodian-onboarding-display-name">
-                {t("custodian.onboardingName.label")}
-              </label>
-              <input
-                id="custodian-onboarding-display-name"
-                class="settings-input"
-                type="text"
-                maxlength={256}
-                autocomplete="nickname"
-                aria-describedby={
-                  onboardingNameError()
-                    ? "custodian-name-description custodian-name-error"
-                    : "custodian-name-description"
-                }
-                value={onboardingNameDraft()}
-                disabled={onboardingNameBusy()}
-                onInput={(event) => {
-                  setOnboardingNameDraft(event.currentTarget.value);
-                  setOnboardingNameError(null);
-                }}
-              />
-              <Show when={onboardingNameError()}>
-                <p id="custodian-name-error" class="custodian__name-error" role="alert">
-                  {onboardingNameError()}
-                </p>
-              </Show>
-              <div class="custodian__name-actions">
-                <button
-                  class="btn btn--ghost"
-                  type="button"
-                  disabled={onboardingNameBusy()}
-                  onClick={() => setOnboardingNameSkipped(true)}
-                >
-                  {t("custodian.onboardingName.skip")}
-                </button>
-                <button
-                  class="btn"
-                  type="submit"
-                  disabled={onboardingNameBusy() || !onboardingNameDraft().trim()}
-                >
-                  {onboardingNameBusy() ? t("common.saving") : t("custodian.onboardingName.save")}
-                </button>
+          <Show when={!props.onboarding}>
+            <div class="custodian__identity">
+              <div class="custodian__mark" aria-hidden="true">
+                <openclaw-mascot mood={store.read().sending ? "thinking" : "idle"} prop:size={38} />
               </div>
-            </form>
+              <div>
+                <h1>{t("custodian.title")}</h1>
+                <p>{t("custodian.subtitleCaretaker")}</p>
+              </div>
+            </div>
           </Show>
-        </section>
-      </Show>
+          <div class="custodian__header-actions">
+            <Show when={props.onboarding}>
+              <Errored
+                fallback={(error, reset) => (
+                  <LazyViewError error={error()} onRetry={reset} inline />
+                )}
+              >
+                <Loading>
+                  <SidebarAttention />
+                </Loading>
+              </Errored>
+            </Show>
+            <Show when={historyAvailable()}>
+              <button
+                class="btn btn--ghost custodian__history-toggle"
+                type="button"
+                aria-expanded={historyOpen() ? "true" : "false"}
+                onClick={() => {
+                  const open = !historyOpen();
+                  setHistoryOpen(open);
+                  if (open && !historyOwner().busy) {
+                    loadHistory(true);
+                  }
+                }}
+              >
+                {t("custodian.history.button")}
+              </button>
+            </Show>
+            <Show when={props.onboarding}>
+              <button class="btn btn--ghost" type="button" onClick={() => props.store.exitSetup()}>
+                {t("custodian.exitSetup")}
+              </button>
+            </Show>
+          </div>
+        </header>
+        <Show when={shouldRenderOnboardingNamePrompt()}>
+          <section
+            class="custodian__name-prompt custodian-setup"
+            aria-labelledby={onboardingNameProfile() ? "custodian-name-title" : undefined}
+          >
+            <Show
+              when={onboardingNameProfile()}
+              fallback={
+                <p class="custodian__error" role="alert">
+                  <span>{onboardingNameError()}</span>
+                  <button
+                    class="btn btn--sm"
+                    type="button"
+                    disabled={onboardingNameLoading()}
+                    onClick={() => {
+                      if (onboardingOwner) {
+                        void loadOnboardingProfile(onboardingOwner);
+                      }
+                    }}
+                  >
+                    {onboardingNameLoading() ? t("common.loading") : t("common.retry")}
+                  </button>
+                </p>
+              }
+            >
+              <div>
+                <h2 id="custodian-name-title">{t("custodian.onboardingName.title")}</h2>
+                <p id="custodian-name-description" class="muted">
+                  {t("custodian.onboardingName.description")}
+                </p>
+              </div>
+              <form
+                class="custodian__name-form wizard-step__options"
+                aria-busy={onboardingNameBusy() ? "true" : "false"}
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void saveOnboardingName();
+                }}
+              >
+                <label for="custodian-onboarding-display-name">
+                  {t("custodian.onboardingName.label")}
+                </label>
+                <input
+                  id="custodian-onboarding-display-name"
+                  class="settings-input"
+                  type="text"
+                  maxlength={256}
+                  autocomplete="nickname"
+                  aria-describedby={
+                    onboardingNameError()
+                      ? "custodian-name-description custodian-name-error"
+                      : "custodian-name-description"
+                  }
+                  value={onboardingNameDraft()}
+                  disabled={onboardingNameBusy()}
+                  onInput={(event) => {
+                    setOnboardingNameDraft(event.currentTarget.value);
+                    setOnboardingNameError(null);
+                  }}
+                />
+                <Show when={onboardingNameError()}>
+                  <p id="custodian-name-error" class="custodian-setup__error" role="alert">
+                    {onboardingNameError()}
+                  </p>
+                </Show>
+                <div class="custodian__name-actions wizard-step__actions wizard-step__actions--split">
+                  <button
+                    class="btn btn--ghost"
+                    type="button"
+                    disabled={onboardingNameBusy()}
+                    onClick={() => setOnboardingNameSkipped(true)}
+                  >
+                    {t("custodian.onboardingName.skip")}
+                  </button>
+                  <button
+                    class="btn"
+                    type="submit"
+                    disabled={onboardingNameBusy() || !onboardingNameDraft().trim()}
+                  >
+                    {onboardingNameBusy() ? t("common.saving") : t("custodian.onboardingName.save")}
+                  </button>
+                </div>
+              </form>
+            </Show>
+          </section>
+        </Show>
+      </div>
       <CustodianSurface
         class="custodian__column"
         store={props.store}

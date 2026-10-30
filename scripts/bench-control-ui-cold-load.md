@@ -110,8 +110,29 @@ runs both localhost and 100 ms RTT / 10 Mbps profiles by default:
 NODE_DISABLE_COMPILE_CACHE=1 node --import ./scripts/tsx.mjs scripts/bench-control-ui-media.ts \
   --bundle-dir /absolute/base/control-ui \
   --compare-bundle-dir /absolute/head/control-ui \
-  --pairs 10 --output /absolute/proof/media
+  --engine chromium --pairs 10 --output /absolute/proof/media
 ```
+
+Repeat with `--engine webkit` for the same media workload in WebKit. Chromium
+is the default; WebKit records wall timings, request counts, blob lifetimes, and
+feature-detected layout shifts without CDP CPU, heap, or trace metrics. Unsupported
+native Layout Instability is recorded as `nativeLayoutShiftSupported: false` and
+`cls: null` / `mediaCls: null`; it is never presented as zero CLS.
+
+Use `--dimensions canonical` to include the persisted `__openclaw.media` image
+width/height and inline slot mapping. The default `--dimensions missing` preserves
+the original metadata-free cohort. Compare the same cohort on base and head;
+known-dimension reservation cannot prove zero shift for absent dimensions.
+
+For attribution, add `--geometry --pairs 1` in a separate diagnostic run. It captures
+all DOM element rectangles before and after the held-media release, including
+row keys, classes, scroll geometry, and image decode dimensions. During that
+fixed-viewport load interval only, an rAF sampler records changed visible
+transcript row, image, frame, footer, and footer-descendant rectangles with
+timestamps and source classes. Insertions and removals have a null previous or
+current rectangle. Sampling stops before scrolling; these rectangle changes are
+not a synthetic CLS score. The geometry reads add layout work, so do not mix
+these diagnostic timings with uninstrumented timing runs.
 
 The initial viewport is settled while media is held. Releasing those requests
 measures media-induced CLS separately from scrolling. Each measured phase allows
@@ -122,15 +143,29 @@ transcript and online roster, remounts the first/last rows, and removes the nati
 `openclaw-app` host to exercise production disconnection while preserving the
 document for lifetime measurement. Settings parks chat and cannot prove disposal.
 A document nonce assertion rejects any reload as invalid disposal evidence.
-Per-sample JSON records request counts by full URL (including revision, ticket,
+Per-sample JSON records synthetic route admission counts by full URL (including revision, ticket,
 and size queries), method, kind and opaque auth-context identity; credentials are
 never recorded. Cumulative before/stable/scroll/disposal snapshots and separate
 boot/steady duplicate counts distinguish request ownership from bootstrap work.
-Duration metrics use Chrome’s `threadTicks` clock to measure thread CPU time,
+`cacheProbe.routeFulfillments` separately counts successfully fulfilled synthetic
+responses, split by Playwright resource type (`image` versus `fetch`).
+`cacheProbe.fetchAttempts` separates `cacheOnly` (`only-if-cached`) thumbnail probes
+from `networkEligible` fetches and records their cache mode, request mode,
+credentials mode, opaque authorization identity, and outcome. Correlate these with
+fulfillments by exact URL and method; the browser-side authorization identities
+are independent of route-side auth contexts, which also include cookies.
+`cacheProbe.networkDownloads` is `null`: these responses never reach
+an HTTP server, so this harness does not measure real downloads or browser-cache
+hits. The `requests`, snapshot, and duplicate fields all count route admissions,
+including admissions that fail before fulfillment. A repeat may be a cache-only
+probe rather than missing application reuse; it cannot prove a repeated network
+transfer.
+Chromium duration metrics use its `threadTicks` clock to measure thread CPU time,
 excluding time descheduled by other work on the host. Wall-clock load/scroll
 timings remain separate.
 
-It also records CLS source rectangles and media attribution, object URL
+It also records native CLS source rectangles, timestamps, and media attribution when
+the engine supports Layout Instability, object URL
 creation/revocation and remaining DOM consumers, CDP script/task/layout/style
 duration, and JS heap before scrolling and after forced GC immediately before
 and after host disconnection, including unreferenced favicon blob URLs. The
@@ -138,20 +173,22 @@ first pair includes pending and loaded screenshots for each bundle/profile.
 `summary.json` retains every sample, load
 average, bundle identity, and median/p95 load/scroll timings.
 
-Acceptance is zero CLS in the fixed media viewport, at most one fetch per unique
-media resource and kind, and no live object URLs owned only by disposed markdown
-consumers. Review retained URLs against their actual owner: a documented shared
+Acceptance is zero CLS in the fixed media viewport and no live object URLs owned
+only by disposed markdown consumers. Review repeated admissions alongside cache-only
+probes before attributing application reuse. Review retained URLs against their actual owner: a documented shared
 page-lifetime cache is distinct from a disposed consumer leak. Timing needs ten
 pairs with median regression ≤5% and p95 not worse. On a loaded host, repeat with
 the same base directory supplied as both bundles for an A/A control, then use
 20 interleaved pairs and CDP CPU plus structural counters if wall timing is noisy.
 
-Use a separate `--trace --pairs 1` run for decode/paint attribution; tracing adds
+Use a separate Chromium `--trace --pairs 1` run for decode/paint attribution; tracing adds
 overhead and must not be mixed with the untraced timing samples. The trace and
 named-event duration sums are retained per sample. CDP JS heap excludes native
-decoded-image/GPU memory. The mock RPC transport has no RTT; static HTTP uses CDP
-throttling and routed media uses equivalent explicit delay because Playwright
-fulfillment bypasses it. Routing disables the HTTP cache, so duplicate counts
+decoded-image/GPU memory. The mock RPC transport has no RTT; Chromium static HTTP
+uses CDP throttling, while WebKit static HTTP is unthrottled. Both engines use
+the same explicit routed-media delay because Playwright fulfillment bypasses
+network emulation. Load measurement starts after static assets are ready; this
+is not a cross-engine cold-navigation comparison. Routing disables the HTTP cache, so duplicate counts
 measure application request reuse rather than disk-cache behavior. These are
 renderer/media results, not real-Gateway throughput or process-memory results.
 
@@ -654,6 +691,14 @@ require the separate `--warm-reload` diagnostics or external probe scripts.
 The native typing probe appends to the existing draft and verifies that every
 dispatched character survives streaming; `streaming.typing` retains the count
 and final synthetic draft alongside the timing evidence.
+
+Use `--transcript-messages 2000` for the long-session stream. Add
+`--streaming-content tool-code` to grow an open TypeScript fence alongside an
+expanded tool card, or `--streaming-panes 2` to stream two independent sessions
+in the native split layout. Each pane must retain its typed draft, show the
+complete reply, and follow its own growing tail. `streaming.panes` and
+`streaming.typingByPane` retain these results; the original first-pane fields
+remain available. The default Markdown fixture is still 645 deltas.
 
 Add `--streaming-allocations` to sample JavaScript allocations during the stream
 with CDP HeapProfiler at a 4 KiB interval, retaining samples collected by both

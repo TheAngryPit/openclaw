@@ -145,11 +145,28 @@ it.each([8, 10])(
   },
 );
 
+it("waits for 30 quiet seconds after the session's latest turn", async () => {
+  countedTurn(10, 1);
+  vi.advanceTimersByTime(29_999);
+  // A later turn restarts the quiet period instead of inheriting the old deadline.
+  countedTurn(1, 1);
+  vi.advanceTimersByTime(29_999);
+  await setImmediate();
+  expect(runReview).not.toHaveBeenCalled();
+  vi.advanceTimersByTime(1);
+  await setImmediate();
+  expect(runReview).toHaveBeenCalledOnce();
+});
+
 it("ignores errored turns and sessions while Workshop is off", () => {
   turn(8);
   turn(20, { event: { messages: [], success: false, error: "provider 500" } });
   turn(20, { config: { skills: { workshop: { autonomous: { mode: "off" } } } } });
   countedTurn(8, 0);
+});
+
+it("still queues reviews while Workshop proposes drafts", () => {
+  countedTurn(10, 1, { config: { skills: { workshop: { autonomous: { mode: "propose" } } } } });
 });
 
 it("never reviews ACP child sessions", () => {
