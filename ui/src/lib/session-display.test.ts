@@ -10,9 +10,16 @@ import {
   resolveSessionWorkSubtitle,
 } from "./session-display.ts";
 
-vi.mock("../i18n/locales/pt-PT.ts", () => ({
-  pt_PT: { sessionsView: { mainSession: "Sessão principal do catálogo de teste" } },
-}));
+vi.mock("../i18n/locales/pt-PT.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../i18n/locales/pt-PT.ts")>();
+  return {
+    ...actual,
+    pt_PT: {
+      ...actual.pt_PT,
+      sessionsView: { mainSession: "Sessão principal do catálogo de teste" },
+    },
+  };
+});
 
 describe("isSessionTitlePending", () => {
   const key = "agent:main:dashboard:naming";
