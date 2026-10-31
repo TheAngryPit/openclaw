@@ -7,8 +7,18 @@ import Testing
 struct CLIInstallerSelectionTests {
     @Test func `managed inspection preserves the external CLI selected by discovery`() async throws {
         try await self.withCLIInstallations { external, managed, homeDirectory in
+            CommandResolver.setProjectRoot(homeDirectory.appendingPathComponent("external").path)
+            AppDefaults.standard.removeObject(forKey: cliValidatedExecutableKey)
+            AppDefaults.standard.removeObject(forKey: cliValidatedVersionKey)
+
             let selected = await CLIInstaller.status()
             #expect(selected == .ready(location: external.path, version: self.fixtureVersion))
+            #expect(AppDefaults.standard.string(forKey: cliValidatedExecutableKey) == external.path)
+            #expect(AppDefaults.standard.string(forKey: cliValidatedVersionKey) == self.fixtureVersion)
+
+            // Resolve from the discovered selection, not the debug project-local search path.
+            CommandResolver.setProjectRoot(homeDirectory.path)
+            #expect(CommandResolver.openclawExecutable() == external.path)
 
             // Startup performs discovery followed by managed inspection before deciding ownership.
             let inspected = await CLIInstaller.managedStatus(
@@ -133,7 +143,7 @@ struct CLIInstallerSelectionTests {
     {
         let root = try makeTempDirForTests().resolvingSymlinksInPath()
         defer { try? FileManager.default.removeItem(at: root) }
-        let external = root.appendingPathComponent("external/bin/openclaw")
+        let external = root.appendingPathComponent("external/node_modules/.bin/openclaw")
         let managed = URL(fileURLWithPath: CLIInstaller.managedExecutableLocation(homeDirectory: root))
         let config = root.appendingPathComponent("openclaw.json")
         try "{}".write(to: config, atomically: false, encoding: .utf8)
