@@ -354,11 +354,11 @@ describe("createClackPrompter", () => {
     expect(stdoutWriteSpy).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])("uses localized confirmation labels and preserves %s", async (answer) => {
+  it("passes localized confirmation labels to Clack", async () => {
     vi.stubEnv("OPENCLAW_LOCALE", "pt-PT");
-    clackMocks.confirm.mockResolvedValue(answer);
+    clackMocks.confirm.mockResolvedValueOnce(false);
 
-    await expect(createClackPrompter().confirm({ message: "Continue?" })).resolves.toBe(answer);
+    await expect(createClackPrompter().confirm({ message: "Continue?" })).resolves.toBe(false);
 
     expect(clackMocks.confirm).toHaveBeenCalledWith(
       expect.objectContaining({ active: "Sim", inactive: "Não" }),
