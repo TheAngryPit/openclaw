@@ -16,6 +16,9 @@ export const pt_PT = {
     skip: "Ignorar",
     skipForNow: "Ignorar por agora",
     tokenRecommended: "Token (recomendado)",
+    yes: "Sim",
+    no: "Não",
+    cancel: "Configuração cancelada.",
   },
   wizard: {
     customProvider: {
