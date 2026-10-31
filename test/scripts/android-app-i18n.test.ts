@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -14,16 +14,20 @@ import {
 } from "../../scripts/android-app-i18n.ts";
 import { NATIVE_I18N_LOCALES } from "../../scripts/native-i18n-locales.ts";
 
-const { generatedOverrides } = vi.hoisted(() => ({
+const { generatedOverrides, generatedReadSequences } = vi.hoisted(() => ({
   generatedOverrides: new Map<string, string | Error>(),
+  generatedReadSequences: new Map<string, Array<string | Error>>(),
 }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   return {
     ...actual,
     readFile: (...args: Parameters<typeof actual.readFile>) => {
+      const filePath = typeof args[0] === "string" ? path.resolve(args[0]) : undefined;
+      const sequence = filePath === undefined ? undefined : generatedReadSequences.get(filePath);
+      const queued = sequence?.shift();
       const override =
-        typeof args[0] === "string" ? generatedOverrides.get(path.resolve(args[0])) : undefined;
+        queued ?? (filePath === undefined ? undefined : generatedOverrides.get(filePath));
       if (override instanceof Error) {
         return Promise.reject(override);
       }
@@ -34,8 +38,12 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 
 const APP_RESOURCE_ROOT = path.resolve("apps/android/app/src/main/res");
 const GENERATED_RESOURCE_ROOT = path.resolve("apps/android/app/build/generated/native-i18n/res");
+const APP_MAIN_STRINGS_PATH = "apps/android/app/src/main/res/values/strings.xml";
 
-function setNativeArtifactFixtures(missingLocale?: string) {
+function setNativeArtifactFixtures(
+  missingLocale?: string,
+  ptPTTranslations: Record<string, string> = {},
+) {
   for (const locale of NATIVE_I18N_LOCALES) {
     const filePath = path.resolve(`apps/.i18n/native/${locale}.json`);
     if (locale === missingLocale) {
@@ -47,32 +55,78 @@ function setNativeArtifactFixtures(missingLocale?: string) {
     }
     generatedOverrides.set(
       filePath,
-      JSON.stringify({ glossaryHash: "fixture", locale, translations: {}, version: 2 }),
+      JSON.stringify({
+        glossaryHash: "fixture",
+        locale,
+        translations: locale === "pt-PT" ? ptPTTranslations : {},
+        version: 2,
+      }),
     );
   }
 }
 
-async function installCompleteAndroidFixtures() {
+async function installCompleteAndroidFixtures(ptPTTranslations: Record<string, string> = {}) {
   generatedOverrides.clear();
-  setNativeArtifactFixtures();
-  const appBase = await readFile(path.join(APP_RESOURCE_ROOT, "values", "strings.xml"), "utf8");
+  generatedReadSequences.clear();
+  setNativeArtifactFixtures(undefined, ptPTTranslations);
+  generatedOverrides.set(
+    path.join(APP_RESOURCE_ROOT, "values-pt-rPT", "strings.xml"),
+    Object.assign(new Error("synthetic fixture omits pt-PT app strings"), { code: "ENOENT" }),
+  );
   const catalog = await buildAndroidAppI18nCatalog();
   for (const [filePath, content] of catalog.resources) {
     if (!filePath.startsWith(`${GENERATED_RESOURCE_ROOT}${path.sep}`)) {
       generatedOverrides.set(path.resolve(filePath), content);
-      continue;
-    }
-    if (filePath.endsWith(`${path.sep}native_strings.xml`)) {
-      const localeDirectory = path.basename(path.dirname(filePath));
-      if (localeDirectory.startsWith("values-")) {
-        generatedOverrides.set(
-          path.join(APP_RESOURCE_ROOT, localeDirectory, "strings.xml"),
-          appBase,
-        );
-      }
     }
   }
   return catalog;
+}
+
+function isMissingFile(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+async function snapshotAppMainLocaleStrings() {
+  const directories = await readdir(APP_RESOURCE_ROOT, { withFileTypes: true });
+  const snapshots = new Map<string, string>();
+  for (const directory of directories) {
+    if (!directory.isDirectory() || !directory.name.startsWith("values-")) {
+      continue;
+    }
+    const filePath = path.join(APP_RESOURCE_ROOT, directory.name, "strings.xml");
+    try {
+      snapshots.set(filePath, await readFile(filePath, "utf8"));
+    } catch (error) {
+      if (!isMissingFile(error)) {
+        throw error;
+      }
+    }
+  }
+  return snapshots;
+}
+
+async function ptPTAppMainTranslationFixtures() {
+  const inventory = JSON.parse(await readFile("apps/.i18n/native-source.json", "utf8")) as {
+    sites: Array<{ id: string; path: string; source: string }>;
+  };
+  const sites = inventory.sites.filter((site) => site.path === APP_MAIN_STRINGS_PATH);
+  const translations = Object.fromEntries(
+    sites.map((site) => [
+      site.id,
+      `PT-PT-${site.id} ${[...site.source.matchAll(/%\d+\$[a-z]/giu)]
+        .map((match) => match[0])
+        .join(" ")}`,
+    ]),
+  );
+  return { sites, translations };
+}
+
+function parseStringValues(source: string) {
+  return new Map(
+    [...source.matchAll(/<string\s+name="([A-Za-z0-9_]+)"[^>]*>([\s\S]*?)<\/string>/gu)].map(
+      (match) => [match[1] ?? "", decodeAndroidResourceValue(match[2] ?? "")] as const,
+    ),
+  );
 }
 
 function findings(source: string, file = "ui/Example.kt", flavor = "main") {
@@ -102,6 +156,146 @@ describe("Android app i18n resources", () => {
       await expect(checkAndroidAppI18n()).rejects.toThrow(missingArtifact);
     } finally {
       generatedOverrides.clear();
+    }
+  });
+
+  it("projects a missing app-main locale from native translations without shadowing authored locales", async () => {
+    const existingMainStrings = await snapshotAppMainLocaleStrings();
+    expect(existingMainStrings.size).toBe(NATIVE_I18N_LOCALES.length - 1);
+    const { sites, translations } = await ptPTAppMainTranslationFixtures();
+    expect(sites).toHaveLength(21);
+    expect(Object.keys(translations)).toHaveLength(sites.length);
+
+    const catalog = await installCompleteAndroidFixtures(translations);
+    const generatedPath = path.join(GENERATED_RESOURCE_ROOT, "values-pt-rPT", "strings.xml");
+    const generated = catalog.resources.get(generatedPath);
+    expect(generated).toBeDefined();
+    const generatedAppMainPaths = [...catalog.resources.keys()]
+      .filter(
+        (filePath) =>
+          filePath.startsWith(`${GENERATED_RESOURCE_ROOT}${path.sep}values-`) &&
+          filePath.endsWith(`${path.sep}strings.xml`),
+      )
+      .toSorted();
+    expect(generatedAppMainPaths).toEqual([generatedPath]);
+
+    const baseSource = await readFile(
+      path.join(APP_RESOURCE_ROOT, "values", "strings.xml"),
+      "utf8",
+    );
+    const baseEntries = [
+      ...baseSource.matchAll(/<string\s+name="([A-Za-z0-9_]+)"([^>]*)>([\s\S]*?)<\/string>/gu),
+    ];
+    const idBySource = new Map(sites.map((site) => [site.source, site.id]));
+    const generatedValues = parseStringValues(generated ?? "");
+    expect(baseEntries).toHaveLength(21);
+    expect([...generatedValues.keys()].toSorted()).toEqual(
+      baseEntries.map((entry) => entry[1] ?? "").toSorted(),
+    );
+    for (const entry of baseEntries) {
+      const key = entry[1] ?? "";
+      const attrs = entry[2] ?? "";
+      const source = decodeAndroidResourceValue(entry[3] ?? "");
+      const id = idBySource.get(source);
+      expect(id).toBeDefined();
+      const expected = /\btranslatable\s*=\s*"false"/u.test(attrs)
+        ? source
+        : translations[id ?? ""];
+      expect(expected).toBeDefined();
+      const value = generatedValues.get(key);
+      expect(value).toBe(expected);
+      const placeholders = (text: string) =>
+        [...text.matchAll(/%\d+\$[a-z]/giu)].map((match) => match[0]);
+      expect(placeholders(value ?? "").toSorted()).toEqual(placeholders(source).toSorted());
+    }
+
+    try {
+      await expect(checkAndroidAppI18n()).resolves.toBeUndefined();
+      expect(await snapshotAppMainLocaleStrings()).toEqual(existingMainStrings);
+    } finally {
+      generatedOverrides.clear();
+      generatedReadSequences.clear();
+    }
+  });
+
+  it("rejects a missing generated projection if the authored file disappears after catalog planning", async () => {
+    generatedOverrides.clear();
+    generatedReadSequences.clear();
+    setNativeArtifactFixtures();
+    const ptPTMainPath = path.join(APP_RESOURCE_ROOT, "values-pt-rPT", "strings.xml");
+    const authored = await readFile(path.join(APP_RESOURCE_ROOT, "values", "strings.xml"), "utf8");
+    generatedOverrides.set(ptPTMainPath, authored);
+    const planned = await buildAndroidAppI18nCatalog();
+    const generatedPath = path.join(GENERATED_RESOURCE_ROOT, "values-pt-rPT", "strings.xml");
+    expect(planned.resources.has(generatedPath)).toBe(false);
+    for (const [filePath, content] of planned.resources) {
+      if (!filePath.startsWith(`${GENERATED_RESOURCE_ROOT}${path.sep}`)) {
+        generatedOverrides.set(path.resolve(filePath), content);
+      }
+    }
+    generatedOverrides.delete(ptPTMainPath);
+    generatedReadSequences.set(ptPTMainPath, [
+      authored,
+      Object.assign(new Error("synthetic app-main resource disappeared"), { code: "ENOENT" }),
+    ]);
+    try {
+      await expect(checkAndroidAppI18n()).rejects.toThrow(/app-main strings.*values-pt-rPT/iu);
+    } finally {
+      generatedOverrides.clear();
+      generatedReadSequences.clear();
+    }
+  });
+
+  it("preserves non-missing app-main read failures", async () => {
+    generatedOverrides.clear();
+    generatedReadSequences.clear();
+    setNativeArtifactFixtures();
+    const ptPTMainPath = path.join(APP_RESOURCE_ROOT, "values-pt-rPT", "strings.xml");
+    const authored = await readFile(path.join(APP_RESOURCE_ROOT, "values", "strings.xml"), "utf8");
+    generatedOverrides.set(ptPTMainPath, authored);
+    const catalog = await buildAndroidAppI18nCatalog();
+    for (const [filePath, content] of catalog.resources) {
+      if (!filePath.startsWith(`${GENERATED_RESOURCE_ROOT}${path.sep}`)) {
+        generatedOverrides.set(path.resolve(filePath), content);
+      }
+    }
+    generatedReadSequences.set(ptPTMainPath, [
+      authored,
+      Object.assign(new Error("synthetic app-main read failure"), { code: "EACCES" }),
+    ]);
+    try {
+      await expect(checkAndroidAppI18n()).rejects.toMatchObject({
+        code: "EACCES",
+        message: "synthetic app-main read failure",
+      });
+    } finally {
+      generatedOverrides.clear();
+      generatedReadSequences.clear();
+    }
+  });
+
+  it("does not replace malformed present app-main XML with a generated projection", async () => {
+    generatedOverrides.clear();
+    generatedReadSequences.clear();
+    setNativeArtifactFixtures();
+    const ptPTMainPath = path.join(APP_RESOURCE_ROOT, "values-pt-rPT", "strings.xml");
+    const authored = await readFile(path.join(APP_RESOURCE_ROOT, "values", "strings.xml"), "utf8");
+    const malformed = authored.replace("</string>", "");
+    generatedOverrides.set(ptPTMainPath, malformed);
+    const catalog = await buildAndroidAppI18nCatalog();
+    const generatedPath = path.join(GENERATED_RESOURCE_ROOT, "values-pt-rPT", "strings.xml");
+    expect(catalog.resources.has(generatedPath)).toBe(false);
+    for (const [filePath, content] of catalog.resources) {
+      if (!filePath.startsWith(`${GENERATED_RESOURCE_ROOT}${path.sep}`)) {
+        generatedOverrides.set(path.resolve(filePath), content);
+      }
+    }
+    try {
+      await expect(checkAndroidAppI18n()).rejects.toThrow(/App pt-PT missing/iu);
+      expect(generatedOverrides.get(ptPTMainPath)).toBe(malformed);
+    } finally {
+      generatedOverrides.clear();
+      generatedReadSequences.clear();
     }
   });
 

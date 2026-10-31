@@ -20,6 +20,7 @@ const ANDROID_PLAY_SOURCE_ROOT = path.join(ROOT, "apps", "android", "app", "src"
 const ANDROID_THIRD_PARTY_ROOT = path.join(ROOT, "apps", "android", "app", "src", "thirdParty");
 const ANDROID_THIRD_PARTY_RESOURCE_ROOT = path.join(ANDROID_THIRD_PARTY_ROOT, "res");
 const ANDROID_THIRD_PARTY_SOURCE_ROOT = path.join(ANDROID_THIRD_PARTY_ROOT, "java");
+const APP_MAIN_STRINGS_REPO_PATH = "apps/android/app/src/main/res/values/strings.xml";
 const ANDROID_WEAR_MAIN_ROOT = path.join(ROOT, "apps", "android", "wear", "src", "main");
 const WEAR_RESOURCE_ROOT = path.join(ANDROID_WEAR_MAIN_ROOT, "res");
 const WEAR_SOURCE_ROOT = path.join(ANDROID_WEAR_MAIN_ROOT, "java");
@@ -307,6 +308,10 @@ async function readStrings(
 ): Promise<Map<string, ResourceString>> {
   const source = await readFile(path.join(resourceRoot, locale, fileName), "utf8");
   return new Map(parseStrings(source).map((entry) => [entry.key, entry]));
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
 }
 
 async function readAndroidSource(
@@ -1184,6 +1189,11 @@ async function readAndroidSourceFacts(): Promise<AndroidSourceFacts> {
 export async function buildAndroidAppI18nCatalog(): Promise<GeneratedCatalog> {
   const [facts, artifacts] = await Promise.all([readAndroidSourceFacts(), readArtifacts()]);
   const { inventory, thirdPartyBaseStrings, wearBaseStrings, sources, sourceToKey } = facts;
+  const appMainInventoryBySource = new Map(
+    inventory
+      .filter((entry) => entry.sites.some((site) => site.path === APP_MAIN_STRINGS_REPO_PATH))
+      .map((entry) => [entry.source, entry]),
+  );
   const wearInventoryBySource = new Map(
     inventory
       .filter((entry) => entry.sites.some((site) => site.path === WEAR_STRINGS_REPO_PATH))
@@ -1207,6 +1217,25 @@ export async function buildAndroidAppI18nCatalog(): Promise<GeneratedCatalog> {
   for (const locale of NATIVE_I18N_LOCALES) {
     const localeTranslations = artifacts.get(locale) ?? {};
     const artifactTranslationsBySource = translationsBySource(inventory, localeTranslations);
+    try {
+      await readFile(path.join(RESOURCE_ROOT, localeDirectory(locale), "strings.xml"), "utf8");
+    } catch (error) {
+      if (!isMissingFileError(error)) {
+        throw error;
+      }
+      resources.set(
+        path.join(GENERATED_RESOURCE_ROOT, localeDirectory(locale), "strings.xml"),
+        renderStringsXml(
+          localizeManualStrings(
+            facts.baseStrings,
+            appMainInventoryBySource,
+            localeTranslations,
+            "App",
+          ),
+          new Map(),
+        ),
+      );
+    }
     resources.set(
       path.join(GENERATED_RESOURCE_ROOT, localeDirectory(locale), "native_strings.xml"),
       renderGeneratedStrings(artifactTranslationsBySource),
@@ -1371,7 +1400,21 @@ export async function checkAndroidAppI18n(options: { tolerateManagedPending?: bo
   await verifyAndroidAppI18n(catalog);
   const localeStrings = await Promise.all(
     LOCALES.map(async (locale) => {
-      const manual = await readStrings(locale);
+      let manual: Map<string, ResourceString>;
+      try {
+        manual = await readStrings(locale);
+      } catch (error) {
+        if (!isMissingFileError(error) || locale === "values") {
+          throw error;
+        }
+        const generatedMain = catalog.resources.get(
+          path.join(GENERATED_RESOURCE_ROOT, locale, "strings.xml"),
+        );
+        if (generatedMain === undefined) {
+          throw new Error(`Android app-main strings are missing for ${locale}`, { cause: error });
+        }
+        manual = new Map(parseStrings(generatedMain).map((entry) => [entry.key, entry]));
+      }
       const generated = catalog.resources.get(
         path.join(GENERATED_RESOURCE_ROOT, locale, "native_strings.xml"),
       );
