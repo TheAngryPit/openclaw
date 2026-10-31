@@ -16,7 +16,7 @@
     ],
     "schemaVersions": {
       "state": 36,
-      "agent": 38
+      "agent": 39
     }
   },
   "description": "Multi-channel AI gateway with extensible messaging integrations",
@@ -118,8 +118,6 @@
     "!dist/plugin-sdk/channel-route.d.ts",
     "!dist/plugin-sdk/channel-secret-owner-runtime.d.ts",
     "!dist/plugin-sdk/channel-secret-tts-runtime.d.ts",
-    "!dist/plugin-sdk/channel-target-testing.js",
-    "!dist/plugin-sdk/channel-target-testing.d.ts",
     "!dist/plugin-sdk/channel-targets.d.ts",
     "!dist/plugin-sdk/channel-test-helpers.js",
     "!dist/plugin-sdk/channel-test-helpers.d.ts",
@@ -1755,6 +1753,10 @@
     "./plugin-sdk/llm": {
       "default": "./dist/plugin-sdk/llm.js"
     },
+    "./runtime-artifacts": {
+      "types": "./dist/runtime-artifacts.d.ts",
+      "default": "./dist/runtime-artifacts.js"
+    },
     "./cli-entry": "./openclaw.mjs"
   },
   "scripts": {
@@ -2406,7 +2408,7 @@
     "@modelcontextprotocol/server": "2.3.1",
     "@mozilla/readability": "0.6.0",
     "@openclaw/ai": "workspace:*",
-    "@openclaw/fs-safe": "0.26.15",
+    "@openclaw/fs-safe": "0.27.0",
     "@openclaw/proc-safe": "0.4.2",
     "@openclaw/proxyline": "0.4.0",
     "@opentelemetry/semantic-conventions": "1.43.0",
