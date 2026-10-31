@@ -15,7 +15,7 @@ import {
 import { NATIVE_I18N_LOCALES } from "../../scripts/native-i18n-locales.ts";
 
 const { generatedOverrides } = vi.hoisted(() => ({
-  generatedOverrides: new Map<string, string>(),
+  generatedOverrides: new Map<string, string | Error>(),
 }));
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -24,10 +24,56 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     readFile: (...args: Parameters<typeof actual.readFile>) => {
       const override =
         typeof args[0] === "string" ? generatedOverrides.get(path.resolve(args[0])) : undefined;
+      if (override instanceof Error) {
+        return Promise.reject(override);
+      }
       return override === undefined ? actual.readFile(...args) : Promise.resolve(override);
     },
   };
 });
+
+const APP_RESOURCE_ROOT = path.resolve("apps/android/app/src/main/res");
+const GENERATED_RESOURCE_ROOT = path.resolve("apps/android/app/build/generated/native-i18n/res");
+
+function setNativeArtifactFixtures(missingLocale?: string) {
+  for (const locale of NATIVE_I18N_LOCALES) {
+    const filePath = path.resolve(`apps/.i18n/native/${locale}.json`);
+    if (locale === missingLocale) {
+      generatedOverrides.set(
+        filePath,
+        Object.assign(new Error(`synthetic fixture omits ${locale}`), { code: "ENOENT" }),
+      );
+      continue;
+    }
+    generatedOverrides.set(
+      filePath,
+      JSON.stringify({ glossaryHash: "fixture", locale, translations: {}, version: 2 }),
+    );
+  }
+}
+
+async function installCompleteAndroidFixtures() {
+  generatedOverrides.clear();
+  setNativeArtifactFixtures();
+  const appBase = await readFile(path.join(APP_RESOURCE_ROOT, "values", "strings.xml"), "utf8");
+  const catalog = await buildAndroidAppI18nCatalog();
+  for (const [filePath, content] of catalog.resources) {
+    if (!filePath.startsWith(`${GENERATED_RESOURCE_ROOT}${path.sep}`)) {
+      generatedOverrides.set(path.resolve(filePath), content);
+      continue;
+    }
+    if (filePath.endsWith(`${path.sep}native_strings.xml`)) {
+      const localeDirectory = path.basename(path.dirname(filePath));
+      if (localeDirectory.startsWith("values-")) {
+        generatedOverrides.set(
+          path.join(APP_RESOURCE_ROOT, localeDirectory, "strings.xml"),
+          appBase,
+        );
+      }
+    }
+  }
+  return catalog;
+}
 
 function findings(source: string, file = "ui/Example.kt", flavor = "main") {
   return findUnlocalizedAndroidUiLiterals(
@@ -40,79 +86,102 @@ const sortedMatches = (source: string, pattern: RegExp, group = 0) =>
   [...source.matchAll(pattern)].map((match) => match[group]!).toSorted();
 
 describe("Android app i18n resources", () => {
-  it("counts manual resources reached only through the generated native lookup", async () => {
+  it("verifies source coverage without translations and keeps strict artifact readers", async () => {
     const shellPath = path.resolve(
       "apps/android/app/src/main/java/ai/openclaw/app/ui/ShellScreen.kt",
     );
+    const missingArtifact = Object.assign(new Error("synthetic fixture omits pt-PT"), {
+      code: "ENOENT",
+    });
+    setNativeArtifactFixtures("pt-PT");
     const shell = await readFile(shellPath, "utf8");
     try {
       generatedOverrides.set(shellPath, shell.replaceAll("R.string.cancel", "R.string.app_name"));
       await expect(verifyAndroidAppI18n()).resolves.toBeUndefined();
+      await expect(buildAndroidAppI18nCatalog()).rejects.toThrow(missingArtifact);
+      await expect(checkAndroidAppI18n()).rejects.toThrow(missingArtifact);
     } finally {
       generatedOverrides.clear();
     }
   });
 
   it("keeps generated resources, runtime coverage, and every locale aligned", async () => {
-    await expect(checkAndroidAppI18n({ tolerateManagedPending: true })).resolves.toBeUndefined();
-    const catalog = await buildAndroidAppI18nCatalog();
-    const base = catalog.resources.get(
-      path.resolve("apps/android/app/build/generated/native-i18n/res/values/native_strings.xml"),
-    );
-    expect(base).toMatch(
-      /<string name="native_[a-f0-9]+"[^>]*tools:ignore="Typos,TypographyDashes,TypographyEllipsis">/u,
-    );
+    const catalog = await installCompleteAndroidFixtures();
+    try {
+      await expect(checkAndroidAppI18n()).resolves.toBeUndefined();
+      const base = catalog.resources.get(
+        path.resolve("apps/android/app/build/generated/native-i18n/res/values/native_strings.xml"),
+      );
+      expect(base).toMatch(
+        /<string name="native_[a-f0-9]+"[^>]*tools:ignore="Typos,TypographyDashes,TypographyEllipsis">/u,
+      );
+    } finally {
+      generatedOverrides.clear();
+    }
   });
 
   it("builds complete Wear and third-party resources for every native locale", async () => {
-    const catalog = await buildAndroidAppI18nCatalog();
-    const resourcesFor = (directory: string, filename: string) =>
-      [...catalog.resources].filter(
-        ([file]) => file.includes(directory) && file.endsWith(filename),
-      );
-    const wearResources = resourcesFor("/apps/android/wear/src/main/res/values-", "/strings.xml");
-    const base = await readFile("apps/android/wear/src/main/res/values/strings.xml", "utf8");
-    const baseKeys = sortedMatches(base, /<string name="([^"]+)"/gu, 1);
-    const basePlaceholders = sortedMatches(base, /%\d+\$[a-z]/giu);
+    generatedOverrides.clear();
+    setNativeArtifactFixtures();
+    try {
+      const catalog = await buildAndroidAppI18nCatalog();
+      const resourcesFor = (directory: string, filename: string) =>
+        [...catalog.resources].filter(
+          ([file]) => file.includes(directory) && file.endsWith(filename),
+        );
+      const wearResources = resourcesFor("/apps/android/wear/src/main/res/values-", "/strings.xml");
+      const base = await readFile("apps/android/wear/src/main/res/values/strings.xml", "utf8");
+      const baseKeys = sortedMatches(base, /<string name="([^"]+)"/gu, 1);
+      const basePlaceholders = sortedMatches(base, /%\d+\$[a-z]/giu);
 
-    expect(wearResources).toHaveLength(NATIVE_I18N_LOCALES.length);
-    for (const [, content] of wearResources) {
-      const stringTags = [...content.matchAll(/<string\b[^>]*>/gu)].map((match) => match[0]);
-      const keys = sortedMatches(stringTags.join("\n"), /\bname="([^"]+)"/gu, 1);
-      expect(keys).toEqual(baseKeys);
-      expect(sortedMatches(content, /%\d+\$[a-z]/giu)).toEqual(basePlaceholders);
-      expect(content).not.toMatch(/(?:&apos;|(?<!\\)')/u);
-      expect(content).toContain('<resources xmlns:tools="http://schemas.android.com/tools">');
-      for (const tag of stringTags) {
-        if (!tag.includes('translatable="false"')) {
-          expect(tag.match(/\btools:ignore=/gu)).toHaveLength(1);
-          expect(tag).toMatch(/\btools:ignore="[^"]*\bTypos\b[^"]*"/u);
-          expect(tag).toMatch(/\btools:ignore="[^"]*\bTypographyDashes\b[^"]*"/u);
-          expect(tag).toMatch(/\btools:ignore="[^"]*\bTypographyEllipsis\b[^"]*"/u);
+      expect(wearResources).toHaveLength(NATIVE_I18N_LOCALES.length);
+      for (const [, content] of wearResources) {
+        const stringTags = [...content.matchAll(/<string\b[^>]*>/gu)].map((match) => match[0]);
+        const keys = sortedMatches(stringTags.join("\n"), /\bname="([^"]+)"/gu, 1);
+        expect(keys).toEqual(baseKeys);
+        expect(sortedMatches(content, /%\d+\$[a-z]/giu)).toEqual(basePlaceholders);
+        expect(content).not.toMatch(/(?:&apos;|(?<!\\)')/u);
+        expect(content).toContain('<resources xmlns:tools="http://schemas.android.com/tools">');
+        for (const tag of stringTags) {
+          if (!tag.includes('translatable="false"')) {
+            expect(tag.match(/\btools:ignore=/gu)).toHaveLength(1);
+            expect(tag).toMatch(/\btools:ignore="[^"]*\bTypos\b[^"]*"/u);
+            expect(tag).toMatch(/\btools:ignore="[^"]*\bTypographyDashes\b[^"]*"/u);
+            expect(tag).toMatch(/\btools:ignore="[^"]*\bTypographyEllipsis\b[^"]*"/u);
+          }
         }
+        expect(content).toContain(
+          'name="open_thread" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis"',
+        );
+        expect(content).toContain(
+          'name="show_new_messages" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis"',
+        );
       }
-      expect(content).toContain(
-        'name="open_thread" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis"',
-      );
-      expect(content).toContain(
-        'name="show_new_messages" tools:ignore="MissingTranslation,Typos,TypographyDashes,TypographyEllipsis"',
-      );
-    }
 
-    const thirdPartyBase = await readFile(
-      "apps/android/app/src/thirdParty/res/values/accessibility_strings.xml",
-      "utf8",
-    );
-    const resources = resourcesFor(
-      "/apps/android/app/src/thirdParty/res/values-",
-      "/accessibility_strings.xml",
-    );
+      const thirdPartyBase = await readFile(
+        "apps/android/app/src/thirdParty/res/values/accessibility_strings.xml",
+        "utf8",
+      );
+      const resources = resourcesFor(
+        "/apps/android/app/src/thirdParty/res/values-",
+        "/accessibility_strings.xml",
+      );
 
-    expect(thirdPartyBase).toContain('tools:ignore="MissingTranslation"');
-    expect(resources).toHaveLength(NATIVE_I18N_LOCALES.length);
-    for (const [, content] of resources) {
-      expect(content).toContain('name="accessibility_service_label"');
-      expect(content).toContain('name="accessibility_dev_activity_label"');
+      expect(thirdPartyBase).toContain('tools:ignore="MissingTranslation"');
+      expect(resources).toHaveLength(NATIVE_I18N_LOCALES.length);
+      for (const [, content] of resources) {
+        expect(content).toContain('name="accessibility_service_label"');
+        expect(content).toContain('name="accessibility_dev_activity_label"');
+      }
+      expect(
+        catalog.resources.has(
+          path.resolve(
+            "apps/android/app/build/generated/native-i18n/res/values-pt-rPT/native_strings.xml",
+          ),
+        ),
+      ).toBe(true);
+    } finally {
+      generatedOverrides.clear();
     }
   });
 

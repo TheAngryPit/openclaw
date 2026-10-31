@@ -4,6 +4,7 @@ import { readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, describe, expect, it } from "vitest";
+import { parse as parseYaml } from "yaml";
 import { buildMacosCatalog } from "../../scripts/apple-app-i18n.ts";
 import {
   assignNativeI18nIds,
@@ -934,8 +935,22 @@ describe("native app i18n inventory", () => {
     expect(
       entries.some((entry) => hasSite(entry, (site) => site.path.endsWith("Info.plist"))),
     ).toBe(true);
-    expect(NATIVE_I18N_LOCALES).toHaveLength(21);
+    expect(NATIVE_I18N_LOCALES).toHaveLength(22);
     expect(NATIVE_I18N_LOCALES).toContain("sv");
+    expect(NATIVE_I18N_LOCALES).toContain("pt-PT");
+  });
+
+  it("keeps the native locale refresh matrix aligned with the source registry", async () => {
+    const workflow = parseYaml(
+      await readFile(".github/workflows/native-app-locale-refresh.yml", "utf8"),
+    ) as {
+      jobs?: {
+        refresh?: {
+          strategy?: { matrix?: { locale?: unknown } };
+        };
+      };
+    };
+    expect(workflow.jobs?.refresh?.strategy?.matrix?.locale).toEqual(NATIVE_I18N_LOCALES);
   });
 
   it("migrates v1 translations deterministically and drops stale IDs after a source edit", async () => {
