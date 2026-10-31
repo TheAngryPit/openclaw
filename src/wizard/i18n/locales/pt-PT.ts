@@ -316,7 +316,7 @@ export const pt_PT = {
       workspace: "Espaço de trabalho: {workspace}",
       localGateway:
         "Gateway: funciona localmente e é privado neste computador (autenticação por token).",
-      applyPrompt: "Diga **sim** e trato de configurar tudo agora.",
+      applyPrompt: "Diga **yes** e trato de configurar tudo agora.",
       security:
         "Atenção: o seu agente terá acesso real a este computador — https://docs.openclaw.ai/security",
       afterSetup:

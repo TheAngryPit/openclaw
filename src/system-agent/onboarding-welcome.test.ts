@@ -119,6 +119,7 @@ describe("buildOnboardingWelcome", () => {
       });
       const setup = await welcome(engine, { locale });
       expect(setup.text).toContain(intro);
+      expect(setup.text).toContain("**yes**");
       expect(setup.text).toContain("example/verified-model");
       expect(setup.text).toContain("/existing/workspace");
       expect(setup.question.options[0]).toMatchObject({ label: setupLabel, reply: "yes" });
