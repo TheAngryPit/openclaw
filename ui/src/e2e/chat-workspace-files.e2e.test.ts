@@ -172,10 +172,15 @@ suite.define(() => {
       const heading = page.getByRole("heading", { name: "Delivery notes", exact: true });
       await heading.waitFor();
       await page.getByRole("button", { name: "More file actions", exact: true }).click();
+      await gateway.deferNext("sessions.files.download");
+      await page.getByRole("menuitem", { name: "Attach to session", exact: true }).click();
+      await gateway.waitForRequest("sessions.files.download");
+      await page.setViewportSize({ width: 1300, height: 900 });
+      await waitForLayoutSettled(page, "openclaw-chat-detail-panel");
       try {
         await Promise.all([
           page.waitForRequest("**/api/artifacts/download/navigation/notes"),
-          page.getByRole("menuitem", { name: "Attach to session", exact: true }).click(),
+          gateway.resolveDeferred("sessions.files.download"),
         ]);
         await composer.fill("Please review the attached delivery notes before publishing.");
         await gateway.emitGatewayEvent("sessions.changed", {
@@ -194,6 +199,10 @@ suite.define(() => {
         attachmentDownload.resolve();
       }
       await page.getByRole("button", { name: "Remove notes.md", exact: true }).waitFor();
+      expect(await composer.inputValue()).toBe(
+        "Please review the attached delivery notes before publishing.",
+      );
+      expect(await gateway.getRequests("chat.send")).toHaveLength(0);
       await page.getByRole("button", { name: "Send message", exact: true }).click();
       const sent = await gateway.waitForRequest("chat.send");
       const runId = requireString(requireRecord(sent.params).idempotencyKey, "run ID");
