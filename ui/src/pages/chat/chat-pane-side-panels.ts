@@ -1,5 +1,6 @@
 import type { SessionsCompanionStateResult } from "../../../../packages/gateway-protocol/src/schema/sessions.js";
 import { gatewayPresentationScope } from "../../app/gateway-presentation-scope.ts";
+import { isNativeMobileHost } from "../../app/native-web-chrome.ts";
 import { shellViewport } from "../../app/shell-viewport.ts";
 import type { ChatAttachment } from "../../lib/chat/chat-types.ts";
 import { canCallGatewayMethod, canPresentGatewayMethod } from "../../lib/gateway-methods.ts";
@@ -89,12 +90,13 @@ export abstract class ChatPaneSidePanels extends ChatPaneStateOwner {
     );
   }
 
-  /** Presentation memory belongs to this pane, never to a leaf or the saved desktop layout. */
-  protected mobileHost(layout: SidebarLayout): ChatMobileHost | undefined {
-    if (!this.usesMobileHost) {
-      return undefined;
+  /** Mobile presentation memory is scoped to one session; entering another starts fresh. */
+  private syncMobilePresentationSession(): void {
+    const state = this.state;
+    if (!state) {
+      return;
     }
-    const session = `${gatewayPresentationScope(this.context.gateway).key}\0${resolveChatAgentId(this.state!)}\0${this.state?.sessionKey}`;
+    const session = `${gatewayPresentationScope(this.context.gateway).key}\0${resolveChatAgentId(state)}\0${state.sessionKey}`;
     if (session !== this.mobilePresentation.session) {
       this.mobilePresentation.session = session;
       this.mobilePresentation.open = undefined;
@@ -109,12 +111,28 @@ export abstract class ChatPaneSidePanels extends ChatPaneStateOwner {
       this.mobilePresentation.composerEditing = false;
       this.mobilePresentation.viewportRecovery = undefined;
     }
+  }
+
+  /** A parked pane forgets its mobile sheet, so returning to its session starts closed. */
+  protected forgetMobilePresentation(): void {
+    this.mobilePresentation.session = "";
+  }
+
+  /** Presentation memory belongs to this pane, never to a leaf or the saved desktop layout. */
+  protected mobileHost(layout: SidebarLayout): ChatMobileHost | undefined {
+    if (!this.usesMobileHost) {
+      return undefined;
+    }
+    this.syncMobilePresentationSession();
     return {
       scopeKey: this.mobilePresentation.session,
       open:
         this.mobilePresentation.open ??
-        (layout.open === true ||
-          (sidebarMainPanel(layout)?.slot ?? "conversation") !== "conversation"),
+        // Mobile enters each session on its conversation: the saved layout's open
+        // panels belong to desktop. Only a dashboard route reveals its saved board.
+        ((this.routeFace === "dashboard" || this.dashboardExpanded) &&
+          (layout.open === true ||
+            (sidebarMainPanel(layout)?.slot ?? "conversation") !== "conversation")),
       suspended: this.mobilePresentation.suspended,
       mode: this.mobilePresentation.mode,
       height:
@@ -248,6 +266,9 @@ export abstract class ChatPaneSidePanels extends ChatPaneStateOwner {
     if (!this.usesMobileHost) {
       return;
     }
+    // An explicit open can arrive before this session's first render; scope it
+    // first so the session reset cannot discard it.
+    this.syncMobilePresentationSession();
     if (destination.page?.key !== this.mobilePresentation.destination.page?.key) {
       this.mobilePresentation.sheetHeight = undefined;
     }
@@ -316,11 +337,14 @@ export abstract class ChatPaneSidePanels extends ChatPaneStateOwner {
   };
 
   protected restorePaneSidebarLayout(layout: SidebarLayout): SidebarLayout {
-    if (!this.compact) {
+    if (
+      !this.compact &&
+      (!isNativeMobileHost() || this.routeFace === "dashboard" || this.dashboardExpanded)
+    ) {
       return layout;
     }
-    // Home's visibility consumers share the restored Chat-first layout;
-    // the saved full-page task layout stays intact.
+    // Home and native mobile chat start with the conversation visible, without
+    // changing the saved full-page task layout or explicit dashboard navigation.
     const conversation = layout.columns[0]?.panels.find((panel) => panel.slot === "conversation");
     const restored = conversation ? promoteSidebarPanel(layout, conversation.id) : layout;
     return { ...restored, open: false, expanded: false };
