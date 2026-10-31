@@ -14,7 +14,9 @@ import { workboardTestHost } from "./test/host.setup.ts";
 import { createViewContext } from "./test/host.ts";
 
 vi.mock("./i18n/locales/translated.json", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./i18n/locales/translated.json")>();
+  const actual = await importOriginal<{
+    default: typeof import("./i18n/locales/translated.json");
+  }>();
   return {
     ...actual,
     default: {
