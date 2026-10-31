@@ -165,7 +165,7 @@ it("verification and compile-macos reject raw macOS interpolation and retain sha
     for (const key of ["Expires in %lld minutes", "^[%lld message](inflect: true)"]) {
       expect(english).toContain(`"${key}" = "${key}";`);
     }
-    await expect(readdir(path.join(output, "pt-PT.lproj"))).resolves.toEqual(
+    await expect(readdir(path.join(output, "fr.lproj"))).resolves.toEqual(
       expect.arrayContaining(["Localizable.strings", "InfoPlist.strings"]),
     );
   } finally {
@@ -174,7 +174,7 @@ it("verification and compile-macos reject raw macOS interpolation and retain sha
 });
 
 it("verifies source without a missing locale artifact while strict Apple paths reject it", async () => {
-  const root = await installNativeTranslationFixture("pt-PT");
+  const root = await installNativeTranslationFixture("fr");
   const output = path.join(root, "missing-output");
   try {
     await expect(apple.verifyAppleAppI18n()).resolves.toBeUndefined();

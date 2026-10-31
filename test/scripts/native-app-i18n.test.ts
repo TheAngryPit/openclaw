@@ -935,9 +935,10 @@ describe("native app i18n inventory", () => {
     expect(
       entries.some((entry) => hasSite(entry, (site) => site.path.endsWith("Info.plist"))),
     ).toBe(true);
-    expect(NATIVE_I18N_LOCALES).toHaveLength(22);
+    expect(NATIVE_I18N_LOCALES).toHaveLength(21);
     expect(NATIVE_I18N_LOCALES).toContain("sv");
-    expect(NATIVE_I18N_LOCALES).toContain("pt-PT");
+    expect(NATIVE_I18N_LOCALES).toContain("fr");
+    expect(NATIVE_I18N_LOCALES).not.toContain("pt-PT");
   });
 
   it("keeps the native locale refresh matrix aligned with the source registry", async () => {
