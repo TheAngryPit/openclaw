@@ -967,9 +967,13 @@ final class ChatTranscriptCacheStoreTests: ClientDatabaseTestSuite, @unchecked S
     }
 
     @Test func `Watch snapshot sequence is atomic across database owners and persists across reopen`() async throws {
-        let initial = try #require(try await databases.watchMessages.nextAppSnapshotSequence(nowMs: 1_000))
+        let initial = try #require(try await databases.watchMessages.nextAppSnapshotSequence(nowMs: 1000))
+        var secondQueueConfiguration = Configuration()
+        secondQueueConfiguration.journalMode = .wal
+        secondQueueConfiguration.busyMode = .timeout(5)
         let secondQueue = try DatabaseQueue(
-            path: directory.appendingPathComponent(OpenClawClientDatabases.clientStateFilename).path)
+            path: directory.appendingPathComponent(OpenClawClientDatabases.clientStateFilename).path,
+            configuration: secondQueueConfiguration)
         let secondJournal = OpenClawWatchMessageJournal(queue: secondQueue)
         let firstJournal = databases.watchMessages
         let values = try await withThrowingTaskGroup(of: Int64?.self, returning: [Int64?].self) { group in
@@ -978,10 +982,12 @@ final class ChatTranscriptCacheStoreTests: ClientDatabaseTestSuite, @unchecked S
                 group.addTask { try await journal.nextAppSnapshotSequence(nowMs: 900) }
             }
             var values: [Int64?] = []
-            for try await value in group { values.append(value) }
+            for try await value in group {
+                values.append(value)
+            }
             return values
         }
-        let allocated = values.compactMap { $0 }
+        let allocated = values.compactMap(\.self)
         #expect(allocated.count == 16)
         #expect(Set(allocated).count == allocated.count)
         #expect(allocated.allSatisfy { $0 > initial })
@@ -1994,7 +2000,8 @@ final class WatchMessageJournalStoreTests: ClientDatabaseTestSuite, @unchecked S
         defer { try? reopened.close() }
         #expect(try await reopened.watchMessages.entries() == [admitted])
         #expect(try await reopened.watchMessages.route(gatewayStableID: "gw-a")?.owner == admitted.owner)
-        #expect(try await reopened.watchMessages.resumableEntry(id: input.commandId, context: input.context) == admitted)
+        #expect(try await reopened.watchMessages
+            .resumableEntry(id: input.commandId, context: input.context) == admitted)
 
         let changed = OpenClawWatchChatDeliveryCommand(
             context: input.context, commandId: input.commandId, submittedAtMs: self.now, body: .chat(text: "different"))
@@ -2106,7 +2113,7 @@ final class WatchMessageJournalStoreTests: ClientDatabaseTestSuite, @unchecked S
         #expect(try await upgraded.entries() == [oldEntry])
     }
 
-    @Test func `legacy Watch work remains unowned and non replayable after personal bind`() async throws {
+    @Test func `legacy Watch work remains unscoped and non replayable after personal bind`() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("watch-personal-legacy-\(UUID().uuidString)", isDirectory: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -2118,7 +2125,7 @@ final class WatchMessageJournalStoreTests: ClientDatabaseTestSuite, @unchecked S
         ], recentMessageIDs: []), nowMs: self.now)
         let legacy = try #require(try await journal.entries().first)
         #expect(legacy.phase == .needsReview)
-        #expect(legacy.owner == nil)
+        #expect(legacy.owner == .init(gatewayStableID: "gw-a", routeGeneration: nil))
         #expect(legacy.personalRecoveryScope == nil)
 
         let identity = try #require(OpenClawChatSessionRoutingIdentity(contract: "per-sender|main|main"))
