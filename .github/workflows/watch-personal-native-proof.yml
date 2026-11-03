@@ -1,0 +1,147 @@
+name: Personal Watch native proofs
+on:
+  push:
+    branches: [infra/watch-personal-ios-proof]
+    paths: [.github/workflows/watch-personal-native-proof.yml]
+permissions:
+  contents: read
+env:
+  TARGET_SHA: ba3cb5a13af9cf8cba3d5c1e0d6a2fba5707ada3
+  DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+  GIT_TERMINAL_PROMPT: '0'
+jobs:
+  journal:
+    if: github.repository == 'TheAngryPit/openclaw'
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: TheAngryPit/openclaw
+          ref: ba3cb5a13af9cf8cba3d5c1e0d6a2fba5707ada3
+          persist-credentials: false
+      - name: Verify source and prepare Node
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          xcodebuild -version
+          swift --version
+      - uses: ./.github/actions/setup-node-env
+        with:
+          node-version: '24.22.1'
+          install-bun: 'false'
+          install-deps: 'false'
+          cache-mode: 'off'
+      - name: Resolve and run journal tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          package=apps/shared/OpenClawKit
+          scratch="$RUNNER_TEMP/watch-journal-scratch"
+          swift package resolve --package-path "$package" --scratch-path "$scratch"
+          test -f "$package/Package.resolved"
+          shasum -a 256 "$package/Package.resolved" | tee "$RUNNER_TEMP/journal-lock.sha256"
+          cat "$package/Package.resolved"
+          swift test --package-path "$package" --scratch-path "$scratch" \
+            --disable-index-store -Xswiftc -gline-tables-only --no-parallel \
+            --filter ChatTranscriptCacheStoreTests 2>&1 | tee "$RUNNER_TEMP/journal.log"
+          grep -q 'ChatTranscriptCacheStoreTests' "$RUNNER_TEMP/journal.log"
+          grep -E 'Test run with [1-9][0-9]* tests? .* passed' "$RUNNER_TEMP/journal.log"
+          ! grep -E 'Test .* (skipped|failed)' "$RUNNER_TEMP/journal.log"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          shasum -a 256 -c "$RUNNER_TEMP/journal-lock.sha256"
+  watch:
+    if: github.repository == 'TheAngryPit/openclaw'
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: TheAngryPit/openclaw
+          ref: ba3cb5a13af9cf8cba3d5c1e0d6a2fba5707ada3
+          persist-credentials: false
+      - name: Verify source and tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          xcodebuild -version
+          swift --version
+          df -k "$RUNNER_TEMP"
+      - uses: ./.github/actions/setup-node-env
+        with:
+          node-version: '24.22.1'
+          install-bun: 'false'
+          install-deps: 'true'
+          frozen-lockfile: 'true'
+          cache-mode: 'off'
+          dependency-cache: 'false'
+          restore-test-caches: 'false'
+      - name: Prepare pinned tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/watch-tools"
+          ./scripts/install-xcodegen.sh "$tools"
+          ./scripts/install-swift-tools.sh "$tools"
+          echo "$tools" >> "$GITHUB_PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          toolchain="$(awk -F '"' '/^channel =/ {print $2; exit}' apps/shared/OpenClawWatchRTC/rust-toolchain.toml)"
+          test -n "$toolchain"
+          rustup toolchain install "$toolchain" --profile minimal --component rust-src
+          echo "OPENCLAW_WATCH_RTC_CACHE_DIR=$RUNNER_TEMP/watch-rtc" >> "$GITHUB_ENV"
+      - name: Generate iOS and Watch project
+        shell: bash
+        run: pnpm ios:gen
+      - name: Run Watch inbox operation tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          proof="$RUNNER_TEMP/watch-proof"
+          mkdir -p "$proof"
+          simulator_id="$(xcrun simctl list devices available --json | node --input-type=module -e '
+            const chunks = []; for await (const chunk of process.stdin) chunks.push(chunk);
+            const devices = Object.values(JSON.parse(Buffer.concat(chunks).toString("utf8")).devices).flat();
+            const watch = devices.find(d => d.isAvailable && d.name.startsWith("Apple Watch"));
+            if (!watch) throw new Error("No available Apple Watch simulator");
+            process.stdout.write(watch.udid);
+          ')"
+          printf 'Selected Watch simulator: %s\n' "$simulator_id"
+          args=(-project apps/ios/OpenClaw.xcodeproj -scheme OpenClawWatchApp -configuration Debug
+            -destination "platform=watchOS Simulator,id=$simulator_id"
+            -derivedDataPath "$RUNNER_TEMP/watch-derived"
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/watch-packages"
+            -packageCachePath "$RUNNER_TEMP/watch-package-cache" CODE_SIGNING_ALLOWED=NO)
+          tests=(-parallel-testing-enabled NO -only-testing:OpenClawWatchTests/WatchInboxStoreOperationTests)
+          xcodebuild "${args[@]}" "${tests[@]}" build-for-testing > "$proof/build.log" 2>&1 || { cat "$proof/build.log"; exit 1; }
+          app_path="$(xcodebuild "${args[@]}" -showBuildSettings -json | node --input-type=module -e '
+            import path from "node:path"; const chunks = []; for await (const c of process.stdin) chunks.push(c);
+            const targets = JSON.parse(Buffer.concat(chunks).toString("utf8")).filter(t => t.target === "OpenClawWatchApp");
+            if (targets.length !== 1) throw new Error("Expected one Watch app target");
+            const { TARGET_BUILD_DIR, FULL_PRODUCT_NAME } = targets[0].buildSettings;
+            if (!path.isAbsolute(TARGET_BUILD_DIR) || !FULL_PRODUCT_NAME) throw new Error("Missing Watch product");
+            process.stdout.write(path.join(TARGET_BUILD_DIR, FULL_PRODUCT_NAME));
+          ')"
+          companion_id="$(xcrun simctl list pairs --json | node --input-type=module -e '
+            const chunks=[]; for await (const c of process.stdin) chunks.push(c);
+            const pairs=Object.values(JSON.parse(Buffer.concat(chunks).toString("utf8")).pairs);
+            process.stdout.write(pairs.find(p => p.watch.udid === process.argv[1])?.phone.udid ?? "");
+          ' "$simulator_id")"
+          if [[ -n "$companion_id" ]]; then xcrun simctl bootstatus "$companion_id" -b; fi
+          xcrun simctl boot "$simulator_id" 2>/dev/null || true
+          xcrun simctl bootstatus "$simulator_id" -b
+          xcrun simctl install "$simulator_id" "$app_path"
+          xcodebuild "${args[@]}" "${tests[@]}" -resultBundlePath "$proof/Watch.xcresult" test-without-building > "$proof/test.log" 2>&1 || { cat "$proof/test.log"; exit 1; }
+          xcrun xcresulttool get test-results summary --path "$proof/Watch.xcresult" > "$proof/summary.json"
+          xcrun xcresulttool get test-results tests --path "$proof/Watch.xcresult" > "$proof/tests.json"
+          python3 - "$proof/summary.json" "$proof/tests.json" <<'PY'
+          import json, sys
+          summary = json.load(open(sys.argv[1])); tests = json.load(open(sys.argv[2]))
+          print(json.dumps(summary, sort_keys=True)); print(json.dumps(tests, sort_keys=True))
+          assert summary.get('result') == 'Passed' and summary.get('totalTestCount', 0) > 0, summary
+          assert summary.get('passedTests') == summary.get('totalTestCount'), summary
+          assert summary.get('failedTests') == 0 and summary.get('skippedTests') == 0, summary
+          assert summary.get('expectedFailures') == 0 and summary.get('testFailures') == [], summary
+          assert 'WatchInboxStoreOperationTests' in json.dumps(tests), 'Selected suite missing'
+          PY
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
