@@ -699,7 +699,7 @@ struct MacGatewayBrowserSessionStoreTests {
         await store.dataStore.httpCookieStore.allCookies().first { $0.name == "ui-theme" }?.value
     }
 
-    @Test @MainActor
+    @Test(.gatewayTLSStoreIsolated) @MainActor
     func `personal Tailscale selection retires shared authority and survives reopening the store`() async throws {
         try await self.withIsolatedStore { store in
             let url = try #require(URL(string: "wss://personal-\(UUID().uuidString.lowercased()).tail.ts.net/"))
