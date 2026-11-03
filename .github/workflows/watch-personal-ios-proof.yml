@@ -13,7 +13,7 @@ jobs:
     if: github.repository == 'TheAngryPit/openclaw'
     runs-on: xcode-27
     env:
-      TARGET_SHA: decab39058b4d83851fe7000509ccb675faa03e6
+      TARGET_SHA: bb9ba5ef60bc3cc460cbea8fdaa38b46de991cb7
       DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
       GIT_TERMINAL_PROMPT: '0'
     steps:
@@ -21,7 +21,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: TheAngryPit/openclaw
-          ref: decab39058b4d83851fe7000509ccb675faa03e6
+          ref: bb9ba5ef60bc3cc460cbea8fdaa38b46de991cb7
           persist-credentials: false
       - name: Verify candidate and runner
         shell: bash
