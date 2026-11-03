@@ -699,6 +699,55 @@ struct MacGatewayBrowserSessionStoreTests {
         await store.dataStore.httpCookieStore.allCookies().first { $0.name == "ui-theme" }?.value
     }
 
+    @Test @MainActor
+    func `personal Tailscale selection retires shared authority and survives reopening the store`() async throws {
+        try await self.withIsolatedStore { store in
+            let url = try #require(URL(string: "wss://personal-\(UUID().uuidString.lowercased()).tail.ts.net/"))
+            let initial = try await store.beginBrowserSignIn(url: url)
+            let profile = try await store.saveConnection(
+                name: "Shared",
+                token: "owner",
+                password: nil,
+                attempt: initial)
+            let reuse = try await store.beginBrowserSignIn(url: url)
+            _ = try await store.saveConnection(
+                name: "Shared", token: nil, password: nil, personalTailscaleAuthentication: false, attempt: reuse)
+            #expect(try await store.endpoint(profileID: profile.id).config.token == "owner")
+            let previous = await MacGatewayConnectionFleet.shared.connection(profileID: profile.id)
+            let oldCache = try await store.chatStoreID(profileID: profile.id)
+            let defaultsName = "PersonalSelection.\(UUID().uuidString)"
+            let defaults = try #require(UserDefaults(suiteName: defaultsName))
+            defer { defaults.removePersistentDomain(forName: defaultsName) }
+            let selection = MacGatewaySelectionPreferences(defaults: defaults)
+            selection.select(.profile(profile.id))
+            let previousSelection = selection.snapshot()
+            let identity = try #require(DeviceIdentityStore.loadOrCreatePersisted())
+            #expect(DeviceAuthStore.storeTokenPersisted(
+                deviceId: identity.deviceId, role: "operator", token: "device-owner", gatewayID: profile.id))
+            let attempt = try await store.beginBrowserSignIn(url: url)
+            _ = try await store.saveConnection(
+                name: "Personal", token: "must-not-use", password: "must-not-use",
+                personalTailscaleAuthentication: true, attempt: attempt)
+            let personal = try await MacGatewayProfileStore().endpoint(profileID: profile.id)
+            #expect(personal.personalTailscaleAuthentication)
+            #expect(!previousSelection.isCurrent)
+            #expect(selection.target == .profile(profile.id))
+            #expect(personal.config.token == nil && personal.config.password == nil && personal.browserSession == nil)
+            #expect(personal.tls?.params.required == true)
+            #expect(personal.tls?.params.allowTOFU == false)
+            #expect(try await store.chatStoreID(profileID: profile.id) != oldCache)
+            #expect(DeviceAuthStore.loadToken(
+                deviceId: identity.deviceId, role: "operator", gatewayID: profile.id) == nil)
+            await #expect(throws: GatewayBrowserSessionError.superseded) {
+                try await previous.request(method: "health", params: nil)
+            }
+            let catalog = try await store.catalogProfiles().first { $0.profile.id == profile.id }
+            #expect(catalog?.authKind == .personalTailscale)
+            #expect(catalog?.canPromote == false)
+            _ = try await store.remove(profileID: profile.id)
+        }
+    }
+
     @MainActor
     private func withIsolatedStore(_ body: (MacGatewayProfileStore) async throws -> Void) async throws {
         let directory = FileManager.default.temporaryDirectory

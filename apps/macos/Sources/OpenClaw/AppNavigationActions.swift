@@ -81,44 +81,32 @@ enum AppNavigationActions {
             return
         }
         let generation = self.presentationGeneration
-        let primary = AppStateStore.shared.primaryGatewaySnapshot()
+        let selection = MacGatewaySelectionPreferences.shared.snapshot()
         Task { @MainActor in
-            let connection = GatewayConnection.shared
-            var lease: GatewayConnection.ServerLease?
-            let isCurrent: @MainActor () -> Bool = {
-                generation == self.presentationGeneration && AppStateStore.shared.isCurrentPrimaryGateway(primary) &&
-                    (lease.map { connection.serverLeaseMatchesCurrentState($0) } ?? true)
-            }
             do {
-                guard isCurrent() else { return }
-                var path = sessionKey.flatMap { WebChatRoute.dashboardPath(sessionKey: $0, agentID: agentID) }
-                if path == nil {
-                    let sourceLease = try await connection.acquireServerLease()
-                    lease = sourceLease
-                    guard isCurrent() else { return }
-                    let key: String = if let sessionKey {
-                        sessionKey
-                    } else {
-                        try await connection.mainSessionKey(ifCurrentServerLease: sourceLease)
-                    }
-                    let defaults = await connection.lastSnapshot?.snapshot.sessiondefaults
-                    path = WebChatRoute.dashboardPath(
-                        sessionKey: key, agentID: agentID ?? (defaults?["defaultAgentId"]?.value as? String))
+                let binding = try await MacGatewayOperatorBinding.capture(snapshot: selection)
+                guard generation == self.presentationGeneration, selection.isCurrent, binding.isCurrent else { return }
+                let key: String = if let sessionKey {
+                    sessionKey
+                } else {
+                    try await binding.connection.mainSessionKey(ifCurrentServerLease: binding.lease)
                 }
-                guard isCurrent() else { return }
-                guard let path else { throw URLError(.badURL) }
-                // Endpoint lookup may suspend again. Keep the originating primary
-                // and any server-derived defaults fenced through actual draft dispatch.
+                let defaults = await binding.connection.lastSnapshot?.snapshot.sessiondefaults
+                guard generation == self.presentationGeneration, selection.isCurrent, binding.isCurrent else { return }
+                guard let path = WebChatRoute.dashboardPath(
+                    sessionKey: key, agentID: agentID ?? (defaults?["defaultAgentId"]?.value as? String))
+                else { throw URLError(.badURL) }
                 await DashboardManager.shared.show(
                     atPath: path,
                     search: WebChatRoute.dashboardSearch(draft: draft),
-                    target: .primary,
-                    ifCurrent: isCurrent)
+                    target: binding.target,
+                    ifCurrent: { generation == self.presentationGeneration && selection.isCurrent && binding.isCurrent
+                    })
             } catch {
-                guard isCurrent(), !(error is CancellationError) else { return }
+                guard generation == self.presentationGeneration, selection.isCurrent else { return }
                 let alert = NSAlert()
                 alert.messageText = "Could Not Open Chat"
-                alert.informativeText = "Connect to the Gateway, then select this conversation in the Dashboard."
+                alert.informativeText = "Reconnect the selected Gateway in Connection settings, then try Chat again."
                 AppActivation.shared.presentAlert(alert)
             }
         }

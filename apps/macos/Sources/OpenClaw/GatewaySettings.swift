@@ -197,6 +197,8 @@ struct GatewayProfileEditor: View {
     @State private var url: String
     @State private var token = ""
     @State private var password = ""
+    @State private var personalTailscaleAuthentication = false
+    @State private var hasLoadedAuthentication = false
     @State private var isSaving = false
     @State private var errorMessage: String?
     @State private var connectionTask: Task<Void, Never>?
@@ -246,6 +248,16 @@ struct GatewayProfileEditor: View {
             .gridColumnAlignment(.leading)
             .disabled(self.isSaving)
 
+            Toggle("Use Personal Tailscale Sign-In", isOn: self.$personalTailscaleAuthentication)
+                .disabled(self.isSaving || !self.hasLoadedAuthentication)
+            if self.personalTailscaleAuthentication {
+                Text(
+                    "The Gateway verifies your Tailscale identity. Off uses saved Gateway credentials.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             DisclosureGroup("Token or password") {
                 Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 14, verticalSpacing: 12) {
                     GridRow {
@@ -261,7 +273,7 @@ struct GatewayProfileEditor: View {
                 }
                 .padding(.top, 8)
             }
-            .disabled(self.isSaving)
+            .disabled(self.isSaving || self.personalTailscaleAuthentication)
 
             Text("Your sign-in is saved in Mac Keychain. Removing this Gateway signs you out of the app.")
                 .font(.footnote)
@@ -292,11 +304,21 @@ struct GatewayProfileEditor: View {
                     self.connectionTask = Task { await self.save() }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(self.isSaving || self.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(self.isSaving || !self.hasLoadedAuthentication ||
+                    self.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding(24)
         .frame(width: 540)
+        .task {
+            if let url = try? GatewayBrowserSignInCoordinator.gatewayURL(from: self.url),
+               let endpoint = try? await MacGatewayProfileStore.shared.endpoint(
+                   profileID: MacGatewayProfileStore.profileID(url: url))
+            {
+                self.personalTailscaleAuthentication = endpoint.personalTailscaleAuthentication
+            }
+            self.hasLoadedAuthentication = true
+        }
         .onDisappear { self.connectionTask?.cancel() }
     }
 
@@ -310,6 +332,7 @@ struct GatewayProfileEditor: View {
                 address: self.url,
                 token: self.token,
                 password: self.password,
+                personalTailscaleAuthentication: self.personalTailscaleAuthentication,
                 progress: self.signInProgress)
             WebChatManager.shared.gatewayProfileDidSave(profileID: profile.id)
             self.onSaved(profile)

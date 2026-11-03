@@ -1377,7 +1377,8 @@ extension GatewayChannelActor {
         method: String,
         params: [String: AnyCodable]?,
         timeoutMs: Double? = nil,
-        ifCurrentConnectionGeneration expectedGeneration: UInt64) async throws -> Data
+        ifCurrentConnectionGeneration expectedGeneration: UInt64,
+        admission: WebSocketRequestAdmission? = nil) async throws -> Data
     {
         guard self.isConnected(connectionGeneration: expectedGeneration),
               let task = self.task,
@@ -1388,7 +1389,8 @@ extension GatewayChannelActor {
             params: params,
             timeoutMs: timeoutMs,
             task: task,
-            connectionGeneration: expectedGeneration)
+            connectionGeneration: expectedGeneration,
+            admission: admission)
     }
 
     /// The generation is usable as a lease only while its socket is live.
@@ -1405,7 +1407,8 @@ extension GatewayChannelActor {
         params: [String: AnyCodable]?,
         timeoutMs: Double?,
         task: WebSocketTaskBox,
-        connectionGeneration: UInt64) async throws -> Data
+        connectionGeneration: UInt64,
+        admission: WebSocketRequestAdmission? = nil) async throws -> Data
     {
         // Zero leaves terminal-operation deadlines to the Gateway owner.
         let effectiveTimeout = Self.resolveRequestTimeoutMs(timeoutMs, defaultMs: self.defaultRequestTimeoutMs)
@@ -1420,7 +1423,7 @@ extension GatewayChannelActor {
                         cont.resume(throwing: CancellationError())
                         return
                     }
-                    var request = PendingRequest(continuation: cont)
+                    var request = PendingRequest(continuation: cont, admission: admission)
                     if let effectiveTimeout {
                         request.timeoutTask = Task { [weak self] in
                             guard let self else { return }

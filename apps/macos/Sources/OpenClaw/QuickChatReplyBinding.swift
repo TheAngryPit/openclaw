@@ -4,7 +4,7 @@ import OpenClawChatUI
 @MainActor
 @Observable
 final class QuickChatReplyBinding {
-    typealias ViewModelFactory = @MainActor (OpenClawChatSessionTarget) -> OpenClawChatViewModel
+    typealias ViewModelFactory = @MainActor (OpenClawChatSessionTarget) -> OpenClawChatViewModel?
 
     private(set) var route: OpenClawChatSessionTarget?
     private(set) var isExpanded = false
@@ -16,7 +16,7 @@ final class QuickChatReplyBinding {
 
     @ObservationIgnored private let viewModelFactory: ViewModelFactory
 
-    init(viewModelFactory: @escaping ViewModelFactory = QuickChatReplyBinding.makeViewModel) {
+    init(viewModelFactory: @escaping ViewModelFactory = { _ in nil }) {
         self.viewModelFactory = viewModelFactory
     }
 
@@ -24,6 +24,7 @@ final class QuickChatReplyBinding {
     /// Subscription starts asynchronously; full snapshots and history bootstrap recover earlier turns.
     func prepare(route: OpenClawChatSessionTarget) {
         guard self.preparedRoute != route else { return }
+        self.viewModel?.detachTransport()
         self.preparedRoute = route
         self.viewModel = self.viewModelFactory(route)
     }
@@ -50,6 +51,7 @@ final class QuickChatReplyBinding {
     }
 
     func clear() {
+        self.viewModel?.detachTransport()
         self.disclosureRevision &+= 1
         self.route = nil
         self.isExpanded = false
@@ -71,8 +73,13 @@ final class QuickChatReplyBinding {
         self.pasteStatusMessage = message
     }
 
-    static func makeViewModel(route: OpenClawChatSessionTarget) -> OpenClawChatViewModel {
-        let transport = MacGatewayChatTransport(defaultGlobalAgentID: route.agentID)
+    static func makeViewModel(
+        route: OpenClawChatSessionTarget,
+        binding: MacGatewayOperatorBinding?) -> OpenClawChatViewModel?
+    {
+        guard let binding, binding.isCurrent else { return nil }
+        let transport = MacGatewayChatTransport(
+            connection: binding.connection, defaultGlobalAgentID: route.agentID, operatorBinding: binding)
         return OpenClawChatViewModel(
             sessionKey: route.sessionKey,
             transport: transport,

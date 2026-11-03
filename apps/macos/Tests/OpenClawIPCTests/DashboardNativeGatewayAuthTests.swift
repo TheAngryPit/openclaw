@@ -5,7 +5,7 @@ import Testing
 @testable import OpenClawKit
 
 struct DashboardNativeGatewayAuthTests {
-    @Test(arguments: ["token", "password", "deviceToken"])
+    @Test(arguments: ["token", "password", "deviceToken", "tailscale"])
     func `native signature proves the challenge and exact granted scopes without exporting a key`(
         method: String) throws
     {
@@ -17,6 +17,7 @@ struct DashboardNativeGatewayAuthTests {
         let credential: DashboardNativeGatewayAuth.Credential = switch method {
         case "token": .token("accepted-secret")
         case "password": .password("accepted-secret")
+        case "tailscale": .personalTailscale(recoveryScope: "personal-scope")
         default: .deviceToken("accepted-secret")
         }
         let json = try DashboardNativeGatewayAuth.sign(
@@ -28,7 +29,7 @@ struct DashboardNativeGatewayAuthTests {
         let padded = rawSignature.replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/") + "=="
         let signature = try #require(Data(base64Encoded: padded))
-        let tokenSlot = method == "password" ? "" : "accepted-secret"
+        let tokenSlot = method == "password" || method == "tailscale" ? "" : "accepted-secret"
         let payload = "v2|\(identity.deviceId)|openclaw-macos|ui|operator|operator.read|123|\(tokenSlot)|challenge"
         #expect(key.publicKey.isValidSignature(signature, for: Data(payload.utf8)))
         #expect(!key.publicKey.isValidSignature(signature, for: Data(payload.replacingOccurrences(
@@ -36,7 +37,11 @@ struct DashboardNativeGatewayAuthTests {
         #expect(!key.publicKey.isValidSignature(signature, for: Data(payload.replacingOccurrences(
             of: "challenge", with: "other-challenge").utf8)))
         #expect(result["scopes"] as? [String] == ["operator.read"])
-        #expect((result["auth"] as? [String: String]) == [method: "accepted-secret"])
+        #expect((result["auth"] as? [String: String]) == (method == "tailscale" ? [:] : [method: "accepted-secret"]))
+        if method == "tailscale" {
+            #expect(result["requiredAuthMethod"] as? String == "tailscale")
+            #expect(result["expectedRecoveryScope"] as? String == "personal-scope")
+        }
         #expect(Set(device.keys) == ["id", "publicKey", "signature", "signedAt", "nonce"])
         #expect(!String(decoding: json, as: UTF8.self).contains(identity.privateKey))
     }

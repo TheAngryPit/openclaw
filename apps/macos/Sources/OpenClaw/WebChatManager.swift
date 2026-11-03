@@ -114,6 +114,11 @@ final class WebChatManager {
         return instance.route.sessionKey
     }
 
+    func activeSessionKey(for target: DashboardGatewayTarget) -> String? {
+        self.gatewayWindowOrder.reversed().compactMap { self.gatewayWindows[$0] }
+            .first { $0.target == target && $0.controller.isWindowOpen }?.route.sessionKey
+    }
+
     @discardableResult
     private func showExistingWindow(for target: DashboardGatewayTarget) -> Bool {
         guard let instance = self.gatewayWindowOrder.reversed().lazy.compactMap({ self.gatewayWindows[$0] })
@@ -125,6 +130,28 @@ final class WebChatManager {
 
     func show(sessionKey: String? = nil, agentID: String? = nil, draft: String? = nil) {
         self.primaryOpenTask?.cancel()
+        let selection = self.selection.snapshot()
+        if selection.target != .primary {
+            self.primaryOpenTask = Task { [weak self] in
+                guard let self else { return }
+                do {
+                    let binding = try await MacGatewayOperatorBinding.capture(
+                        selection: self.selection,
+                        snapshot: selection)
+                    guard selection.isCurrent, binding.isCurrent, !Task.isCancelled else { return }
+                    let route = sessionKey.map { WebChatRoute(sessionKey: $0, agentID: agentID) }
+                    await self.openGatewayWindow(
+                        for: binding.target,
+                        route: route,
+                        draft: draft,
+                        sourceIsCurrent: { selection.isCurrent && binding.isCurrent }).value
+                } catch {
+                    guard selection.isCurrent, !Task.isCancelled else { return }
+                    Self.showProfileError(error, message: "Reconnect the selected Gateway to open Chat")
+                }
+            }
+            return
+        }
         self.preparePrimaryGateway(gatewayID: GatewayDiscoveryPreferences.deviceAuthGatewayID(
             root: OpenClawConfigFile.loadDict()))
         if sessionKey == nil, agentID == nil, draft == nil, self.showExistingWindow(for: .primary) { return }
@@ -142,7 +169,7 @@ final class WebChatManager {
                 try Task.checkCancellation()
                 self.preparePrimaryGateway(gatewayID: GatewayDiscoveryPreferences.deviceAuthGatewayID(
                     root: OpenClawConfigFile.loadDict()))
-                guard generation == self.primaryGeneration else { throw CancellationError() }
+                guard generation == self.primaryGeneration, selection.isCurrent else { throw CancellationError() }
                 if let lease = resolved.lease, !connection.serverLeaseMatchesCurrentState(lease) {
                     throw CancellationError()
                 }
@@ -220,6 +247,7 @@ final class WebChatManager {
         for target: DashboardGatewayTarget,
         newWindow: Bool = false,
         route: WebChatRoute? = nil,
+        draft: String? = nil,
         sourceIsCurrent: @escaping () -> Bool = { true }) -> Task<Void, Never>
     {
         if target == .primary {
@@ -248,6 +276,7 @@ final class WebChatManager {
                     name: name,
                     newWindow: newWindow,
                     requestedRoute: route,
+                    draft: draft,
                     sourceIsCurrent: sourceIsCurrent)
             } catch is CancellationError {
                 // Owner retirement cancels the pending open.
@@ -263,6 +292,7 @@ final class WebChatManager {
         name: String,
         newWindow: Bool,
         requestedRoute: WebChatRoute?,
+        draft: String?,
         sourceIsCurrent: () -> Bool) async throws
     {
         let generation = self.windowGeneration
@@ -271,9 +301,10 @@ final class WebChatManager {
         await self.fleetShutdownTask?.value
         try self.requireCurrentWindowRequest(generation, target: target)
         guard target != .primary || primaryGeneration == self.primaryGeneration else { throw CancellationError() }
-        if !newWindow, self.showExistingWindow(for: target) { return }
+        guard sourceIsCurrent() else { throw CancellationError() }
+        if !newWindow, requestedRoute == nil, draft == nil, self.showExistingWindow(for: target) { return }
         let connection: GatewayConnection
-        let chatStoreID: String?
+        var chatStoreID: String?
         let autosaveID: String
         switch target {
         case .primary:
@@ -293,6 +324,9 @@ final class WebChatManager {
         }
         try self.requireCurrentWindowRequest(generation, target: target)
         let resolved = try await Self.resolveMainSession(connection: connection)
+        if let base = chatStoreID {
+            chatStoreID = try await connection.personalChatStoreID(base: base)
+        }
         try self.requireCurrentWindowRequest(generation, target: target)
         if target == .primary {
             self.preparePrimaryGateway(gatewayID: GatewayDiscoveryPreferences.deviceAuthGatewayID(
@@ -304,16 +338,17 @@ final class WebChatManager {
         }
         // Another admission can finish while connection setup is suspended.
         // Recheck at the presentation boundary to keep ordinary opens single-window.
-        if !newWindow, self.showExistingWindow(for: target) { return }
         guard sourceIsCurrent() else { throw CancellationError() }
+        if !newWindow, requestedRoute == nil, draft == nil, self.showExistingWindow(for: target) { return }
         let route = requestedRoute ?? WebChatRoute(sessionKey: resolved.sessionKey, agentID: nil)
         if target == .primary {
-            self.presentChat(sessionKey: route.sessionKey, agentID: route.agentID, draft: nil, newWindow: newWindow)
+            self.presentChat(sessionKey: route.sessionKey, agentID: route.agentID, draft: draft, newWindow: newWindow)
             return
         }
         let controller = WebChatSwiftUIWindowController(
             sessionKey: route.sessionKey,
             agentID: route.agentID,
+            initialDraft: draft,
             connection: connection,
             gatewayID: chatStoreID,
             gatewayTarget: target,

@@ -22,6 +22,12 @@ extension TalkModeRuntime {
     {
         guard expectedLifecycleGeneration.map({ $0 == self.lifecycleGeneration }) ?? true
         else { return }
+        self.operatorRetirementTask?.cancel()
+        self.operatorRetirementTask = nil
+        self.operatorConnectionTask?.cancel()
+        self.operatorConnectionTask = nil
+        self.operatorBinding = nil
+        if self.usesSelectedOperator { self.clearTalkOperatorState() }
         self.pendingRealtimeRelayStartLifecycleGeneration = nil
         self.resetRealtimeRecoveryState()
         self.realtimeRelayGeneration &+= 1
@@ -59,6 +65,12 @@ extension TalkModeRuntime {
 
     func start() async {
         let gen = lifecycleGeneration
+        do {
+            try await self.admitTalkOperator(generation: gen)
+        } catch {
+            await self.retireTalkOperator(generation: gen)
+            return
+        }
         let hasVoiceWakePermission = await self.dependencies.permissions.ensure(true)
         guard hasVoiceWakePermission else {
             logger.error("talk runtime not starting: permissions missing")
@@ -210,7 +222,14 @@ extension TalkModeRuntime {
         }
         let bootstrap: GatewayConnection.RealtimeTalkBootstrap
         do {
-            bootstrap = try await self.realtimeTalkBootstrapProvider()
+            if let operatorBinding {
+                bootstrap = try await operatorBinding.connection.acquireRealtimeTalkBootstrap(
+                    operatorBinding: operatorBinding)
+            } else if let realtimeTalkBootstrapProvider {
+                bootstrap = try await realtimeTalkBootstrapProvider()
+            } else {
+                throw CancellationError()
+            }
         } catch {
             await self.applyTalkConfig(self.fallbackTalkConfig())
             throw error
@@ -270,7 +289,7 @@ extension TalkModeRuntime {
         guard isCurrent(lifecycleGeneration), !isPaused,
               realtimeRelayGeneration == relayGeneration
         else { throw CancellationError() }
-        let activeSessionKey = await self.dependencies.selectedSession()
+        let activeSessionKey = await self.selectedTalkSession()
         let realtime = self.config?.snapshot.realtime
         let options = RealtimeTalkRelaySession.Options(
             sessionKey: activeSessionKey ?? bootstrap.sessionKey,

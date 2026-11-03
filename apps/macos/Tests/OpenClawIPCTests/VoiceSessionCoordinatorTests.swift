@@ -8,8 +8,34 @@ struct VoiceSessionCoordinatorTests {
     enum Retirement: CaseIterable, Sendable { case replacement, dismissal }
     enum PendingBoundary: CaseIterable, Sendable { case preparation, forwarding }
 
+    @Test(arguments: PendingBoundary.allCases)
+    func `changed operator selection retires prepared voice and its late acknowledgement`(
+        boundary: PendingBoundary) async throws
+    {
+        try await withVoiceSendFixture { fixture in
+            fixture.holdPreparation = boundary == .preparation
+            var preparations = fixture.preparation.requests.makeAsyncIterator()
+            var forwards = fixture.forwarding.requests.makeAsyncIterator()
+            let token = fixture.sessions.startSession(text: "private voice", forwardEnabled: true)
+            fixture.overlay.requestSend(token: token)
+            let task = try #require(fixture.tasks.last)
+            let preparation = boundary == .preparation ? await preparations.next() : nil
+            let forward = boundary == .forwarding ? await forwards.next() : nil
+            fixture.selection.select(.profile("another-person"))
+            #expect(task.isCancelled)
+            if let preparation { preparation.complete(preparation.input) }
+            forward?.complete(.success(()))
+            await task.value
+            #expect(!fixture.overlay.model.isSent)
+            #expect(fixture.overlay.model.sendError == "Gateway changed. Start voice input again.")
+            #expect(fixture.sessions.sendNow(token: token) == nil)
+            #expect(!fixture.dismissals.contains(.sent))
+            if boundary == .preparation { #expect(await fixture.forwarding.inputs().isEmpty) }
+        }
+    }
+
     @Test(arguments: RetryChange.allCases)
-    func manualAndQueuedAutoSendShareAdmissionAndRetryIdentity(change: RetryChange) async throws {
+    func `manual and queued auto send share admission and retry identity`(change: RetryChange) async throws {
         try await withVoiceSendFixture { fixture in
             var requests = fixture.forwarding.requests.makeAsyncIterator()
             let token = fixture.sessions.startSession(text: "original", forwardEnabled: true)
@@ -77,7 +103,10 @@ struct VoiceSessionCoordinatorTests {
     }
 
     @Test(arguments: Retirement.allCases, PendingBoundary.allCases)
-    func retiredSendCannotForwardOrPublishALateResult(retirement: Retirement, boundary: PendingBoundary) async throws {
+    func `retired send cannot forward or publish A late result`(
+        retirement: Retirement,
+        boundary: PendingBoundary) async throws
+    {
         try await withVoiceSendFixture { fixture in
             fixture.holdPreparation = boundary == .preparation
             var preparations = fixture.preparation.requests.makeAsyncIterator()
@@ -158,10 +187,14 @@ private actor VoiceSendBoundary<Input: Sendable, Output: Sendable> {
         self.pending.removeValue(forKey: id)?.resume(returning: value)
     }
 
-    func inputs() -> [Input] { self.received }
+    func inputs() -> [Input] {
+        self.received
+    }
 
     func finish() {
-        for continuation in self.pending.values { continuation.resume(returning: self.cleanupValue) }
+        for continuation in self.pending.values {
+            continuation.resume(returning: self.cleanupValue)
+        }
         self.pending.removeAll()
         self.events.finish()
     }
@@ -169,6 +202,18 @@ private actor VoiceSendBoundary<Input: Sendable, Output: Sendable> {
 
 @MainActor
 private final class VoiceSendFixture {
+    let defaultsName: String
+    let defaults: UserDefaults
+    let selection: MacGatewaySelectionPreferences
+
+    init() throws {
+        let defaultsName = "VoiceSelection.\(UUID().uuidString)"
+        self.defaultsName = defaultsName
+        let defaults = try #require(UserDefaults(suiteName: defaultsName))
+        self.defaults = defaults
+        self.selection = MacGatewaySelectionPreferences(defaults: defaults)
+    }
+
     let forwarding = VoiceSendBoundary<GatewayAgentInvocation, Result<Void, VoiceWakeForwarder.VoiceWakeForwardError>>(
         cleanupValue: .failure(.rpcFailed("fixture cleanup")))
     let preparation = VoiceSendBoundary<GatewayAgentInvocation, GatewayAgentInvocation>(
@@ -206,7 +251,8 @@ private final class VoiceSendFixture {
         overlay: self.overlay,
         prepareForward: { [unowned self] text, trigger in await self.prepare(text, trigger: trigger) },
         forward: { [forwarding] in await forwarding.request($0) },
-        didDismiss: { _ in })
+        didDismiss: { _ in },
+        operatorSelection: self.selection)
 
     private func prepare(_ text: String, trigger: String?) async -> GatewayAgentInvocation {
         let invocation = VoiceWakeForwarder.makeInvocation(
@@ -229,14 +275,17 @@ private final class VoiceSendFixture {
         }
         await self.preparation.finish()
         await self.forwarding.finish()
-        for task in self.tasks { await task.value }
+        for task in self.tasks {
+            await task.value
+        }
         self.completeDismissal()
+        self.defaults.removePersistentDomain(forName: self.defaultsName)
     }
 }
 
 @MainActor
 private func withVoiceSendFixture(_ body: (VoiceSendFixture) async throws -> Void) async throws {
-    let fixture = VoiceSendFixture()
+    let fixture = try VoiceSendFixture()
     do {
         try await body(fixture)
     } catch {

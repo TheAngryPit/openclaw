@@ -3,6 +3,31 @@ import Testing
 @testable import OpenClaw
 
 struct MacGatewayProfilesTests {
+    @Test(arguments: [
+        "ws://gateway.tail.ts.net", "wss://gateway.example", "wss://tail.ts.net.example",
+        "wss://user@gateway.tail.ts.net", "wss://gateway.tail.ts.net?token=secret",
+        "wss://gateway.tail.ts.net#token=secret", "ws://127.0.0.1:18789",
+    ])
+    func `personal Tailscale routes reject credentials and other ingress`(address: String) throws {
+        let url = try #require(URL(string: address))
+        #expect(throws: MacGatewayProfileError.personalTailscaleURLRequired) {
+            try MacGatewayProfileStore.validatePersonalTailscaleURL(url)
+        }
+    }
+
+    @Test func `personal Tailscale selection round trips without changing old saved profiles`() throws {
+        try MacGatewayProfileStore.validatePersonalTailscaleURL(
+            #require(URL(string: "wss://gateway.tail.ts.net/gateway/")))
+        let old = try JSONDecoder().decode(
+            MacGatewayProfileStore.Credentials.self, from: Data(#"{"token":"shared"}"#.utf8))
+        #expect(old.personalTailscaleAuthentication == nil)
+        let personal = MacGatewayProfileStore.Credentials(personalTailscaleAuthentication: true)
+        let restored = try JSONDecoder().decode(
+            MacGatewayProfileStore.Credentials.self, from: JSONEncoder().encode(personal))
+        #expect(restored.personalTailscaleAuthentication == true)
+        #expect(restored.token == nil && restored.password == nil && restored.browserSession == nil)
+    }
+
     @Test func `canonical route identity normalizes authority but preserves path`() throws {
         let implicit = try MacGatewayProfileStore.canonicalURL(
             #require(URL(string: "WSS://Studio.Example/alpha")))

@@ -557,6 +557,9 @@ struct RealtimeTalkRelaySessionTests {
 
         #expect(terminations == [.eventStreamEnded])
         #expect(audioCapture.stopCount == 1)
+        await #expect(throws: CancellationError.self) {
+            try await session.stopAndWait()
+        }
     }
 
     @Test func `closed relay does not wait for startup ready`() async {

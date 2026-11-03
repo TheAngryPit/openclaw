@@ -74,7 +74,8 @@ enum SessionLoader {
 
     static func loadSnapshot(
         limit: Int? = nil,
-        control: ControlChannel = .shared) async throws -> SessionStoreSnapshot
+        control: ControlChannel = .shared,
+        operatorBinding: MacGatewayOperatorBinding? = nil) async throws -> SessionStoreSnapshot
     {
         let data: Data
         do {
@@ -83,7 +84,11 @@ enum SessionLoader {
                 search: nil,
                 archived: false,
                 includeUnknown: true)
-            data = try await control.request(request)
+            if let operatorBinding {
+                data = try await operatorBinding.request(request)
+            } else {
+                data = try await control.request(request)
+            }
         } catch {
             let msg = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             if msg.localizedCaseInsensitiveContains("unknown method: sessions.list") {

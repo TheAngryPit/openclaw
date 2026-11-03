@@ -55,7 +55,7 @@ extension GatewayConnection {
         let scopes = scopeValues.compactMap { $0.value as? String }
         guard scopes.count == scopeValues.count else { throw CancellationError() }
         let gatewayID = lease.route.deviceAuthGatewayID
-        let deviceToken = gatewayID.flatMap {
+        let deviceToken = endpoint.personalTailscaleAuthentication ? nil : gatewayID.flatMap {
             DeviceAuthStore.loadToken(deviceId: identity.deviceId, role: "operator", gatewayID: $0)?.token
         }
         let method: String
@@ -67,9 +67,17 @@ extension GatewayConnection {
             // binding identifies its selected credential, not merely saved config.
             method = binding.source == .sharedToken ? "token" : binding.source.rawValue
         }
-        guard let credential = Self.controlUiCredential(
-            method: method, source: binding.source, config: endpoint.config, token: deviceToken)
-        else { throw CancellationError() }
+        let credential: DashboardNativeGatewayAuth.Credential
+        if endpoint.personalTailscaleAuthentication {
+            guard method == "tailscale" else { throw CancellationError() }
+            credential = try await .personalTailscale(recoveryScope: self
+                .personalRecoveryScope(ifCurrentServerLease: lease))
+        } else {
+            guard let accepted = Self.controlUiCredential(
+                method: method, source: binding.source, config: endpoint.config, token: deviceToken)
+            else { throw CancellationError() }
+            credential = accepted
+        }
         let client = [
             "id": "openclaw-macos", "mode": "ui",
             "displayName": InstanceIdentity.displayName,
@@ -102,6 +110,7 @@ extension GatewayConnection {
         guard self.includeDeviceIdentity, endpoint.browserSession == nil,
               let lease = await self.captureServerLease(),
               lease.route.matches(config: endpoint.config), lease.route.browserSession == nil,
+              lease.route.personalTailscaleAuthentication == endpoint.personalTailscaleAuthentication,
               GatewayTLSRoute.hasSameConnectionIdentity(lease.route.tls, endpoint.tls),
               endpoint.routeAuthority == nil || endpoint.routeAuthority == lease.route.authority,
               endpoint.revision == nil || endpoint.revision == lease.endpointRevision,

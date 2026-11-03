@@ -52,6 +52,16 @@ struct TalkModeControllerPublishingTests {
             #expect(controller.recentTranscripts.count == 20)
             #expect(controller.recentTranscripts.first == "utterance 5")
             #expect(controller.recentTranscripts.last == "utterance 24")
+
+            controller.updatePartialTranscript("Private unfinished transcript")
+            controller.updatePhase(.speaking)
+            controller.updateLevel(1)
+            controller.operatorDidRetire()
+            #expect(controller.recentTranscripts.isEmpty)
+            #expect(controller.phase == .idle)
+            #expect(controller.level == 0)
+            #expect(controller
+                .partialTranscript == "Gateway changed. Reconnect the selected Gateway, then restart Talk.")
         }
     }
 }

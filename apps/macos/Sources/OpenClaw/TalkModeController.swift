@@ -163,6 +163,15 @@ final class TalkModeController {
         self.partialTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    func operatorDidRetire() {
+        self.recentTranscripts = []
+        self.updateLevel(0)
+        self.updateSpeakingLevel(nil)
+        self.updatePhase(.idle)
+        self.updatePartialTranscript(
+            String(localized: "Gateway changed. Reconnect the selected Gateway, then restart Talk."))
+    }
+
     func commitTranscript(_ transcript: String) {
         let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         self.partialTranscript = ""

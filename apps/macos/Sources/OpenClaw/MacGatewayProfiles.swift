@@ -14,6 +14,7 @@ struct MacGatewayProfile: Codable, Equatable, Identifiable, Sendable {
 enum MacGatewayProfileError: LocalizedError, Equatable {
     case invalidURL
     case insecureRemoteURL
+    case personalTailscaleURLRequired
     case profileNotFound
     case unsupportedRegistryVersion(Int)
     case keychain(OSStatus)
@@ -26,6 +27,8 @@ enum MacGatewayProfileError: LocalizedError, Equatable {
             "Public Gateway hosts require wss://. Use ws:// only on loopback, a trusted private network, or Tailnet."
         case .profileNotFound:
             "That Gateway profile no longer exists."
+        case .personalTailscaleURLRequired:
+            "Personal Tailscale sign-in requires a credential-free wss:// address ending in .ts.net."
         case let .unsupportedRegistryVersion(version):
             "Gateway profiles were written by a newer OpenClaw version (schema \(version))."
         case let .keychain(status):
@@ -67,6 +70,7 @@ actor MacGatewayProfileStore {
         var token: String?
         var password: String?
         var browserSession: GatewayBrowserSession?
+        var personalTailscaleAuthentication: Bool?
     }
 
     struct BrowserSignInAttempt: Equatable, Sendable {
@@ -241,12 +245,24 @@ actor MacGatewayProfileStore {
         name: String,
         token: String?,
         password: String?,
+        personalTailscaleAuthentication: Bool? = nil,
         attempt: BrowserSignInAttempt) async throws -> MacGatewayProfile
     {
         let saved = try self.loadRegistry().profiles.first { $0.profile.id == attempt.profileID }?.credentials
+        let credentials: Credentials
+        if personalTailscaleAuthentication == true {
+            try Self.validatePersonalTailscaleURL(attempt.url)
+            credentials = Credentials(personalTailscaleAuthentication: true)
+        } else {
+            credentials = Self.resolvedCredentials(
+                saved: personalTailscaleAuthentication == false && saved?.personalTailscaleAuthentication == true
+                    ? nil : saved,
+                submittedToken: token,
+                submittedPassword: password)
+        }
         return try await self.commit(
             name: name,
-            credentials: Self.resolvedCredentials(saved: saved, submittedToken: token, submittedPassword: password),
+            credentials: credentials,
             attempt: attempt)
     }
 
@@ -261,7 +277,8 @@ actor MacGatewayProfileStore {
         let old = try self.loadRegistry().profiles.first { $0.profile.id == attempt.profileID }
         let oldStoreID = old.map { Self.chatStoreID(profileID: $0.profile.id, credentials: $0.credentials) }
         let newStoreID = credentials.map { Self.chatStoreID(profileID: attempt.profileID, credentials: $0) }
-        let changesPrincipal = oldStoreID != nil && oldStoreID != newStoreID
+        let changesPrincipal = oldStoreID != nil &&
+            (oldStoreID != newStoreID || credentials?.personalTailscaleAuthentication == true)
         let previousSession = old?.credentials.browserSession
         let nextSession = credentials?.browserSession
         // Only a still-live session preserves its dashboard. After expiry the
@@ -308,7 +325,7 @@ actor MacGatewayProfileStore {
         }
         try self.requireCurrentAttempt(attempt)
         try credentials?.browserSession?.validate(for: attempt.url)
-        if credentials?.browserSession != nil {
+        if credentials?.browserSession != nil || credentials?.personalTailscaleAuthentication == true {
             // Join non-renewal sockets before revocation to prevent hello token writes.
             // Browser renewals cannot use or persist device tokens; keep them up until saved.
             guard let identity = DeviceIdentityStore.loadOrCreatePersisted(),
@@ -369,7 +386,8 @@ actor MacGatewayProfileStore {
     }
 
     private static func chatStoreID(profileID: String, credentials: Credentials) -> String {
-        credentials.browserSession?.chatStoreID(profileID: profileID) ?? profileID
+        if credentials.personalTailscaleAuthentication == true { return "\(profileID):personal-tailscale" }
+        return credentials.browserSession?.chatStoreID(profileID: profileID) ?? profileID
     }
 
     func chatStoreID(profileID: String) async throws -> String {
@@ -447,7 +465,10 @@ actor MacGatewayProfileStore {
             let token = item.credentials.token?.trimmingCharacters(in: .whitespacesAndNewlines)
             let password = item.credentials.password?.trimmingCharacters(in: .whitespacesAndNewlines)
             let browserSession = item.credentials.browserSession
-            let authKind: MacGatewayCatalogProfile.AuthKind? = if browserSession != nil {
+            let personal = item.credentials.personalTailscaleAuthentication == true
+            let authKind: MacGatewayCatalogProfile.AuthKind? = if personal {
+                .personalTailscale
+            } else if browserSession != nil {
                 .browser
             } else if token?.isEmpty == false {
                 .token
@@ -458,7 +479,7 @@ actor MacGatewayProfileStore {
             }
             return MacGatewayCatalogProfile(
                 profile: profile,
-                canPromote: token?.isEmpty == false,
+                canPromote: !personal && token?.isEmpty == false,
                 usesBrowserIdentity: browserSession != nil,
                 browserSessionExpiresAt: browserSession?.expiresAt,
                 authKind: authKind,
@@ -522,16 +543,22 @@ actor MacGatewayProfileStore {
         let stored = try self.storedProfile(profileID: profileID)
         let url = try Self.canonicalURL(stored.profile.url)
         let browserSession = stored.credentials.browserSession
+        let personal = stored.credentials.personalTailscaleAuthentication == true
+        if personal { try Self.validatePersonalTailscaleURL(url) }
         try browserSession?.validate(for: url)
         return GatewayConnection.EndpointSnapshot(
             config: (
                 url: url,
-                token: browserSession == nil ? stored.credentials.token : nil,
-                password: browserSession == nil ? stored.credentials.password : nil),
-            tls: browserSession == nil ? Self.tlsRoute(for: stored.profile) : nil,
+                token: browserSession == nil && !personal ? stored.credentials.token : nil,
+                password: browserSession == nil && !personal ? stored.credentials.password : nil),
+            tls: personal ? GatewayTLSRoute(
+                params: GatewayTLSParams(required: true, expectedFingerprint: nil, allowTOFU: false, storeKey: nil),
+                allowsTrustedPinReplacement: false) :
+                (browserSession == nil ? Self.tlsRoute(for: stored.profile) : nil),
             routeAuthority: nil,
             deviceAuthGatewayID: browserSession == nil ? stored.profile.id : nil,
-            browserSession: browserSession)
+            browserSession: browserSession,
+            personalTailscaleAuthentication: personal)
     }
 
     private func loadRegistry() throws -> Registry {
@@ -638,6 +665,15 @@ actor MacGatewayProfileStore {
         components.fragment = nil
         guard let canonical = components.url else { throw MacGatewayProfileError.invalidURL }
         return canonical
+    }
+
+    static func validatePersonalTailscaleURL(_ url: URL) throws {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "wss",
+              components.host?.lowercased().hasSuffix(".ts.net") == true,
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil
+        else { throw MacGatewayProfileError.personalTailscaleURLRequired }
     }
 
     static func profileID(url: URL) -> String {

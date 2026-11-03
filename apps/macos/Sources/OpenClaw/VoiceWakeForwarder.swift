@@ -50,19 +50,28 @@ enum VoiceWakeForwarder {
         transcript: String,
         voiceWakeTrigger: String? = nil) async -> GatewayAgentInvocation
     {
-        let activeSessionKey = await MainActor.run { WebChatManager.shared.activeSessionKey }
-        let sessionKey: String = if let activeSessionKey = activeSessionKey?.nonEmpty {
-            activeSessionKey
-        } else {
-            await GatewayConnection.shared.mainSessionKey()
+        do {
+            let binding = try await MacGatewayOperatorBinding.capture()
+            let activeSessionKey = await MainActor.run { WebChatManager.shared.activeSessionKey(for: binding.target) }
+            let sessionKey: String = if let activeSessionKey = activeSessionKey?.nonEmpty {
+                activeSessionKey
+            } else {
+                try await binding.connection.mainSessionKey(
+                    ifCurrentServerLease: binding.lease, admission: binding.selection.admission)
+            }
+            let routeEntries = await self.loadSessionRouteEntries(binding: binding)
+            var invocation = self.makeInvocation(
+                transcript: transcript,
+                sessionKey: sessionKey,
+                routeEntries: routeEntries,
+                voiceWakeTrigger: voiceWakeTrigger)
+            invocation.operatorBinding = binding
+            return invocation
+        } catch {
+            var invocation = self.makeInvocation(transcript: transcript, voiceWakeTrigger: voiceWakeTrigger)
+            invocation.operatorAdmissionFailure = "Reconnect the selected Gateway before sending voice input."
+            return invocation
         }
-
-        let routeEntries = await self.loadSessionRouteEntries()
-        return self.makeInvocation(
-            transcript: transcript,
-            sessionKey: sessionKey,
-            routeEntries: routeEntries,
-            voiceWakeTrigger: voiceWakeTrigger)
     }
 
     static func makeInvocation(
@@ -106,7 +115,25 @@ enum VoiceWakeForwarder {
     }
 
     static func forward(invocation: GatewayAgentInvocation) async -> Result<Void, VoiceWakeForwardError> {
-        let result = await GatewayConnection.shared.sendAgent(invocation)
+        if let failure = invocation.operatorAdmissionFailure { return .failure(.rpcFailed(failure)) }
+        let binding: MacGatewayOperatorBinding
+        do {
+            if let prepared = invocation.operatorBinding {
+                binding = prepared
+            } else {
+                binding = try await MacGatewayOperatorBinding.capture()
+            }
+        } catch {
+            return .failure(.rpcFailed("Reconnect the selected Gateway before sending voice input."))
+        }
+        guard binding.isCurrent else {
+            return .failure(.rpcFailed("The selected Gateway changed. Start voice input again."))
+        }
+        let result = await binding.connection.sendAgent(
+            invocation,
+            ifCurrentServerLease: binding.lease,
+            admission: binding.selection.admission,
+            ifCurrent: { binding.isCurrent })
 
         if result.ok {
             return .success(())
@@ -117,7 +144,7 @@ enum VoiceWakeForwarder {
         return .failure(.rpcFailed(message))
     }
 
-    private static func loadSessionRouteEntries() async -> [SessionRouteEntry] {
+    private static func loadSessionRouteEntries(binding: MacGatewayOperatorBinding) async -> [SessionRouteEntry] {
         do {
             let request = OpenClawChatGatewayRequests.sessionsList(
                 limit: 500,
@@ -125,7 +152,7 @@ enum VoiceWakeForwarder {
                 archived: false,
                 includeGlobal: false,
                 timeoutMs: 10000)
-            let data = try await GatewayConnection.shared.request(request)
+            let data = try await binding.request(request)
             return try JSONDecoder().decode(SessionListResponse.self, from: data).sessions
         } catch {
             self.logger.debug(

@@ -36,4 +36,6 @@ struct GatewayAgentInvocation: Equatable, Sendable {
     var timeoutSeconds: Int?
     var idempotencyKey: String = UUID().uuidString
     var voiceWakeTrigger: String?
+    var operatorBinding: MacGatewayOperatorBinding?
+    var operatorAdmissionFailure: String?
 }

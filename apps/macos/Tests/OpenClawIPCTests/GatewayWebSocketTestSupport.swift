@@ -218,7 +218,7 @@ extension NSLock {
     }
 }
 
-final class GatewayTestWebSocketTask: WebSocketTasking, @unchecked Sendable {
+final class GatewayTestWebSocketTask: WebSocketRequestSending, @unchecked Sendable {
     typealias ReceiveResult = Result<URLSessionWebSocketTask.Message, Error>
     typealias SendHook = @Sendable (GatewayTestWebSocketTask, URLSessionWebSocketTask.Message, Int) async throws -> Void
     typealias ReceiveHook = @Sendable (GatewayTestWebSocketTask, Int) async throws -> URLSessionWebSocketTask.Message
@@ -278,6 +278,19 @@ final class GatewayTestWebSocketTask: WebSocketTasking, @unchecked Sendable {
     }
 
     func send(_ message: URLSessionWebSocketTask.Message) async throws {
+        let sendIndex = self.enqueue(message)
+        try await self.sendHook?(self, message, sendIndex)
+    }
+
+    func sendRequest(_ message: URLSessionWebSocketTask.Message, lifetime: WebSocketRequestLifetime) async throws {
+        var sendIndex = 0
+        guard lifetime.performIfActive({ sendIndex = self.enqueue(message) }, onFinish: {}) else {
+            throw CancellationError()
+        }
+        try await self.sendHook?(self, message, sendIndex)
+    }
+
+    private func enqueue(_ message: URLSessionWebSocketTask.Message) -> Int {
         let sendIndex = self.lock.withLock { () -> Int in
             let current = self.sendCount
             self.sendCount += 1
@@ -286,7 +299,7 @@ final class GatewayTestWebSocketTask: WebSocketTasking, @unchecked Sendable {
         if sendIndex == 0, let id = GatewayWebSocketTestSupport.connectRequestID(from: message) {
             self.lock.withLock { self.connectRequestID = id }
         }
-        try await self.sendHook?(self, message, sendIndex)
+        return sendIndex
     }
 
     func receive() async throws -> URLSessionWebSocketTask.Message {

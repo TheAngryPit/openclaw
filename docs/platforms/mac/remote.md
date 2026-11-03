@@ -8,6 +8,45 @@ title: "Remote control"
 
 This flow lets the macOS app act as a full remote control for an OpenClaw Gateway running on another host (desktop/server). The app connects directly to trusted LAN/Tailnet Gateway URLs, or manages an SSH tunnel when the remote Gateway is loopback-only. Health checks, Voice Wake forwarding, and WebChat reuse the same remote configuration from the native **Connection** window.
 
+## Connect with your Tailscale account
+
+For a Gateway exposed through Tailscale Serve, open **Connection… → Gateways →
+Add Gateway**, enter its HTTPS `.ts.net` address, and select **Use my Tailscale
+account**. The saved connection uses the Gateway's verified Tailscale identity
+for native chat and Dashboard. It requires `tailscale` authentication, a personal
+recovery scope, and the canonical profile returned by `users.self`; it does not
+fall back to a shared token, password, or paired device grant.
+
+The Gateway selected in the app is also the destination for ordinary **Chat**,
+**Quick Chat**, Talk, Voice Wake, and push-to-talk messages. These actions capture that selection and
+its verified connection before resolving a session. Quick Chat uses the same
+connection for agents, recent sessions, model controls, sends, and embedded
+replies. Changing the selected Gateway or its personal account retires pending
+work and the embedded conversation; reopen Quick Chat after reconnecting. A
+failed personal connection never redirects a human send to the machine's Primary
+Gateway.
+
+Talk keeps that same selected connection for its configuration, realtime relay,
+native speech fallback, transcript history, and generated speech. Changing the
+selected Gateway or its personal account stops capture and retires the Talk
+session, pending traffic, and local transcript presentation. Reconnect the selected
+Gateway and restart Talk to continue. A failed personal admission cannot start
+Talk through Primary. Phase/status broadcasts continue to report app state through
+the machine connection.
+
+The address must use trusted TLS and contain no embedded credentials, query, or
+fragment. The native Dashboard challenge carries the same required method and
+recovery scope without exporting a device grant. Native chat stores local history
+under the canonical profile ID, so two accounts with the same display name stay
+separate. If the verified person or recovery scope changes, reconnect the saved
+Gateway to retire the old connection and open a new session.
+
+This saved Gateway remains separate from the primary Gateway's Mac capabilities,
+background node connection, and local Gateway lifecycle. A literal loopback
+address does not provide personal Tailscale continuation; use the Serve address
+for this personal connection. Token and password connections retain their
+existing behavior when this option is off.
+
 ## Connect with your browser
 
 Add a saved Gateway to use its dashboard and native chat with your personal

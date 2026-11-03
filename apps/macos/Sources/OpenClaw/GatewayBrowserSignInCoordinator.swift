@@ -86,12 +86,13 @@ final class GatewayBrowserSignInCoordinator {
             throw MacGatewayProfileError.profileNotFound
         }
         try Task.checkCancellation()
-        if profile.usesBrowserIdentity {
+        if profile.usesBrowserIdentity || profile.authKind == .personalTailscale {
             _ = try await GatewayBrowserSignInCoordinator.connect(
                 name: profile.profile.name,
                 address: profile.profile.url.absoluteString,
                 token: "",
                 password: "",
+                personalTailscaleAuthentication: profile.authKind == .personalTailscale ? true : nil,
                 progress: progress)
         } else {
             let binding = try await MacGatewayConnectionFleet.shared.binding(profileID: id)
@@ -119,14 +120,27 @@ final class GatewayBrowserSignInCoordinator {
         address: String,
         token: String,
         password: String,
+        personalTailscaleAuthentication: Bool? = nil,
         progress: GatewayBrowserSignInProgress) async throws -> MacGatewayProfile
     {
         let url = try self.gatewayURL(from: address)
+        if personalTailscaleAuthentication == true {
+            var components = URLComponents(string: address.contains("://") ? address : "https://\(address)")
+            if components?.scheme?.lowercased() == "https" { components?.scheme = "wss" }
+            guard let personalURL = components?.url else { throw MacGatewayProfileError.personalTailscaleURLRequired }
+            try MacGatewayProfileStore.validatePersonalTailscaleURL(personalURL)
+        }
         let store = MacGatewayProfileStore.shared
         await self.shared.cancelAutomaticRenewal(profileID: MacGatewayProfileStore.profileID(url: url))
         let attempt = try await store.beginBrowserSignIn(url: url)
         return try await self.finishSignIn(
-            name: name, token: token, password: password, attempt: attempt, progress: progress, automatic: false)
+            name: name,
+            token: token,
+            password: password,
+            attempt: attempt,
+            progress: progress,
+            automatic: false,
+            personalTailscaleAuthentication: personalTailscaleAuthentication)
     }
 
     private nonisolated static func finishSignIn(
@@ -135,7 +149,8 @@ final class GatewayBrowserSignInCoordinator {
         password: String,
         attempt: MacGatewayProfileStore.BrowserSignInAttempt,
         progress: GatewayBrowserSignInProgress,
-        automatic: Bool) async throws -> MacGatewayProfile
+        automatic: Bool,
+        personalTailscaleAuthentication: Bool? = nil) async throws -> MacGatewayProfile
     {
         let store = MacGatewayProfileStore.shared
         let url = attempt.url
@@ -144,6 +159,17 @@ final class GatewayBrowserSignInCoordinator {
             do {
                 try Task.checkCancellation()
                 let hasCredentials = token.nonEmpty != nil || password.nonEmpty != nil
+                let savedPersonal = try? await store.endpoint(profileID: attempt.profileID)
+                    .personalTailscaleAuthentication
+                let personal = personalTailscaleAuthentication ?? (!hasCredentials && savedPersonal == true)
+                if personal {
+                    guard !automatic else { throw CancellationError() }
+                    let profile = try await store.saveConnection(
+                        name: name, token: nil, password: nil, personalTailscaleAuthentication: true, attempt: attempt)
+                    let connection = await MacGatewayConnectionFleet.shared.connection(profileID: profile.id)
+                    _ = try await connection.acquireServerLease()
+                    return profile
+                }
                 if !hasCredentials, url.scheme == "wss" {
                     guard var browserURL = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
                         throw MacGatewayProfileError.invalidURL
@@ -162,7 +188,12 @@ final class GatewayBrowserSignInCoordinator {
                 }
                 try Task.checkCancellation()
                 guard !automatic else { throw CloudflareAccessLogin.LoginError.invalidApplication }
-                return try await store.saveConnection(name: name, token: token, password: password, attempt: attempt)
+                return try await store.saveConnection(
+                    name: name,
+                    token: token,
+                    password: password,
+                    personalTailscaleAuthentication: personalTailscaleAuthentication,
+                    attempt: attempt)
             } catch {
                 await store.cancelBrowserSignIn(attempt)
                 throw error

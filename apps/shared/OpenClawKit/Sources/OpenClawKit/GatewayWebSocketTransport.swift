@@ -20,13 +20,67 @@ extension WebSocketTasking {
 
 extension URLSessionWebSocketTask: WebSocketTasking {}
 
+/// Orders an operation owner's retirement with the transport's synchronous enqueue.
+/// Retirement rejects future frames without cancelling requests already dispatched.
+public final class WebSocketRequestAdmission: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = true
+    private var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
+
+    public init() {}
+
+    public var isActive: Bool {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.active
+    }
+
+    public func performIfActive(_ enqueue: () -> Bool) -> Bool {
+        self.lock.lock()
+        defer { self.lock.unlock() }
+        return self.active && enqueue()
+    }
+
+    public func retire() {
+        self.lock.lock()
+        self.active = false
+        let observers = self.observers.values
+        self.observers.removeAll()
+        self.lock.unlock()
+        observers.forEach { $0.finish() }
+    }
+
+    public func retirement() -> AsyncStream<Void> {
+        AsyncStream { continuation in
+            let id = UUID()
+            self.lock.lock()
+            if self.active { self.observers[id] = continuation } else { continuation.finish() }
+            self.lock.unlock()
+            continuation.onTermination = { [weak self] _ in
+                guard let self else { return }
+                self.lock.lock()
+                self.observers[id] = nil
+                self.lock.unlock()
+            }
+        }
+    }
+}
+
 /// Carries the native request owner's completion across transports that retain their own RPC state.
 public final class WebSocketRequestLifetime: @unchecked Sendable {
     private let lock = NSLock()
     private var finished = false
     private var onFinish: (@Sendable () -> Void)?
 
-    public init() {}
+    private let admission: WebSocketRequestAdmission?
+
+    public init(admission: WebSocketRequestAdmission? = nil) {
+        self.admission = admission
+    }
+
+    var requiresSynchronousEnqueue: Bool {
+        self.admission != nil
+    }
 
     // periphery:ignore - External transports use this to order send admission with cancellation.
     /// Enqueue the request while holding the same lock that orders its retirement.
@@ -35,6 +89,13 @@ public final class WebSocketRequestLifetime: @unchecked Sendable {
         _ action: () -> Void,
         onFinish: @escaping @Sendable () -> Void) -> Bool
     {
+        if let admission {
+            return admission.performIfActive { self.enqueueIfUnfinished(action, onFinish: onFinish) }
+        }
+        return self.enqueueIfUnfinished(action, onFinish: onFinish)
+    }
+
+    private func enqueueIfUnfinished(_ action: () -> Void, onFinish: @escaping @Sendable () -> Void) -> Bool {
         self.lock.lock()
         defer { self.lock.unlock() }
         guard !self.finished else { return false }
@@ -103,7 +164,17 @@ public struct WebSocketTaskBox: @unchecked Sendable {
     {
         if let transport = self.task as? any WebSocketRequestSending {
             try await transport.sendRequest(message, lifetime: lifetime)
+        } else if let task = self.task as? URLSessionWebSocketTask {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let admitted = lifetime.performIfActive {
+                    task.send(message) { error in
+                        ThrowingContinuationSupport.resumeVoid(continuation, error: error)
+                    }
+                } onFinish: {}
+                if !admitted { continuation.resume(throwing: CancellationError()) }
+            }
         } else {
+            guard !lifetime.requiresSynchronousEnqueue else { throw CancellationError() }
             try await self.task.send(message)
         }
     }

@@ -3,6 +3,56 @@ import OpenClawChatUI
 import OpenClawKit
 import OpenClawProtocol
 
+private actor RealtimeTalkOperatorRequests {
+    private enum CreatedSession {
+        case open
+        case closing(Task<Data, Error>)
+    }
+
+    private let binding: MacGatewayOperatorBinding
+    private var createdSessions: [String: CreatedSession] = [:]
+
+    init(binding: MacGatewayOperatorBinding) {
+        self.binding = binding
+    }
+
+    func request(method: String, params: [String: AnyCodable]?, timeoutMs: Double) async throws -> Data {
+        switch method {
+        case "talk.session.create":
+            try Task.checkCancellation()
+            let creation = Task { [binding] in
+                try await binding.connection.createRealtimeTalkSession(
+                    params: params, timeoutMs: timeoutMs, operatorBinding: binding)
+            }
+            let data = try await creation.value
+            let result = try JSONDecoder().decode(TalkSessionCreateResult.self, from: data)
+            if let id = result.relaysessionid?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty {
+                if self.createdSessions[id] == nil { self.createdSessions[id] = .open }
+            }
+            return data
+        case "talk.session.close":
+            guard let params, let id = params["sessionId"]?.stringValue,
+                  let receipt = self.createdSessions[id],
+                  Set(params.keys).isSubset(of: ["sessionId", "disposition"]),
+                  params["disposition"] == nil || params["disposition"]?.stringValue == "detach"
+            else { throw OpenClawChatTransportSendError.notDispatched }
+            if case let .closing(close) = receipt { return try await close.value }
+            let close = Task { [binding] in
+                try await binding.connection.request(
+                    method: "talk.session.close",
+                    params: params,
+                    timeoutMs: timeoutMs,
+                    ifCurrentServerLease: binding.lease)
+            }
+            self.createdSessions[id] = .closing(close)
+            return try await close.value
+        default:
+            return try await self.binding.request(OpenClawChatGatewayRequest(
+                method: method, params: params ?? [:], timeoutMs: timeoutMs))
+        }
+    }
+}
+
 private actor RealtimeTalkEventIterator {
     private var iterator: AsyncStream<GatewayConnection.PushDelivery>.Iterator
 
@@ -53,13 +103,23 @@ extension GatewayConnection {
     ///
     /// A route replacement between config resolution and session creation must
     /// fail this attempt instead of silently moving the relay to a new owner.
-    func acquireRealtimeTalkBootstrap() async throws -> RealtimeTalkBootstrap {
-        let lease = try await self.acquireServerLease()
+    func acquireRealtimeTalkBootstrap(
+        operatorBinding: MacGatewayOperatorBinding? = nil) async throws -> RealtimeTalkBootstrap
+    {
+        let lease: ServerLease
+        if let operatorBinding {
+            guard operatorBinding.isCurrent, operatorBinding.connection === self else { throw CancellationError() }
+            lease = operatorBinding.lease
+        } else {
+            lease = try await self.acquireServerLease()
+        }
         let data = try await self.request(
             method: Method.talkConfig.rawValue,
             params: [:],
             timeoutMs: 8000,
-            ifCurrentServerLease: lease)
+            ifCurrentServerLease: lease,
+            admission: operatorBinding?.selection.admission,
+            ifCurrent: { operatorBinding?.isCurrent ?? true })
         let snapshot = try JSONDecoder().decode(ConfigSnapshot.self, from: data)
         guard await self.isCurrentServerLease(lease) else {
             throw OpenClawChatTransportSendError.notDispatched
@@ -67,7 +127,7 @@ extension GatewayConnection {
         let configuredSessionKey = snapshot.config?["session"]?.dictionaryValue?["mainKey"]?
             .stringValue?.nonEmpty
         return RealtimeTalkBootstrap(
-            transport: self.realtimeTalkTransport(ifCurrentServerLease: lease),
+            transport: self.realtimeTalkTransport(ifCurrentServerLease: lease, operatorBinding: operatorBinding),
             configSnapshot: snapshot,
             sessionKey: configuredSessionKey ?? "main")
     }
@@ -83,9 +143,11 @@ extension GatewayConnection {
     }
 
     private func realtimeTalkTransport(
-        ifCurrentServerLease lease: ServerLease) -> RealtimeTalkRelayTransport
+        ifCurrentServerLease lease: ServerLease,
+        operatorBinding: MacGatewayOperatorBinding? = nil) -> RealtimeTalkRelayTransport
     {
-        RealtimeTalkRelayTransport(
+        let operatorRequests = operatorBinding.map { RealtimeTalkOperatorRequests(binding: $0) }
+        return RealtimeTalkRelayTransport(
             subscribeServerEvents: { bufferingNewest in
                 let subscription = await self.makeRealtimeTalkSubscription(
                     bufferingNewest: bufferingNewest,
@@ -93,20 +155,30 @@ extension GatewayConnection {
                 let iterator = RealtimeTalkEventIterator(stream: subscription.stream)
                 // Pull directly from the owning queue; prefetching adds another buffer and stale frames.
                 return AsyncStream(
-                    unfolding: { await iterator.next() },
+                    unfolding: {
+                        let event = await iterator.next()
+                        guard operatorBinding?.isCurrent ?? true else { return nil }
+                        return event
+                    },
                     onCancel: { [continuation = subscription.continuation] in
                         continuation.finish()
                     })
             },
             request: { method, params, timeoutMs in
-                try await self.request(
+                if let operatorRequests {
+                    return try await operatorRequests.request(method: method, params: params, timeoutMs: timeoutMs)
+                }
+                return try await self.request(
                     method: method,
                     params: params,
                     timeoutMs: timeoutMs,
-                    ifCurrentServerLease: lease)
+                    ifCurrentServerLease: lease,
+                    admission: operatorBinding?.selection.admission,
+                    ifCurrent: { operatorBinding?.isCurrent ?? true })
             },
             isCurrent: {
-                await self.isCurrentServerLease(lease)
+                guard operatorBinding?.isCurrent ?? true else { return false }
+                return await self.isCurrentServerLease(lease)
             },
             supportsCloseDisposition: {
                 await self.supportsServerCapability(

@@ -247,7 +247,8 @@ extension DashboardManager {
                 routeAuthority: endpoint.routeAuthority,
                 deviceAuthGatewayID: endpoint.deviceAuthGatewayID,
                 revision: endpoint.revision,
-                browserSession: browserSession)
+                browserSession: browserSession,
+                personalTailscaleAuthentication: endpoint.personalTailscaleAuthentication)
         }
         // Device grants remain challenge-only. Shared startup credentials retain
         // the released UI contract, but come only from the native accepted binding.

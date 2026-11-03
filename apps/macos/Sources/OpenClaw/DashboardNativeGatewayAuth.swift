@@ -18,11 +18,12 @@ struct DashboardNativeGatewayAuth: Sendable {
         case token(String)
         case password(String)
         case deviceToken(String)
+        case personalTailscale(recoveryScope: String)
 
         var signatureToken: String? {
             switch self {
             case let .token(value), let .deviceToken(value): value
-            case .password: nil
+            case .password, .personalTailscale: nil
             }
         }
 
@@ -31,6 +32,7 @@ struct DashboardNativeGatewayAuth: Sendable {
             case let .token(value): ["token": value]
             case let .password(value): ["password": value]
             case let .deviceToken(value): ["deviceToken": value]
+            case .personalTailscale: [:]
             }
         }
     }
@@ -59,12 +61,16 @@ struct DashboardNativeGatewayAuth: Sendable {
         guard let device = GatewayDeviceAuthPayload.signedDeviceDictionary(
             payload: payload, identity: identity, signedAtMs: signedAt, nonce: nonce)
         else { throw CancellationError() }
-        let result: [String: OpenClawProtocol.AnyCodable] = [
+        var result: [String: OpenClawProtocol.AnyCodable] = [
             "client": .init(client),
             "scopes": .init(scopes),
             "auth": .init(credential.auth),
             "device": .init(device),
         ]
+        if case let .personalTailscale(recoveryScope) = credential {
+            result["requiredAuthMethod"] = .init("tailscale")
+            result["expectedRecoveryScope"] = .init(recoveryScope)
+        }
         return try JSONEncoder().encode(result)
     }
 }

@@ -37,7 +37,14 @@ actor TalkModeRuntime {
     let state: AppVoiceRuntime.State
     let controller: AppVoiceRuntime.Controller
     let dependencies: Dependencies
-    let gateway: GatewayConnection
+    let gateway: GatewayConnection?
+    let usesSelectedOperator: Bool
+    var operatorBinding: MacGatewayOperatorBinding?
+    var operatorSnapshot: MacGatewaySelectionPreferences.Snapshot?
+    var operatorRetirementTask: Task<Void, Never>?
+    var operatorConnectionTask: Task<Void, Never>?
+    let operatorSelection: @MainActor @Sendable () -> MacGatewaySelectionPreferences
+    let operatorConnectionProvider: @Sendable (DashboardGatewayTarget) async -> GatewayConnection
 
     enum PlaybackPlan: Equatable {
         case elevenLabsThenSystemVoice(apiKey: String, voiceId: String)
@@ -102,7 +109,7 @@ actor TalkModeRuntime {
     var pendingRealtimeRelayStartLifecycleGeneration: Int?
     var realtimeRestartGeneration: UInt64 = 0
     var realtimeRestartTask: Task<Void, Never>?
-    let realtimeTalkBootstrapProvider: RealtimeTalkBootstrapProvider
+    let realtimeTalkBootstrapProvider: RealtimeTalkBootstrapProvider?
     #if DEBUG
     var recognitionCleanupProbe: (@Sendable () -> Void)?
     #endif
@@ -116,25 +123,48 @@ actor TalkModeRuntime {
     private let speechBoostFactor: Double = 6.0
 
     init(
-        realtimeTalkBootstrapProvider: @escaping RealtimeTalkBootstrapProvider = AppVoiceRuntime.liveBootstrap,
+        realtimeTalkBootstrapProvider: RealtimeTalkBootstrapProvider? = nil,
         state: @escaping AppVoiceRuntime.State = { AppStateStore.shared },
         controller: @escaping AppVoiceRuntime.Controller = { TalkModeController.shared },
         dependencies: Dependencies = .live,
-        gateway: GatewayConnection = .shared)
+        gateway: GatewayConnection? = nil,
+        operatorSelection: @escaping @MainActor @Sendable () -> MacGatewaySelectionPreferences = { .shared },
+        operatorConnectionProvider: @escaping @Sendable (DashboardGatewayTarget) async -> GatewayConnection = {
+            await DashboardManager.gatewayConnection(for: $0)
+        })
     {
         self.realtimeTalkBootstrapProvider = realtimeTalkBootstrapProvider
         self.state = state
         self.controller = controller
         self.dependencies = dependencies
         self.gateway = gateway
+        self.usesSelectedOperator = gateway == nil && realtimeTalkBootstrapProvider == nil
+        self.operatorSelection = operatorSelection
+        self.operatorConnectionProvider = operatorConnectionProvider
     }
 
     // MARK: - Lifecycle
+
+    deinit {
+        self.operatorRetirementTask?.cancel()
+        self.operatorConnectionTask?.cancel()
+    }
+
+    func clearTalkOperatorState() {
+        self.config = nil
+        self.currentVoiceId = nil
+        self.modelOverride = nil
+        self.voiceOverrideActive = false
+        self.fallbackVoiceId = nil
+        self.lastSpokenText = nil
+        self.lastInterruptedAtSeconds = nil
+    }
 
     func setEnabled(_ enabled: Bool) async {
         guard enabled != self.isEnabled else { return }
         self.isEnabled = enabled
         self.lifecycleGeneration &+= 1
+        self.operatorSnapshot = nil
         resetRealtimeRecoveryState()
         if enabled {
             await start()
@@ -236,7 +266,9 @@ actor TalkModeRuntime {
     }
 
     func isCurrent(_ generation: Int) -> Bool {
-        generation == self.lifecycleGeneration && self.isEnabled
+        generation == self.lifecycleGeneration && self.isEnabled &&
+            (self.operatorSnapshot?.isCurrent ?? true) &&
+            (self.operatorBinding?.isCurrent ?? true)
     }
 
     func detachResourcesForRealtimeStop() -> RealtimeTalkRelaySession? {
@@ -564,26 +596,28 @@ extension TalkModeRuntime {
         await reloadConfig()
         guard self.isCurrent(gen) else { return }
         let prompt = self.buildPrompt(transcript: transcript)
-        let activeSessionKey = await self.dependencies.selectedSession()
+        let activeSessionKey = await self.selectedTalkSession()
         let sessionKey: String = if let activeSessionKey {
             activeSessionKey
         } else {
-            await self.gateway.mainSessionKey()
+            await (try? self.talkMainSessionKey()) ?? "main"
         }
         let runId = UUID().uuidString
 
         do {
-            let route = try await self.gateway.captureRequiredRoute()
+            let route = try await self.captureTalkRoute()
             guard self.isCurrent(gen), !Task.isCancelled else { return }
             let response = try await withGatewayStartupAdmission(method: "chat.send") {
                 guard self.isCurrent(gen) else { throw CancellationError() }
-                return try await self.gateway.chatSend(
+                let gateway = try self.requireTalkGateway()
+                return try await gateway.chatSend(
                     sessionKey: sessionKey,
                     message: prompt,
                     thinking: nil,
                     idempotencyKey: runId,
                     attachments: [],
-                    ifCurrentRoute: route)
+                    ifCurrentRoute: route,
+                    operatorBinding: self.operatorBinding)
             }
             guard self.isCurrent(gen) else { return }
             let normalizedStatus = ChatSendStatus.normalized(response.status)
@@ -595,7 +629,7 @@ extension TalkModeRuntime {
                 return
             }
 
-            let snapshot = await self.gateway.lastSnapshot
+            let snapshot = await self.talkSnapshot()
             let bootID = snapshot?.server["bootId"]?.value as? String
             let assistantText = await self.waitForRunAssistantText(
                 sessionKey: sessionKey,
@@ -604,7 +638,7 @@ extension TalkModeRuntime {
                 route: route,
                 bootID: bootID,
                 terminalAck: ChatSendStatus.acceptance(of: response.status) == .terminalSuccess)
-            let currentRoute = await self.gateway.isCurrentRoute(route)
+            let currentRoute = await self.isCurrentTalkRoute(route)
             let bootChanged = await self.gatewayBootChanged(from: bootID)
             guard self.isCurrent(gen), !Task.isCancelled else { return }
             guard currentRoute, !bootChanged else {
@@ -669,7 +703,7 @@ extension TalkModeRuntime {
         while !completed, self.isCurrent(generation), !Task.isCancelled {
             let request = OpenClawChatGatewayRequests.agentWait(runID: runId, timeoutMs: 5000)
             do {
-                let data = try await self.gateway.request(request, ifCurrentRoute: route)
+                let data = try await self.talkRequest(request, ifCurrentRoute: route, generation: generation)
                 guard self.isCurrent(generation), !Task.isCancelled else { return nil }
                 if await self.gatewayBootChanged(from: bootID) { return nil }
                 switch try OpenClawChatGatewayPayloadCodec.decodeAgentWaitObservation(data) {
@@ -686,7 +720,7 @@ extension TalkModeRuntime {
                         // authoritative history reports no active or pending input custody.
                         if absentCustody { return nil }
                         absentCustody = await (try? self.runCustodyIsAbsent(
-                            sessionKey: sessionKey, runId: runId, route: route)) == true
+                            sessionKey: sessionKey, runId: runId, route: route, generation: generation)) == true
                     } else {
                         absentCustody = false
                     }
@@ -707,7 +741,7 @@ extension TalkModeRuntime {
                 absentCustody = false
                 self.logger.warning("talk run observation interrupted: \(error.localizedDescription, privacy: .public)")
                 guard self.isCurrent(generation), !Task.isCancelled,
-                      await self.gateway.isCurrentRoute(route) else { return nil }
+                      await self.isCurrentTalkRoute(route) else { return nil }
                 do { try await Task.sleep(for: .milliseconds(250)) } catch { return nil }
             }
         }
@@ -723,7 +757,7 @@ extension TalkModeRuntime {
     }
 
     private func gatewayBootChanged(from bootID: String?) async -> Bool {
-        let snapshot = await self.gateway.lastSnapshot
+        let snapshot = await self.talkSnapshot()
         guard let bootID, !bootID.isEmpty,
               let currentBootID = snapshot?.server["bootId"]?.value as? String,
               !currentBootID.isEmpty else { return false }
@@ -743,11 +777,11 @@ extension TalkModeRuntime {
     }
 
     private func runCustodyIsAbsent(
-        sessionKey: String, runId: String, route: GatewayConnection.Route) async throws -> Bool
+        sessionKey: String, runId: String, route: GatewayConnection.Route, generation: Int) async throws -> Bool
     {
         let request = OpenClawChatGatewayRequests.history(
             sessionKey: sessionKey, agentID: nil, inputRunIDs: [runId])
-        let data = try await self.gateway.request(request, ifCurrentRoute: route)
+        let data = try await self.talkRequest(request, ifCurrentRoute: route, generation: generation)
         let custody = try JSONDecoder().decode(TalkRunCustody.self, from: data)
         guard let sessionID = custody.sessionId, !sessionID.isEmpty,
               custody.sessionInfo?.hasActiveRun == false,
@@ -765,10 +799,12 @@ extension TalkModeRuntime {
     {
         let deadline = Date().addingTimeInterval(12)
         while Date() < deadline, self.isCurrent(generation), !Task.isCancelled {
-            if let text = await latestAssistantText(sessionKey: sessionKey, runId: runId, route: route) {
+            if let text = await latestAssistantText(
+                sessionKey: sessionKey, runId: runId, route: route, generation: generation)
+            {
                 return text
             }
-            guard await self.gateway.isCurrentRoute(route) else { return nil }
+            guard await self.isCurrentTalkRoute(route) else { return nil }
             do { try await Task.sleep(for: .milliseconds(300)) } catch { return nil }
         }
         return nil
@@ -777,11 +813,17 @@ extension TalkModeRuntime {
     private func latestAssistantText(
         sessionKey: String,
         runId: String,
-        route: GatewayConnection.Route) async -> String?
+        route: GatewayConnection.Route,
+        generation: Int) async -> String?
     {
         do {
-            let history = try await self.gateway.chatHistory(
-                sessionKey: sessionKey, inputRunIDs: [runId], ifCurrentRoute: route)
+            guard self.isCurrent(generation) else { return nil }
+            let gateway = try self.requireTalkGateway()
+            let history = try await gateway.chatHistory(
+                sessionKey: sessionKey,
+                inputRunIDs: [runId],
+                ifCurrentRoute: route,
+                operatorBinding: self.operatorBinding)
             guard var assistant = OpenClawChatHistoryPresentation.completedReply(
                 from: history.messages ?? [],
                 runID: runId,
@@ -790,7 +832,7 @@ extension TalkModeRuntime {
                 guard let messageID = assistant.transcriptMessageID, !messageID.isEmpty else { return nil }
                 let request = try MacGatewayChatTransport.fullMessageRequest(
                     sessionKey: sessionKey, agentID: nil, messageID: messageID)
-                let data = try await self.gateway.request(request, ifCurrentRoute: route)
+                let data = try await self.talkRequest(request, ifCurrentRoute: route, generation: generation)
                 let result = try JSONDecoder().decode(ChatMessageGetResult.self, from: data)
                 guard result.ok, let encoded = result.message,
                       let full = try? GatewayPayloadDecoding.decode(encoded, as: OpenClawChatMessage.self),
@@ -1061,16 +1103,19 @@ extension TalkModeRuntime {
     }
 
     private func playGatewayTalkSpeak(input: TalkPlaybackInput) async throws {
+        guard self.isCurrent(input.generation), !Task.isCancelled else { throw CancellationError() }
         let params = Self.makeTalkSpeakParams(
             text: input.cleanedText,
             voiceId: input.voiceId,
             modelId: self.modelOverride ?? self.config?.modelId,
             outputFormat: self.config?.outputFormat,
             directive: input.directive)
-        let result: TalkSpeakResult = try await self.gateway.requestDecoded(
-            method: .talkSpeak,
+        let data = try await self.talkRequest(OpenClawChatGatewayRequest(
+            method: Method.talkSpeak.rawValue,
             params: params,
-            timeoutMs: max(30000, input.synthTimeoutSeconds * 1000 + 5000))
+            timeoutMs: max(30000, input.synthTimeoutSeconds * 1000 + 5000)), generation: input.generation)
+        let result = try JSONDecoder().decode(TalkSpeakResult.self, from: data)
+        guard self.isCurrent(input.generation), !Task.isCancelled else { throw CancellationError() }
         guard let audioData = Data(base64Encoded: result.audiobase64), !audioData.isEmpty else {
             throw NSError(domain: "TalkSpeak", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "gateway talk.speak returned empty audio",
@@ -1098,6 +1143,7 @@ extension TalkModeRuntime {
         await self.dependencies.stopSystem()
         // Use app locale as fallback when no explicit language is set (e.g. system voice without ElevenLabs directive).
         guard let appLocale = await MainActor.run(body: { self.state()?.voiceWakeLocaleID }) else { return }
+        guard self.isCurrent(input.generation), !Task.isCancelled else { return }
         let ttsLanguage = input.language ?? appLocale
         do {
             try await TalkSystemSpeechSynthesizer.shared.speak(
@@ -1136,6 +1182,7 @@ extension TalkModeRuntime {
             await self.dependencies.stopMLX()
             throw TalkMLXSpeechSynthesizer.SynthesizeError.timedOut
         }
+        guard self.isCurrent(input.generation), !Task.isCancelled else { throw CancellationError() }
         let result = await playPCM(
             stream: playbackStream.chunks,
             sampleRate: playbackStream.sampleRate)
@@ -1147,16 +1194,20 @@ extension TalkModeRuntime {
     }
 
     private func beginSpeaking(generation: Int) async -> Bool {
+        guard self.isCurrent(generation), !Task.isCancelled else { return false }
         if self.config?.interruptOnSpeech ?? true {
             guard await self.startRecognition(lifecycleGeneration: generation),
                   self.isCurrent(generation), !self.isPaused else { return false }
         }
+        guard self.isCurrent(generation), !Task.isCancelled else { return false }
         await MainActor.run { self.controller()?.updatePhase(.speaking) }
+        guard self.isCurrent(generation), !Task.isCancelled else { return false }
         self.phase = .speaking
         return true
     }
 
     private func resolveVoiceId(preferred: String?, apiKey: String) async -> String? {
+        let generation = self.lifecycleGeneration
         let trimmed = preferred?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !trimmed.isEmpty {
             if let resolved = TalkVoiceAliases.resolve(trimmed, aliases: self.config?.snapshot.voiceAliases ?? [:]) {
@@ -1170,6 +1221,7 @@ extension TalkModeRuntime {
 
         do {
             let voices = try await ElevenLabsTTSClient(apiKey: apiKey).listVoices()
+            guard self.isCurrent(generation), !Task.isCancelled else { return nil }
             guard let first = voices.first else {
                 self.ttsLogger.error("elevenlabs voices list empty")
                 return nil
@@ -1329,11 +1381,13 @@ extension TalkModeRuntime {
     }
 
     func fetchTalkConfig() async -> TalkModeGatewayConfigState {
+        let generation = self.lifecycleGeneration
         do {
-            let snap: ConfigSnapshot = try await self.gateway.requestDecoded(
-                method: .talkConfig,
+            let data = try await self.talkRequest(OpenClawChatGatewayRequest(
+                method: Method.talkConfig.rawValue,
                 params: ["includeSecrets": AnyCodable(true)],
-                timeoutMs: 8000)
+                timeoutMs: 8000), generation: generation)
+            let snap = try JSONDecoder().decode(ConfigSnapshot.self, from: data)
             return self.parseTalkConfig(snap)
         } catch {
             return self.fallbackTalkConfig()
@@ -1343,7 +1397,9 @@ extension TalkModeRuntime {
     // MARK: - Config
 
     func reloadConfig() async {
+        let generation = self.lifecycleGeneration
         let cfg = await fetchTalkConfig()
+        guard self.isCurrent(generation) else { return }
         await self.applyTalkConfig(cfg)
         self.macOSRealtimeRelayOptIn = await MainActor.run {
             self.state()?.talkRealtimeRelayEnabled ?? false
@@ -1351,11 +1407,15 @@ extension TalkModeRuntime {
     }
 
     func applyTalkConfig(_ cfg: TalkModeGatewayConfigState) async {
+        let generation = self.lifecycleGeneration
+        let binding = self.operatorBinding
         guard let locale = await MainActor.run(body: { () -> String? in
+            guard binding?.isCurrent ?? true else { return nil }
             guard let state = self.state() else { return nil }
             state.seamColorHex = cfg.seamColorHex
             return state.voiceWakeLocaleID
         }) else { return }
+        guard generation == self.lifecycleGeneration, binding?.isCurrent ?? true else { return }
         self.commitTalkConfig(cfg, locale: locale)
     }
 

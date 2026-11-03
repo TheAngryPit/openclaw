@@ -13,17 +13,36 @@ final class VoiceSessionCoordinator {
     private let prepareForward: AppVoiceRuntime.PrepareForward
     private let forward: AppVoiceRuntime.Forward
     private let didDismiss: @MainActor @Sendable (UUID) -> Void
+    private let operatorSelection: MacGatewaySelectionPreferences
+    @ObservationIgnored private var selectionObserver: NSObjectProtocol?
 
     init(
         overlay: VoiceWakeOverlayController,
         prepareForward: @escaping AppVoiceRuntime.PrepareForward,
         forward: @escaping AppVoiceRuntime.Forward,
-        didDismiss: @escaping @MainActor @Sendable (UUID) -> Void)
+        didDismiss: @escaping @MainActor @Sendable (UUID) -> Void,
+        operatorSelection: MacGatewaySelectionPreferences = .shared)
     {
         self.overlay = overlay
         self.prepareForward = prepareForward
         self.forward = forward
         self.didDismiss = didDismiss
+        self.operatorSelection = operatorSelection
+        self.selectionObserver = NotificationCenter.default.addObserver(
+            forName: MacGatewaySelectionPreferences.didChangeNotification, object: operatorSelection, queue: .main)
+        { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let session = self.session else { return }
+                SimpleTaskSupport.stop(task: &self.sendTask)
+                self.session?.sendState = .failed
+                self.overlay.failSendUI(token: session.token, message: "Gateway changed. Start voice input again.")
+            }
+        }
+    }
+
+    isolated deinit {
+        self.sendTask?.cancel()
+        if let selectionObserver { NotificationCenter.default.removeObserver(selectionObserver) }
     }
 
     enum SendReason: String { case explicit, autoSendImmediate, autoSendDelay, pushToTalk }
@@ -31,6 +50,7 @@ final class VoiceSessionCoordinator {
 
     private struct Session {
         let token: UUID
+        let selection: MacGatewaySelectionPreferences.Snapshot
         var text: String
         var sendChime: VoiceWakeChime
         var voiceWakeTrigger: String?
@@ -53,6 +73,7 @@ final class VoiceSessionCoordinator {
         let token = UUID()
         self.session = Session(
             token: token,
+            selection: self.operatorSelection.snapshot(),
             text: text,
             sendChime: .none,
             voiceWakeTrigger: voiceWakeTrigger)
@@ -100,6 +121,10 @@ final class VoiceSessionCoordinator {
     @discardableResult
     func sendNow(token: UUID, reason: SendReason = .explicit) -> Task<Void, Never>? {
         guard let session, session.token == token else { return nil }
+        guard session.selection.isCurrent else {
+            self.overlay.failSendUI(token: token, message: "Gateway changed. Start voice input again.")
+            return nil
+        }
         switch session.sendState {
         case .sending, .accepted: return nil
         case .failed where reason != .explicit: return nil
@@ -117,7 +142,7 @@ final class VoiceSessionCoordinator {
         let task = Task { [weak self, prepareForward, forward] in
             guard !Task.isCancelled else { return }
             var invocation = await prepareForward(text, session.voiceWakeTrigger)
-            guard let self, !Task.isCancelled, self.session?.token == token else { return }
+            guard let self, !Task.isCancelled, self.session?.token == token, session.selection.isCurrent else { return }
             if let previous = session.invocation {
                 let freshKey = invocation.idempotencyKey
                 invocation.idempotencyKey = previous.idempotencyKey
@@ -126,7 +151,7 @@ final class VoiceSessionCoordinator {
             }
             self.session?.invocation = invocation
             let result = await forward(invocation)
-            guard !Task.isCancelled, self.session?.token == token else { return }
+            guard !Task.isCancelled, self.session?.token == token, session.selection.isCurrent else { return }
             self.sendTask = nil
             switch result {
             case .success:

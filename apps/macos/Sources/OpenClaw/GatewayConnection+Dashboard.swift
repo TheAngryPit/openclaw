@@ -5,7 +5,9 @@ extension GatewayConnection {
     /// The authenticated hello owns browser sign-in discovery; no admin-only
     /// config read or endpoint guess may substitute for that server's identity.
     func controlUiBrowserIdentityURL(config: Config) async throws -> URL? {
-        guard let advertised = try await self.currentDashboardHello(config: config)?.snapshot.controluiidentityurl
+        let hello = try await self.currentDashboardHello(config: config)
+        if self.configuredPersonalTailscaleAuthentication { return nil }
+        guard let advertised = hello?.snapshot.controluiidentityurl
         else { return nil }
         guard let components = URLComponents(string: advertised),
               components.scheme?.lowercased() == "https",

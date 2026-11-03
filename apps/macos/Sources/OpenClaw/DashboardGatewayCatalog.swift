@@ -55,6 +55,7 @@ struct MacGatewayCatalogProfile: Equatable, Sendable {
         case token
         case password
         case browser
+        case personalTailscale
     }
 
     let profile: MacGatewayProfile
@@ -95,7 +96,8 @@ enum DashboardGatewayCatalog {
             : nil
         let duplicate = canonicalPrimaryURL.flatMap { primaryURL in
             profiles.first {
-                !$0.usesBrowserIdentity && (try? MacGatewayProfileStore.canonicalURL($0.profile.url)) == primaryURL
+                !$0.usesBrowserIdentity && $0.authKind != .personalTailscale &&
+                    (try? MacGatewayProfileStore.canonicalURL($0.profile.url)) == primaryURL
             }
         }
         let primaryName: String = if mode == .local {

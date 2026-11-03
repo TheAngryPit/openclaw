@@ -528,14 +528,20 @@ public final class RealtimeTalkRelaySession {
         if let serverClose, serverClose.sessionId == relaySessionId {
             return serverClose.task
         }
-        let task = Task { [transport] in
+        let task = Task { [transport, logger] in
             var payload = ["sessionId": AnyCodable(relaySessionId)]
             if detachAcceptedWork, await transport.supportsCloseDisposition() {
                 payload["disposition"] = AnyCodable("detach")
             }
-            let response = try await transport.request("talk.session.close", payload, 8000)
-            let result = try JSONDecoder().decode(TalkSessionOkResult.self, from: response)
-            guard result.ok else { throw URLError(.badServerResponse) }
+            do {
+                let response = try await transport.request("talk.session.close", payload, 8000)
+                let result = try JSONDecoder().decode(TalkSessionOkResult.self, from: response)
+                guard result.ok else { throw URLError(.badServerResponse) }
+            } catch {
+                let message = Self.safeLogMessage(error.localizedDescription)
+                logger.warning("talk realtime close was not confirmed: \(message, privacy: .public)")
+                throw error
+            }
         }
         self.serverClose = (relaySessionId, task)
         return task
@@ -741,7 +747,7 @@ extension RealtimeTalkRelaySession {
             return
         }
         self.onStatus("Ready")
-        self.close(sendClose: false)
+        self.close(sendClose: true)
         self.onTermination(.eventStreamEnded)
     }
 

@@ -84,16 +84,17 @@ final class QuickChatController: NSObject {
         chatOpener: @escaping ChatOpener = { sessionKey, agentID in
             AppNavigationActions.openChat(sessionKey: sessionKey, agentID: agentID)
         },
-        recentSessionsProvider: @escaping RecentSessionsProvider = {
-            try await SessionLoader.loadSnapshot(limit: 5).rows
-        },
-        replyViewModelFactory: @escaping QuickChatReplyBinding.ViewModelFactory = QuickChatReplyBinding.makeViewModel,
+        recentSessionsProvider: RecentSessionsProvider? = nil,
+        replyViewModelFactory: QuickChatReplyBinding.ViewModelFactory? = nil,
         allowsHotkeyRegistrationInTests: Bool = false)
     {
         self.enableUI = enableUI
-        self.model = model ?? QuickChatModel()
+        let resolvedModel = model ?? QuickChatModel()
+        self.model = resolvedModel
         self.dictation = dictation
-        self.replyBinding = QuickChatReplyBinding(viewModelFactory: replyViewModelFactory)
+        self.replyBinding = QuickChatReplyBinding(viewModelFactory: replyViewModelFactory ?? { route in
+            QuickChatReplyBinding.makeViewModel(route: route, binding: resolvedModel.gatewaySession.binding)
+        })
         self.monitoringEnabled = monitoringEnabled ?? (enableUI && !ProcessInfo.processInfo.isRunningTests)
         self.globalMonitorInstaller = globalMonitorInstaller
         self.localMonitorInstaller = localMonitorInstaller
@@ -101,9 +102,17 @@ final class QuickChatController: NSObject {
         self.hotkeyRegistrar = hotkeyRegistrar
         self.hotkeyRemover = hotkeyRemover
         self.chatOpener = chatOpener
-        self.recentSessionsProvider = recentSessionsProvider
+        self.recentSessionsProvider = recentSessionsProvider ?? { try await resolvedModel.gatewaySession.recents() }
         self.allowsHotkeyRegistrationInTests = allowsHotkeyRegistrationInTests
         super.init()
+        self.model.onGatewayRetired = { [weak self] in
+            guard let self else { return }
+            self.stopDictation()
+            self.cancelPasteRequest()
+            self.invalidateRecentsFetch()
+            SimpleTaskSupport.stop(task: &self.presentationTask)
+            self.replyBinding.clear()
+        }
         self.model.onSendDispatched = { [weak self] route in
             guard let self else { return }
             self.stopDictation()

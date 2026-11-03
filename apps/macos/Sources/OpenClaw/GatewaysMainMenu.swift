@@ -40,6 +40,7 @@ struct GatewayMenuEndpointLabels: Equatable {
             case .browser: String(localized: "Access")
             case .token: String(localized: "token")
             case .password: String(localized: "password")
+            case .personalTailscale: String(localized: "Tailscale account")
             case nil: nil
             }
         }

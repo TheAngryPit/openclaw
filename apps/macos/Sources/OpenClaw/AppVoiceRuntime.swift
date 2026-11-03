@@ -34,7 +34,7 @@ final class AppVoiceRuntime {
         let stopBuffered: @MainActor @Sendable () async -> Double?
         let stopSystem: @Sendable () async -> Void
         let stopMLX: @Sendable () async -> Void
-        let talkBootstrap: Bootstrap
+        let talkBootstrap: Bootstrap?
         let publishTalk: PublishTalk
         let prepareForward: PrepareForward
         let forward: Forward
@@ -57,7 +57,7 @@ final class AppVoiceRuntime {
             stopBuffered: { TalkBufferedAudioPlayer.shared.stop() },
             stopSystem: { await TalkSystemSpeechSynthesizer.shared.stop() },
             stopMLX: { await TalkMLXSpeechSynthesizer.shared.cancelCurrent() },
-            talkBootstrap: AppVoiceRuntime.liveBootstrap,
+            talkBootstrap: nil,
             publishTalk: AppVoiceRuntime.livePublishTalk,
             prepareForward: {
                 await VoiceWakeForwarder.selectedSessionInvocation(transcript: $0, voiceWakeTrigger: $1)
@@ -159,10 +159,6 @@ final class AppVoiceRuntime {
     func activate() {
         guard self.state != nil else { return }
         self.isActive = true
-    }
-
-    nonisolated static func liveBootstrap() async throws -> GatewayConnection.RealtimeTalkBootstrap {
-        try await GatewayConnection.shared.acquireRealtimeTalkBootstrap()
     }
 
     nonisolated static func livePublishTalk(_ enabled: Bool, _ phase: String) async {

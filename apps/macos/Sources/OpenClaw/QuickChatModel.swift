@@ -99,6 +99,7 @@ private struct ControlPatchRequest: Equatable {
     let presentationID: UUID
     let target: OpenClawChatSessionTarget
     let settings: OpenClawChatSessionSettingsPatch
+    let gatewayBinding: MacGatewayOperatorBinding?
 
     var selectionID: String? {
         guard let model = self.settings.model else { return nil }
@@ -229,6 +230,9 @@ final class QuickChatModel {
     /// instead of sampling live routing state that an agent switch could move meanwhile.
     private(set) var lastAcceptedRoute: OpenClawChatSessionTarget?
     private(set) var lastAcceptedIdempotencyKey: String?
+    private(set) var gatewayRecoveryMessage: String?
+    @ObservationIgnored let gatewaySession: QuickChatGatewaySession
+    @ObservationIgnored var onGatewayRetired: (() -> Void)?
 
     @ObservationIgnored private let sessionKeyProvider: SessionKeyProvider
     @ObservationIgnored private let agentsProvider: AgentsProvider
@@ -242,6 +246,7 @@ final class QuickChatModel {
     @ObservationIgnored private let modelControlsProvider: ModelControlsProvider
     @ObservationIgnored private let modelCatalogEventsProvider: ModelCatalogEventsProvider
     @ObservationIgnored private let settingsPatchProvider: SettingsPatchProvider
+    @ObservationIgnored private let settingsPatchUsesSelectedGateway: Bool
     /// Invoked with the snapshotted route just before a send is dispatched, for every
     /// send path (text and capture); wires the reply consumer's pre-bind.
     @ObservationIgnored var onSendDispatched: ((OpenClawChatSessionTarget) -> Void)?
@@ -250,6 +255,7 @@ final class QuickChatModel {
     @ObservationIgnored private var agentsMainKey: String?
     @ObservationIgnored private var baseRoutingTarget: OpenClawChatSessionTarget?
     @ObservationIgnored private var sendTask: Task<String, Error>?
+    @ObservationIgnored private var sendRequestID = UUID()
     private var permissionTask: Task<Void, Never>?
     @ObservationIgnored private var permissionPollTask: Task<Void, Never>?
     private var retryIdentity: RetryIdentity?
@@ -263,84 +269,56 @@ final class QuickChatModel {
     @ObservationIgnored private var appliedModelSelections: [OpenClawChatSessionTarget: String] = [:]
 
     init(
-        sessionKeyProvider: @escaping SessionKeyProvider = {
-            await GatewayConnection.shared.mainSessionKey()
-        },
-        agentsProvider: @escaping AgentsProvider = {
-            try await GatewayConnection.shared.agentsList()
-        },
-        agentIdentityProvider: @escaping AgentIdentityProvider = { sessionKey in
-            let identity = try await GatewayConnection.shared.agentIdentity(sessionKey: sessionKey)
-            let name = identity.name?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty ?? identity.agentid
-            let emoji = identity.emoji?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
-            return QuickChatAgentDisplay(
-                id: identity.agentid,
-                name: name,
-                emoji: emoji,
-                avatar: QuickChatAgentDisplay.avatar(fromRendered: identity.avatar))
-        },
-        sendProvider: @escaping SendProvider = QuickChatModel.gatewaySendProvider(gateway: .shared),
+        sessionKeyProvider: SessionKeyProvider? = nil,
+        agentsProvider: AgentsProvider? = nil,
+        agentIdentityProvider: AgentIdentityProvider? = nil,
+        sendProvider: SendProvider? = nil,
         permissionStatusProvider: @escaping PermissionStatusProvider = { capabilities in
             await PermissionManager.grantedStatus(capabilities)
         },
         permissionGrantProvider: @escaping PermissionGrantProvider = { capabilities in
             await PermissionManager.ensure(capabilities, interactive: true)
         },
-        connectionGateProvider: @escaping ConnectionGateProvider = {
-            let appState = AppStateStore.shared
-            if appState.connectionMode == .unconfigured { return .unconfigured }
-            if appState.isPaused { return .paused }
-            if ControlChannel.shared.state != .connected { return .disconnected }
-            return .available
-        },
+        connectionGateProvider: ConnectionGateProvider? = nil,
         frontmostAppNameProvider: @escaping FrontmostAppNameProvider = {
             QuickChatFocusedTextCaptureService.frontmostApplicationName()
         },
         textContextCaptureProvider: @escaping TextContextCaptureProvider = {
             await QuickChatFocusedTextCaptureService.capture()
         },
-        modelControlsProvider: @escaping ModelControlsProvider = { target in
-            let transport = MacGatewayChatTransport(defaultGlobalAgentID: target.agentID)
-            async let catalog = transport.loadModelCatalog(sessionKey: target.sessionKey, agentID: target.agentID)
-            async let sessions = transport.listSessions(limit: 200, search: target.sessionKey, archived: false)
-            async let agents = GatewayConnection.shared.agentsList()
-            let modelCatalog = try await catalog
-            var snapshot = try await QuickChatModelControlLogic.snapshot(
-                target: target,
-                models: modelCatalog.choices,
-                sessions: sessions,
-                agents: agents,
-                modelSelectionPolicy: modelCatalog.modelSelectionPolicy)
-            snapshot.catalogMessage = modelCatalog.message
-            snapshot.catalogRefreshFailed = modelCatalog.refreshFailed
-            return snapshot
-        },
-        modelCatalogEventsProvider: @escaping ModelCatalogEventsProvider = {
-            await GatewayConnection.shared.subscribe()
-        },
-        settingsPatchProvider: @escaping SettingsPatchProvider = { target, settings in
-            let transport = MacGatewayChatTransport(defaultGlobalAgentID: target.agentID)
-            guard let lease = await transport.acquireSessionSettingsRouteLease() else {
-                throw OpenClawChatTransportSendError.notDispatched
-            }
-            return try await lease.patchSessionSettings(
-                target.sessionKey,
-                target.agentID,
-                settings)
-        })
+        modelControlsProvider: ModelControlsProvider? = nil,
+        modelCatalogEventsProvider: ModelCatalogEventsProvider? = nil,
+        settingsPatchProvider: SettingsPatchProvider? = nil,
+        gatewaySession: QuickChatGatewaySession = QuickChatGatewaySession())
     {
-        self.sessionKeyProvider = sessionKeyProvider
-        self.agentsProvider = agentsProvider
-        self.agentIdentityProvider = agentIdentityProvider
-        self.sendProvider = sendProvider
+        self.gatewaySession = gatewaySession
+        self.sessionKeyProvider = sessionKeyProvider ?? { await gatewaySession.sessionKey() }
+        self.agentsProvider = agentsProvider ?? { try await gatewaySession.agents() }
+        self.agentIdentityProvider = agentIdentityProvider ?? { try await gatewaySession.agentIdentity(sessionKey: $0) }
+        self.sendProvider = sendProvider ?? { sessionKey, agentID, message, thinking, key, attachments in
+            try await gatewaySession.send(
+                sessionKey: sessionKey,
+                agentID: agentID,
+                message: message,
+                thinking: thinking,
+                idempotencyKey: key,
+                attachments: attachments)
+        }
         self.permissionStatusProvider = permissionStatusProvider
         self.permissionGrantProvider = permissionGrantProvider
-        self.connectionGateProvider = connectionGateProvider
+        self.connectionGateProvider = connectionGateProvider ?? {
+            if AppStateStore.shared.isPaused { return .paused }
+            return gatewaySession.isCurrent ? .available : .disconnected
+        }
         self.frontmostAppNameProvider = frontmostAppNameProvider
         self.textContextCaptureProvider = textContextCaptureProvider
-        self.modelControlsProvider = modelControlsProvider
-        self.modelCatalogEventsProvider = modelCatalogEventsProvider
-        self.settingsPatchProvider = settingsPatchProvider
+        self.modelControlsProvider = modelControlsProvider ?? { try await gatewaySession.modelControls(target: $0) }
+        self.modelCatalogEventsProvider = modelCatalogEventsProvider ?? { await gatewaySession.events() }
+        self
+            .settingsPatchProvider = settingsPatchProvider ??
+            { try await gatewaySession.patch(target: $0, settings: $1) }
+        self.settingsPatchUsesSelectedGateway = settingsPatchProvider == nil
+        gatewaySession.onRetired = { [weak self] in self?.retireGatewayPresentation() }
     }
 
     deinit {
@@ -352,7 +330,8 @@ final class QuickChatModel {
     }
 
     var connectionStatusMessage: String? {
-        switch self.connectionGate {
+        if let gatewayRecoveryMessage { return gatewayRecoveryMessage }
+        return switch self.connectionGate {
         case .available: nil
         case .unconfigured: "Not configured"
         case .paused: "OpenClaw is paused"
@@ -407,6 +386,8 @@ final class QuickChatModel {
     }
 
     func beginPresentation() -> UUID {
+        self.gatewaySession.beginPresentation()
+        self.gatewayRecoveryMessage = nil
         self.presentationID = UUID()
         self.isPresentationActive = true
         self.setRoutingTarget(nil)
@@ -713,6 +694,7 @@ final class QuickChatModel {
     }
 
     func endPresentation() {
+        self.gatewaySession.endPresentation()
         SimpleTaskSupport.stop(task: &self.modelCatalogEventsTask)
         self.isPresentationActive = false
         self.presentationID = UUID()
@@ -739,6 +721,7 @@ final class QuickChatModel {
         SimpleTaskSupport.stop(task: &self.modelCatalogEventsTask)
         self.sendTask?.cancel()
         self.sendTask = nil
+        self.sendRequestID = UUID()
         self.retryIdentity = nil
         SimpleTaskSupport.stop(task: &self.permissionTask)
         SimpleTaskSupport.stop(task: &self.permissionPollTask)
@@ -746,6 +729,20 @@ final class QuickChatModel {
         self.cancelModelControlRefresh()
         self.resetDictationState()
         if self.sendState == .sending { self.sendState = .idle }
+    }
+
+    private func retireGatewayPresentation() {
+        self.cancelAllTasks()
+        self.endPresentation()
+        self.text = ""
+        self.agents = []
+        self.selectedAgentID = nil
+        self.agentDisplay = .placeholder
+        self.lastAcceptedRoute = nil
+        self.lastAcceptedIdempotencyKey = nil
+        self.invalidateModelChoices()
+        self.gatewayRecoveryMessage = "Reconnect the selected Gateway, then reopen Quick Chat."
+        self.onGatewayRetired?()
     }
 
     private func resolveAgents(_ result: AgentsListResult) -> AgentsResolution {
@@ -832,8 +829,25 @@ final class QuickChatModel {
         self.sendAgentID = target?.agentID
     }
 
-    static func gatewaySendProvider(gateway: GatewayConnection) -> SendProvider {
+    static func gatewaySendProvider(
+        gateway: GatewayConnection,
+        binding: MacGatewayOperatorBinding? = nil) -> SendProvider
+    {
         { sessionKey, agentID, message, thinking, idempotencyKey, attachments in
+            if let binding {
+                let request = OpenClawChatGatewayRequests.sendMessage(
+                    sessionKey: sessionKey,
+                    agentID: agentID,
+                    expectedSessionRoutingContract: nil,
+                    message: message,
+                    thinking: thinking,
+                    idempotencyKey: idempotencyKey,
+                    attachments: attachments)
+                let data = try await withGatewayStartupAdmission(method: "chat.send") {
+                    try await binding.request(request)
+                }
+                return try JSONDecoder().decode(OpenClawChatSendResponse.self, from: data).status
+            }
             let route = try await gateway.captureRequiredRoute()
             let response = try await withGatewayStartupAdmission(method: "chat.send") {
                 try await gateway.chatSend(
@@ -910,11 +924,16 @@ final class QuickChatModel {
         let task = Task {
             try await self.sendProvider(sessionKey, agentID, message, thinking, idempotencyKey, attachments)
         }
+        let sendRequestID = UUID()
+        self.sendRequestID = sendRequestID
         self.sendTask = task
         self.sendState = .sending
-        defer { self.sendTask = nil }
+        defer {
+            if self.sendRequestID == sendRequestID { self.sendTask = nil }
+        }
         do {
             let status = try await task.value
+            guard self.isCurrentPresentation(presentationID), self.routingTarget == route else { return false }
             switch ChatSendStatus.acceptance(of: status) {
             case .terminalFailure:
                 self.retryIdentity = nil
@@ -939,10 +958,12 @@ final class QuickChatModel {
                 return true
             }
         } catch is CancellationError {
+            guard self.presentationID == presentationID, self.sendRequestID == sendRequestID else { return false }
             self.retryIdentity = nil
             self.sendState = .idle
             return false
         } catch {
+            guard self.presentationID == presentationID, self.sendRequestID == sendRequestID else { return false }
             self.sendState = self.text == draft ? .failed(error.localizedDescription) : .idle
             return false
         }
@@ -1161,17 +1182,22 @@ extension QuickChatModel {
         target: OpenClawChatSessionTarget) -> ControlPatchSettlement
     {
         let previousSettlement = self.controlPatchSettlementsByTarget[target]
-        if let previousSettlement, previousSettlement.request.settings == settings {
+        if let previousSettlement, previousSettlement.request.settings == settings,
+           previousSettlement.request.gatewayBinding == self.gatewaySession.binding
+        {
             return previousSettlement
         }
         self.cancelModelControlRefresh()
         let request = ControlPatchRequest(
             presentationID: self.presentationID,
             target: target,
-            settings: settings)
+            settings: settings,
+            gatewayBinding: self.gatewaySession.binding)
         // Install synchronously and serialize same-target settlements: a dispatched mutation
         // cannot be cancelled, and the latest selection must reach the provider last.
-        let task = Task { [weak self, previousTask = previousSettlement?.task] in
+        let predecessor = previousSettlement?.request.gatewayBinding == request.gatewayBinding ? previousSettlement?
+            .task : nil
+        let task = Task { [weak self, previousTask = predecessor] in
             _ = await previousTask?.value
             guard let self else { return false }
             return await self.settleControlPatch(request: request)
@@ -1215,7 +1241,14 @@ extension QuickChatModel {
     private func settleControlPatch(request: ControlPatchRequest) async -> Bool {
         defer { self.clearControlPatchState(request: request) }
         do {
-            _ = try await self.settingsPatchProvider(request.target, request.settings)
+            guard request.gatewayBinding?.isCurrent != false else { return false }
+            if self.settingsPatchUsesSelectedGateway, let binding = request.gatewayBinding {
+                _ = try await QuickChatGatewaySession.patch(
+                    binding: binding, target: request.target, settings: request.settings)
+            } else {
+                _ = try await self.settingsPatchProvider(request.target, request.settings)
+            }
+            guard request.gatewayBinding?.isCurrent != false else { return false }
             if request.settings.fastMode != nil,
                self.retryIdentity?.route == request.target
             {

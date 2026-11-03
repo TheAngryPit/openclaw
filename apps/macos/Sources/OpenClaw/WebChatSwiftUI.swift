@@ -109,6 +109,7 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
 
     let connection: GatewayConnection
     let outboxGatewayID: String?
+    private let operatorBinding: MacGatewayOperatorBinding?
     #if DEBUG
     /// Isolated native tests use the primary-runtime pin with their own real connection.
     var _testUsesPrimaryAppRuntime = false
@@ -122,13 +123,15 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
         outboxGatewayID: String? = nil,
         defaultGlobalAgentID: String? = nil,
         fixedAgentID: String? = nil,
-        subscriptionOwner: UUID = UUID())
+        subscriptionOwner: UUID = UUID(),
+        operatorBinding: MacGatewayOperatorBinding? = nil)
     {
         self.connection = connection
         self.outboxGatewayID = outboxGatewayID
         self.routingIdentity = RoutingIdentity(defaultGlobalAgentID: defaultGlobalAgentID)
         self.fixedAgentID = WebChatRoute.normalizedAgentID(fixedAgentID)
         self.subscriptionOwner = subscriptionOwner
+        self.operatorBinding = operatorBinding
     }
 
     func updateDefaultGlobalAgentID(_ agentID: String?) {
@@ -140,10 +143,12 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
             connection: self.connection,
             outboxGatewayID: self.outboxGatewayID,
             fixedAgentID: agentID,
-            subscriptionOwner: self.subscriptionOwner)
+            subscriptionOwner: self.subscriptionOwner,
+            operatorBinding: self.operatorBinding)
     }
 
     func setActiveSessionKey(_ sessionKey: String) async throws {
+        try await self.requireCurrentOutboxGateway()
         let target = self.sessionTarget(for: sessionKey)
         try await self.connection.updateNativeChatSubscription(owner: self.subscriptionOwner, target: target)
     }
@@ -153,6 +158,7 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
     }
 
     func currentOutboxGatewayMatchesConnection() async -> Bool {
+        if let operatorBinding, !operatorBinding.isCurrent { return false }
         var usesPrimaryAppRuntime = self.connection === GatewayConnection.shared
         #if DEBUG
         usesPrimaryAppRuntime = usesPrimaryAppRuntime || self._testUsesPrimaryAppRuntime
@@ -170,6 +176,11 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
         }
     }
 
+    private func request(_ request: OpenClawChatGatewayRequest) async throws -> Data {
+        if let operatorBinding { return try await operatorBinding.request(request) }
+        return try await self.connection.request(request)
+    }
+
     func sessionTarget(for sessionKey: String, overrideAgentID: String? = nil) -> OpenClawChatSessionTarget {
         OpenClawChatSessionTarget.resolve(
             sessionKey,
@@ -184,7 +195,22 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
     }
 
     func requestHistory(sessionKey: String) async throws -> OpenClawChatHistoryPayload {
+        try await self.requireCurrentOutboxGateway()
         let target = self.sessionTarget(for: sessionKey)
+        if let operatorBinding {
+            let request = OpenClawChatGatewayRequests.history(
+                sessionKey: target.sessionKey,
+                agentID: target.agentID,
+                limit: nil,
+                maxChars: nil,
+                inputRunIDs: nil,
+                cursor: nil,
+                maxBytes: nil,
+                timeoutMs: nil)
+            return try await JSONDecoder().decode(
+                OpenClawChatHistoryPayload.self,
+                from: operatorBinding.request(request))
+        }
         return try await self.connection.chatHistory(
             sessionKey: target.sessionKey,
             agentID: target.agentID)
@@ -194,8 +220,23 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
         sessionKey: String,
         cursor: String) async throws -> OpenClawChatHistoryPayload
     {
+        try await self.requireCurrentOutboxGateway()
         guard let route = await self.connection.captureRoute() else { throw CancellationError() }
         let target = self.sessionTarget(for: sessionKey)
+        if let operatorBinding {
+            let request = OpenClawChatGatewayRequests.history(
+                sessionKey: target.sessionKey,
+                agentID: target.agentID,
+                limit: nil,
+                maxChars: nil,
+                inputRunIDs: nil,
+                cursor: cursor,
+                maxBytes: 256 * 1024,
+                timeoutMs: nil)
+            return try await JSONDecoder().decode(
+                OpenClawChatHistoryPayload.self,
+                from: operatorBinding.request(request))
+        }
         return try await self.connection.chatHistory(
             sessionKey: target.sessionKey,
             agentID: target.agentID,
@@ -268,7 +309,7 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
             sessionKey: target.sessionKey,
             agentID: target.agentID,
             messageID: messageID)
-        let data = try await connection.request(request)
+        let data = try await self.request(request)
         let result = try JSONDecoder().decode(ChatMessageGetResult.self, from: data)
         guard result.ok, let encodedMessage = result.message else { return nil }
         return try JSONDecoder().decode(
@@ -335,15 +376,24 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
         sessionKey: String,
         agentID: String?) async throws -> OpenClawChatModelCatalogSnapshot
     {
-        let lease = try await self.connection.acquireServerLease()
+        let lease: GatewayConnection.ServerLease
+        if let operatorBinding {
+            guard operatorBinding.isCurrent else { throw CancellationError() }
+            lease = operatorBinding.lease
+        } else {
+            lease = try await self.connection.acquireServerLease()
+        }
         guard await self.connection.supportsServerCapability(
             .publishedModelCatalog, ifCurrentServerLease: lease) == true
         else {
             return OpenClawChatModelCatalogSnapshot(choices: [], availabilityIsSessionScoped: false)
         }
         let request = OpenClawChatGatewayRequests.modelsList(agentID: agentID, sessionKey: sessionKey)
-        let data = try await self.connection.request(
-            request, ifCurrentServerLease: lease)
+        let data: Data = if let operatorBinding {
+            try await operatorBinding.request(request)
+        } else {
+            try await self.connection.request(request, ifCurrentServerLease: lease)
+        }
         return try OpenClawChatGatewayPayloadCodec.decodeModelCatalog(data)
     }
 
@@ -393,7 +443,7 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
             search: search,
             archived: archived,
             agentID: agentID)
-        let data = try await connection.request(request)
+        let data = try await self.request(request)
         var decoded = try OpenClawChatGatewayPayloadCodec.decodeSessionsList(
             data, agentID: request.params["agentId"]?.value as? String)
         if decoded.defaults == nil {
@@ -452,6 +502,7 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
         patch: OpenClawChatSessionSettingsPatch,
         serverLease: GatewayConnection.ServerLease?) async throws -> OpenClawChatModelPatchResult?
     {
+        try await self.requireCurrentOutboxGateway()
         var settingsLease = serverLease
         if settingsLease == nil, patch.requiresSessionSettingsContract || patch.requiresSessionSettingsCAS {
             guard let capturedLease = await self.connection.captureServerLease() else {
@@ -478,7 +529,9 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
             patch: patch,
             supportsSessionSettingsContract: supportsSettingsContract,
             supportsSessionSettingsCAS: supportsSettingsCAS)
-        let data: Data = if let settingsLease {
+        let data: Data = if let operatorBinding {
+            try await operatorBinding.request(request)
+        } else if let settingsLease {
             try await self.connection.request(
                 request, ifCurrentServerLease: settingsLease)
         } else {
@@ -489,7 +542,13 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
 
     func acquireSessionSettingsRouteLease() async -> OpenClawChatSessionSettingsRouteLease? {
         guard await self.currentOutboxGatewayMatchesConnection() else { return nil }
-        guard let serverLease = await connection.captureServerLease() else { return nil }
+        let serverLease: GatewayConnection.ServerLease
+        if let operatorBinding {
+            serverLease = operatorBinding.lease
+        } else {
+            guard let current = await connection.captureServerLease() else { return nil }
+            serverLease = current
+        }
         let transport = self
         return OpenClawChatSessionSettingsRouteLease { sessionKey, agentID, patch in
             try await transport.requireCurrentOutboxGateway()
@@ -510,7 +569,19 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
     {
         let target = self.sessionTarget(for: sessionKey)
         return try await self.withNativeSendOwnership(target) {
-            try await self.connection.chatSend(
+            if let operatorBinding = self.operatorBinding {
+                let request = OpenClawChatGatewayRequests.sendMessage(
+                    sessionKey: target.sessionKey,
+                    agentID: target.agentID,
+                    expectedSessionRoutingContract: nil,
+                    message: message,
+                    thinking: thinking,
+                    idempotencyKey: idempotencyKey,
+                    attachments: attachments)
+                return try await JSONDecoder().decode(
+                    OpenClawChatSendResponse.self, from: operatorBinding.request(request))
+            }
+            return try await self.connection.chatSend(
                 sessionKey: target.sessionKey,
                 agentID: target.agentID,
                 message: message,
@@ -565,7 +636,27 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
         return try await self.withNativeSendOwnership(.init(
             sessionKey: target.sessionKey, agentID: sendTarget.agentID ?? target.agentID))
         {
-            try await self.connection.chatSend(
+            if let operatorBinding = self.operatorBinding {
+                let supportsSettingsCAS = await self.connection.supportsServerCapability(
+                    .sessionSettingsCAS, ifCurrentServerLease: operatorBinding.lease) == true
+                guard sendTarget.expectedSessionSettings == nil || supportsSettingsCAS else {
+                    throw OpenClawChatTransportSendError.notDispatched
+                }
+                let request = OpenClawChatGatewayRequests.sendMessage(
+                    sessionKey: target.sessionKey,
+                    agentID: sendTarget.agentID ?? target.agentID,
+                    expectedSessionRoutingContract: guardedContract,
+                    expectedSessionSettings: sendTarget.expectedSessionSettings,
+                    supportsSessionSettingsCAS: supportsSettingsCAS,
+                    queueMode: sendTarget.queueMode,
+                    message: message,
+                    thinking: thinking,
+                    idempotencyKey: idempotencyKey,
+                    attachments: attachments)
+                return try await JSONDecoder().decode(
+                    OpenClawChatSendResponse.self, from: operatorBinding.request(request))
+            }
+            return try await self.connection.chatSend(
                 sessionKey: target.sessionKey,
                 agentID: sendTarget.agentID ?? target.agentID,
                 expectedSessionRoutingContract: guardedContract,
@@ -690,7 +781,11 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
     }
 
     func requestHealth(timeoutMs: Int) async throws -> Bool {
-        try await self.connection.healthOK(timeoutMs: timeoutMs)
+        if let operatorBinding {
+            let data = try await operatorBinding.request(method: "health")
+            return (try? JSONDecoder().decode(OpenClawGatewayHealthOK.self, from: data))?.ok ?? true
+        }
+        return try await self.connection.healthOK(timeoutMs: timeoutMs)
     }
 
     func waitForRunCompletion(
@@ -737,6 +832,10 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
                 var previousLease: GatewayConnection.ServerLease?
                 for await delivery in stream {
                     if Task.isCancelled {
+                        return
+                    }
+                    if let operatorBinding = self.operatorBinding, !operatorBinding.isCurrent {
+                        continuation.finish()
                         return
                     }
                     guard delivery.isCurrent, let push = delivery.push else { continue }

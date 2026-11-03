@@ -43,9 +43,11 @@ extension GatewayConnection {
 
     func requestHistory(
         _ request: OpenClawChatGatewayRequest,
-        ifCurrentRoute route: Route?) async throws -> Data
+        ifCurrentRoute route: Route?,
+        operatorBinding: MacGatewayOperatorBinding? = nil) async throws -> Data
     {
         do {
+            if let operatorBinding { return try await operatorBinding.request(request) }
             return try await self.request(request, ifCurrentRoute: route)
         } catch let error as GatewayResponseError {
             // Gateways through v2026.8.1 reject this optional field. Remove the
@@ -58,6 +60,7 @@ extension GatewayConnection {
             params["inputRunIds"] = nil
             let legacyRequest = OpenClawChatGatewayRequest(
                 method: request.method, params: params, timeoutMs: request.timeoutMs)
+            if let operatorBinding { return try await operatorBinding.request(legacyRequest) }
             return try await self.request(legacyRequest, ifCurrentRoute: route)
         }
     }
