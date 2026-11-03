@@ -6487,7 +6487,11 @@ extension NodeAppModel {
             authorityGeneration != self.operatorAuthorityGeneration
         {
             // WatchConnectivity can finish a send that was already admitted when its task was cancelled.
-            await self.syncWatchAppSnapshot(reason: "\(reason)_route_repair")
+            let repair = Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.syncWatchAppSnapshot(reason: "\(reason)_route_repair")
+            }
+            await repair.value
         }
     }
 

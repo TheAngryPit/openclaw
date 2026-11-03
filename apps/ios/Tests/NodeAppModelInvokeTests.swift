@@ -758,6 +758,7 @@ private final class MockWatchMessagingService: @preconcurrency WatchMessagingSer
     var lastSentExecApprovalSnapshot: OpenClawWatchExecApprovalSnapshotMessage?
     var sentExecApprovalSnapshots: [OpenClawWatchExecApprovalSnapshotMessage] = []
     var lastSentAppSnapshot: OpenClawWatchAppSnapshotMessage?
+    private var appSnapshotUpdates: AsyncStream<OpenClawWatchAppSnapshotMessage>.Continuation?
     var syncExecApprovalSnapshotHandler: ((OpenClawWatchExecApprovalSnapshotMessage) async throws
         -> WatchNotificationSendResult)?
     var syncAppSnapshotHandler: ((OpenClawWatchAppSnapshotMessage) async throws -> WatchNotificationSendResult)?
@@ -893,6 +894,7 @@ private final class MockWatchMessagingService: @preconcurrency WatchMessagingSer
         _ message: OpenClawWatchAppSnapshotMessage) async throws -> WatchNotificationSendResult
     {
         self.lastSentAppSnapshot = message
+        self.appSnapshotUpdates?.yield(message)
         if let syncAppSnapshotHandler {
             return try await syncAppSnapshotHandler(message)
         }
@@ -900,6 +902,12 @@ private final class MockWatchMessagingService: @preconcurrency WatchMessagingSer
             throw sendError
         }
         return self.nextSendResult
+    }
+
+    func appSnapshotStream() -> AsyncStream<OpenClawWatchAppSnapshotMessage> {
+        let updates = AsyncStream<OpenClawWatchAppSnapshotMessage>.makeStream()
+        self.appSnapshotUpdates = updates.continuation
+        return updates.stream
     }
 
     func sendChatDeliveryReceipt(
@@ -1182,7 +1190,9 @@ private actor WatchAppSnapshotSendOrderProbe {
         }
     }
 
-    func completedSnapshots() -> [OpenClawWatchAppSnapshotMessage] { self.completed }
+    func completedSnapshots() -> [OpenClawWatchAppSnapshotMessage] {
+        self.completed
+    }
 
     func releaseFirst() {
         self.firstReleased = true
@@ -5895,37 +5905,48 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
     @Test @MainActor func `retired Watch snapshot sequence cannot supersede a newer owner after send starts`() async throws {
         let (watchService, appModel) = makeWatchModel()
         let probe = WatchAppSnapshotSendOrderProbe()
+        defer { Task { await probe.releaseFirst() } }
         watchService.syncAppSnapshotHandler = { message in
             await probe.send(message)
             return WatchNotificationSendResult(
                 deliveredImmediately: true, queuedForDelivery: false, transport: "sendMessage")
         }
         appModel.connectedGatewayID = "synthetic-gateway"
-        appModel.gatewayConnected = true
-        appModel.gatewayStatusText = "Connected as A"
+        appModel.gatewayStatusText = "Connecting as A"
         appModel.adoptPersonalChatOwner(scope: "person-a", stableID: "synthetic-gateway")
-        appModel.setOperatorConnected(true)
+        appModel.focusChatSession("owner-a-session")
+        watchService.emitAppSnapshotRequest(
+            .init(requestId: "owner-a", transport: "sendMessage"))
 
         await probe.waitForStarted(count: 1)
         let oldSequence = try #require(watchService.lastSentAppSnapshot?.snapshotSequence)
 
         appModel.adoptPersonalChatOwner(scope: "person-b", stableID: "synthetic-gateway")
         appModel.gatewayStatusText = "Offline"
-        appModel.setOperatorConnected(false)
+        appModel.focusChatSession("owner-b-session")
+        watchService.emitAppSnapshotRequest(
+            .init(requestId: "owner-b", transport: "sendMessage"))
         await probe.waitForStarted(count: 2)
         await probe.waitForCompleted(count: 1)
         let currentSequence = try #require(watchService.lastSentAppSnapshot?.snapshotSequence)
         #expect(currentSequence > oldSequence)
 
         await probe.releaseFirst()
+        await probe.waitForCompleted(count: 2)
+        await probe.waitForStarted(count: 3)
         await probe.waitForCompleted(count: 3)
         let completed = await probe.completedSnapshots()
-        #expect(completed.count >= 3)
+        #expect(completed.count == 3)
         #expect(completed[0].snapshotSequence == currentSequence)
+        #expect(completed[0].gatewayConnected == false)
+        #expect(completed[0].sessionKey == "owner-b-session")
         #expect(completed[1].snapshotSequence == oldSequence)
+        #expect(completed[1].gatewayStatusText == "Connecting as A")
+        #expect(completed[1].sessionKey == "owner-a-session")
+        let repairedSequence = try #require(completed[2].snapshotSequence)
+        #expect(repairedSequence > currentSequence)
         #expect(completed[2].gatewayConnected == false)
-        let repairSequence = try #require(completed[2].snapshotSequence)
-        #expect(repairSequence > currentSequence)
+        #expect(completed[2].sessionKey == "owner-b-session")
     }
 
     @Test @MainActor func `watch app snapshot request publishes current dashboard state`() async throws {
@@ -6201,28 +6222,30 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
         #expect(snapshot.pendingApprovalCount == 1)
     }
 
-    @Test @MainActor func `watch app command controls talk through phone model`() async {
+    @Test @MainActor func `watch app command controls talk through phone model`() async throws {
         let watchService = MockWatchMessagingService()
         let talkMode = TalkModeManager(allowSimulatorCapture: true)
         let appModel = NodeAppModel(watchMessagingService: watchService, talkMode: talkMode)
+        var snapshots = watchService.appSnapshotStream().makeAsyncIterator()
 
         watchService.emitAppCommand(
             makeWatchAppCommand("watch-start-talk", .startTalk, sentAt: 123))
-        await Task.yield()
+        let startSnapshot = try #require(await snapshots.next())
 
+        #expect(startSnapshot.talkEnabled)
         #expect(appModel.talkMode.isEnabled == true)
-        #expect(watchService.lastSentAppSnapshot?.talkEnabled == true)
 
         watchService.emitAppCommand(
             makeWatchAppCommand("watch-stop-talk", .stopTalk, sentAt: 124))
-        await Task.yield()
+        let stopSnapshot = try #require(await snapshots.next())
 
+        #expect(!stopSnapshot.talkEnabled)
         #expect(appModel.talkMode.isEnabled == false)
-        #expect(watchService.lastSentAppSnapshot?.talkEnabled == false)
     }
 
-    @Test @MainActor func `watch app command opens chat session on phone model`() async {
+    @Test @MainActor func `watch app command opens chat session on phone model`() async throws {
         let (watchService, appModel) = makeWatchModel()
+        var snapshots = watchService.appSnapshotStream().makeAsyncIterator()
 
         watchService.emitAppCommand(
             makeWatchAppCommand(
@@ -6230,10 +6253,10 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
                 .openChat,
                 session: "incident-42",
                 sentAt: 125))
-        await Task.yield()
+        let snapshot = try #require(await snapshots.next())
 
+        #expect(snapshot.sessionKey == "incident-42")
         #expect(appModel.chatSessionKey == "incident-42")
-        #expect(watchService.lastSentAppSnapshot?.sessionKey == "incident-42")
     }
 
     @Test @MainActor func `watch app commands reject stale gateway targets`() async {
@@ -6811,13 +6834,9 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
                 try #require(await waitForMainActorWork { model.watchChatDeliveryWarning != nil })
                 admissionWarning = try #require(model.watchChatDeliveryWarning)
             }
-            let previousSnapshotID = messaging.lastSentAppSnapshot?.snapshotId
-            messaging.emitAppCommand(makeWatchAppCommand(
-                UUID().uuidString, .refresh, sentAt: WatchMessagingPayloadCodec.nowMs()))
-            try #require(await waitForMainActorWork {
-                guard let snapshot = messaging.lastSentAppSnapshot else { return false }
-                return snapshot.snapshotId != previousSnapshotID
-            })
+            await #expect(throws: DecodingError.self) {
+                _ = try await model.watchMessageJournal()
+            }
             #expect(model.watchChatDeliveryWarning != nil)
             #expect(defaults.data(forKey: queueKey) == malformedQueue)
 
@@ -6827,6 +6846,11 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
             #expect(defaults.object(forKey: queueKey) == nil)
             #expect(defaults.object(forKey: metadataKey) == nil)
             #expect(model.watchChatDeliveryWarning == admissionWarning)
+            var snapshots = messaging.appSnapshotStream().makeAsyncIterator()
+            messaging.emitAppCommand(makeWatchAppCommand(
+                UUID().uuidString, .refresh, sentAt: WatchMessagingPayloadCodec.nowMs()))
+            let recoveredSnapshot = try #require(await snapshots.next())
+            #expect(recoveredSnapshot.snapshotSequence != nil)
         } catch {
             await stopModel()
             throw error
