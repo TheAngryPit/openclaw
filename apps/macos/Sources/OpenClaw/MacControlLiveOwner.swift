@@ -82,6 +82,15 @@ final class MacControlLiveOwner: MacControlOwner {
         }
     }
 
+    static func gatewayAuthLabel(_ authKind: MacGatewayCatalogProfile.AuthKind?) -> String {
+        switch authKind {
+        case .browser: "browser"
+        case .password: "password"
+        case .personalTailscale: "tailscale"
+        case .token, nil: "token"
+        }
+    }
+
     func setPrimary(_ configuration: PrimaryGatewayControlConfiguration) async throws -> MacControlPrimaryStatus {
         try Task.checkCancellation()
         let state = AppStateStore.shared
@@ -137,11 +146,7 @@ final class MacControlLiveOwner: MacControlOwner {
                 nil
             }
             // Legacy unauthenticated profiles have no credential field; token is the existing shared-secret route.
-            let auth = switch profile.authKind {
-            case .browser: "browser"
-            case .password: "password"
-            case .token, nil: "token"
-            }
+            let auth = Self.gatewayAuthLabel(profile.authKind)
             result.append(MacControlGatewayStatus(
                 id: profile.profile.id,
                 name: profile.profile.name,

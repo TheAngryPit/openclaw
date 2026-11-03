@@ -1111,7 +1111,7 @@ extension TalkModeRuntime {
             outputFormat: self.config?.outputFormat,
             directive: input.directive)
         let data = try await self.talkRequest(OpenClawChatGatewayRequest(
-            method: Method.talkSpeak.rawValue,
+            method: GatewayConnection.Method.talkSpeak.rawValue,
             params: params,
             timeoutMs: max(30000, input.synthTimeoutSeconds * 1000 + 5000)), generation: input.generation)
         let result = try JSONDecoder().decode(TalkSpeakResult.self, from: data)
@@ -1384,7 +1384,7 @@ extension TalkModeRuntime {
         let generation = self.lifecycleGeneration
         do {
             let data = try await self.talkRequest(OpenClawChatGatewayRequest(
-                method: Method.talkConfig.rawValue,
+                method: GatewayConnection.Method.talkConfig.rawValue,
                 params: ["includeSecrets": AnyCodable(true)],
                 timeoutMs: 8000), generation: generation)
             let snap = try JSONDecoder().decode(ConfigSnapshot.self, from: data)

@@ -5,6 +5,19 @@ import Testing
 
 @MainActor
 struct MacControlLiveOwnerTests {
+    @Test(arguments: [
+        (MacGatewayCatalogProfile.AuthKind.browser, "browser"),
+        (.password, "password"),
+        (.personalTailscale, "tailscale"),
+        (.token, "token"),
+        (nil, "token"),
+    ] as [(MacGatewayCatalogProfile.AuthKind?, String)])
+    func `gateway status identifies the configured authentication method`(
+        authKind: MacGatewayCatalogProfile.AuthKind?, expected: String)
+    {
+        #expect(MacControlLiveOwner.gatewayAuthLabel(authKind) == expected)
+    }
+
     @Test(arguments: [AppState.ConnectionMode.unconfigured, .local, .remote], [false, true])
     func `inactive primary status suppresses stale channel errors`(mode: AppState.ConnectionMode, paused: Bool) {
         let connection = MacControlLiveOwner.primaryConnectionStatus(
