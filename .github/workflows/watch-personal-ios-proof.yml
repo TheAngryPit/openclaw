@@ -1,0 +1,109 @@
+name: macOS personal identity native tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact candidate commit SHA to test
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  macos-native-identity:
+    name: macOS native personal identity tests
+    runs-on: xcode-27
+    env:
+      CI: "true"
+      NODE_VERSION: "24.22.1"
+      SOURCE_SHA: ${{ inputs.source_sha }}
+    steps:
+      - name: Validate requested source SHA
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+      - name: Checkout exact source commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          source scripts/lib/swift-toolchain.sh
+          select_xcode_toolchain
+
+      - name: Install pinned native test dependencies
+        run: |
+          set -euo pipefail
+          corepack enable
+          pnpm --version
+          pnpm install --frozen-lockfile --prefer-offline --optional \
+            --filter '@openclaw/mermaid-renderer...' \
+            --filter '@openclaw/gateway-protocol...' \
+            --filter 'openclaw...' \
+            --config.ignore-scripts=false \
+            --config.engine-strict=false \
+            --config.enable-pre-post-scripts=true \
+            --config.side-effects-cache=true
+
+      - name: Prepare bundled Mermaid assets
+        run: node scripts/prepare-apple-mermaid.mjs
+
+      - name: Build macOS native test bundle
+        run: |
+          set -euo pipefail
+          swift build --package-path apps/macos --build-system native \
+            --enable-code-coverage --disable-index-store \
+            -Xswiftc -gline-tables-only --build-tests
+
+      - name: Run affected macOS identity suites
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/macos-personal-identity-native-tests.log"
+          node scripts/test-macos-native.mts default \
+            --package-path apps/macos --build-system native \
+            --enable-code-coverage --disable-index-store \
+            -Xswiftc -gline-tables-only --skip-build --no-parallel \
+            --filter 'ControlUIDocumentNativeAuthTests|DashboardGatewaysTests|DashboardNativeGatewayAuthTests|GatewayBrowserSessionTests|GatewayConnectionControlUIAuthTests|GatewayConnectionDashboardIdentityTests|GatewayEndpointStoreTests|MacGatewayProfilesTests|TalkModeControllerPublishingTests|VoiceSessionCoordinatorTests' \
+            >"$log" 2>&1 || result=$?
+          cat "$log"
+          tested_head="$(git rev-parse HEAD)"
+          printf 'requested_head=%s\ntested_head=%s\n' \
+            "$SOURCE_SHA" "$tested_head" \
+            >> "$GITHUB_STEP_SUMMARY"
+          exit "${result:-0}"
+
+      - name: Run affected OpenClawKit identity suites
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/openclawkit-identity-native-tests.log"
+          swift test --package-path apps/shared/OpenClawKit \
+            --scratch-path "$RUNNER_TEMP/openclawkit-identity-scratch" \
+            --disable-index-store -Xswiftc -gline-tables-only \
+            --no-parallel \
+            --filter 'GatewayRequestAdmissionTests|RealtimeTalkRelaySessionTests' \
+            >"$log" 2>&1 || result=$?
+          cat "$log"
+          exit "${result:-0}"
+
+      - name: Preserve native test log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: macos-personal-identity-native-test-log
+          path: |
+            ${{ runner.temp }}/macos-personal-identity-native-tests.log
+            ${{ runner.temp }}/openclawkit-identity-native-tests.log
+          if-no-files-found: ignore
+          retention-days: 7
