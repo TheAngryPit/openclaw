@@ -35,6 +35,9 @@ jobs:
           dependency-cache: 'false'
           restore-test-caches: 'false'
           cache-mode: 'off'
+      - name: Prepare canonical Apple Mermaid resources
+        shell: bash
+        run: node scripts/prepare-apple-mermaid.mjs
       - name: Resolve and run journal tests
         shell: bash
         run: |
