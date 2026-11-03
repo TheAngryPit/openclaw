@@ -5869,14 +5869,14 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
                 completed.continuation.finish()
             }
             return try await WatchConnectivityTransport.deliverPayload(
-                prepareSession: {
+                prepareSession: { @Sendable in
                     _ = await activation.holdFirstSend(commandID: "snapshot-a")
                 },
-                sendImmediately: { _ in
+                sendImmediately: { @Sendable _ in
                     _ = await transfers.holdFirstSend(commandID: "snapshot-a")
                     return true
                 },
-                enqueue: { _ in
+                enqueue: { @Sendable _ in
                     Issue.record("This fixture has no failed interactive transfer to enqueue")
                     return "transferUserInfo"
                 })
