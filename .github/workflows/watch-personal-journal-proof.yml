@@ -1,0 +1,55 @@
+name: Personal Watch journal proof
+on:
+  push:
+    branches: [infra/watch-personal-ios-proof]
+    paths: [.github/workflows/watch-personal-journal-proof.yml]
+permissions:
+  contents: read
+env:
+  TARGET_SHA: ba3cb5a13af9cf8cba3d5c1e0d6a2fba5707ada3
+  DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+  GIT_TERMINAL_PROMPT: '0'
+jobs:
+  journal:
+    if: github.repository == 'TheAngryPit/openclaw'
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: TheAngryPit/openclaw
+          ref: ba3cb5a13af9cf8cba3d5c1e0d6a2fba5707ada3
+          persist-credentials: false
+      - name: Verify source and prepare Node
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          xcodebuild -version
+          swift --version
+      - uses: ./.github/actions/setup-node-env
+        with:
+          node-version: '24.22.1'
+          install-bun: 'false'
+          install-deps: 'true'
+          frozen-lockfile: 'true'
+          dependency-cache: 'false'
+          restore-test-caches: 'false'
+          cache-mode: 'off'
+      - name: Resolve and run journal tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          package=apps/shared/OpenClawKit
+          scratch="$RUNNER_TEMP/watch-journal-scratch"
+          swift package resolve --package-path "$package" --scratch-path "$scratch"
+          test -f "$package/Package.resolved"
+          shasum -a 256 "$package/Package.resolved" | tee "$RUNNER_TEMP/journal-lock.sha256"
+          cat "$package/Package.resolved"
+          swift test --package-path "$package" --scratch-path "$scratch" \
+            --disable-index-store -Xswiftc -gline-tables-only --no-parallel \
+            --filter ChatTranscriptCacheStoreTests 2>&1 | tee "$RUNNER_TEMP/journal.log"
+          grep -q 'ChatTranscriptCacheStoreTests' "$RUNNER_TEMP/journal.log"
+          grep -E 'Test run with [1-9][0-9]* tests? .* passed' "$RUNNER_TEMP/journal.log"
+          ! grep -E 'Test .* (skipped|failed)' "$RUNNER_TEMP/journal.log"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          shasum -a 256 -c "$RUNNER_TEMP/journal-lock.sha256"
