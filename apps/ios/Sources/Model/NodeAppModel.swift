@@ -6425,7 +6425,9 @@ extension NodeAppModel {
     }
 
     private func retireWatchAppSnapshots() {
-        for task in self.watchAppSnapshotTasks.values { task.cancel() }
+        for task in self.watchAppSnapshotTasks.values {
+            task.cancel()
+        }
     }
 
     private func deliverWatchAppSnapshot(

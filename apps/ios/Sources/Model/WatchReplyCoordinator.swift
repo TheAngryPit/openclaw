@@ -234,7 +234,7 @@ final class WatchReplyCoordinator {
 
     private func process(_ entry: OpenClawWatchMessageEntry) async -> Bool {
         guard let command = entry.command, let owner = entry.owner, !Task.isCancelled else { return false }
-        guard (try? await self.isCurrentOwner(gatewayStableID: owner.gatewayStableID)) == true,
+        guard await (try? self.isCurrentOwner(gatewayStableID: owner.gatewayStableID)) == true,
               self.personalRecoveryScope == nil || command.kind == .chat,
               !self.stopped, !Task.isCancelled
         else { return false }

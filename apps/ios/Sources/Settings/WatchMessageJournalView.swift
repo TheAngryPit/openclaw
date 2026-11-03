@@ -53,15 +53,17 @@ struct WatchMessageJournalView: View {
             }
         }
         .navigationTitle("Message Delivery")
-        .task(id: "\(self.refreshID)|\(self.appModel.chatViewModelOwnerID)|\(self.appModel.isOperatorGatewayConnected)") {
+        .task(
+            id: "\(self.refreshID)|\(self.appModel.chatViewModelOwnerID)|\(self.appModel.isOperatorGatewayConnected)")
+        {
             await self.observeMessages()
         }
         .confirmationDialog(
-            "Discard this saved message?",
-            isPresented: Binding(
-                get: { self.pendingDiscard != nil },
-                set: { if !$0 { self.pendingDiscard = nil } }),
-            presenting: self.pendingDiscard)
+                "Discard this saved message?",
+                isPresented: Binding(
+                    get: { self.pendingDiscard != nil },
+                    set: { if !$0 { self.pendingDiscard = nil } }),
+                presenting: self.pendingDiscard)
         { entry in
             Button(role: .destructive) {
                 Task { await self.remove(entry) }
@@ -69,10 +71,10 @@ struct WatchMessageJournalView: View {
                 Text("Discard")
                     .font(OpenClawType.body)
             }
-        } message: { _ in
-            Text("This deletes the saved Needs review message from iPhone.")
-                .font(OpenClawType.body)
-        }
+            } message: { _ in
+                Text("This deletes the saved Needs review message from iPhone.")
+                    .font(OpenClawType.body)
+            }
     }
 
     private func message(_ entry: OpenClawWatchMessageEntry) -> some View {
