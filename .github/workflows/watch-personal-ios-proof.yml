@@ -75,7 +75,7 @@ jobs:
             --package-path apps/macos --build-system native \
             --enable-code-coverage --disable-index-store \
             -Xswiftc -gline-tables-only --skip-build --no-parallel \
-            --filter 'ControlUIDocumentNativeAuthTests|DashboardGatewaysTests|DashboardNativeGatewayAuthTests|GatewayBrowserSessionTests|GatewayConnectionControlUIAuthTests|GatewayConnectionDashboardIdentityTests|GatewayEndpointStoreTests|MacControlLiveOwnerTests|MacGatewayProfilesTests|TalkModeControllerPublishingTests|VoiceSessionCoordinatorTests' \
+            --filter 'ControlUIDocumentNativeAuthTests|DashboardGatewaysTests|DashboardNativeGatewayAuthTests|GatewayBrowserSessionTests|GatewayConnectionControlUIAuthTests|GatewayConnectionDashboardIdentityTests|GatewayEndpointStoreTests|GatewayPersonalIdentityTests|MacControlLiveOwnerTests|MacGatewayProfilesTests|TailscaleServeGatewayDiscoveryTests|TalkModeControllerPublishingTests|VoiceSessionCoordinatorTests' \
             >"$log" 2>&1 || result=$?
           cat "$log"
           tested_head="$(git rev-parse HEAD)"
@@ -92,7 +92,7 @@ jobs:
             --scratch-path "$RUNNER_TEMP/openclawkit-identity-scratch" \
             --disable-index-store -Xswiftc -gline-tables-only \
             --no-parallel \
-            --filter 'GatewayRequestAdmissionTests|RealtimeTalkRelaySessionTests' \
+            --filter 'DeviceAuthPayloadTests|GatewayRequestAdmissionTests|RealtimeTalkRelaySessionTests' \
             >"$log" 2>&1 || result=$?
           cat "$log"
           exit "${result:-0}"
