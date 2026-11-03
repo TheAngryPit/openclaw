@@ -51,11 +51,43 @@ extension OpenClawClientDatabases {
             );
             """)
         }
+        migrator.registerMigration("client-state-watch-personal-owner-v1") { db in
+            try db.execute(sql: "ALTER TABLE gateway_routing_identity ADD COLUMN watch_personal_recovery_scope TEXT")
+            try db.execute(sql: "ALTER TABLE watch_message_journal ADD COLUMN personal_recovery_scope TEXT")
+        }
+        migrator.registerMigration("client-state-watch-app-snapshot-sequence-v1") { db in
+            try db.execute(sql: """
+            CREATE TABLE watch_app_snapshot_sequence(
+                id INTEGER NOT NULL PRIMARY KEY CHECK(id = 1),
+                sequence INTEGER NOT NULL CHECK(sequence > 0)
+            );
+            """)
+        }
     }
 }
 
 extension OpenClawWatchMessageJournal {
     static let legacyImportIdentifier = "client-state-watch-message-defaults-import-v1"
+
+    public func nextAppSnapshotSequence(nowMs: Int64) async throws -> Int64? {
+        guard nowMs >= 0 else { return nil }
+        return try await self.queue.write { db in
+            let previous = try Int64.fetchOne(
+                db, sql: "SELECT sequence FROM watch_app_snapshot_sequence WHERE id = 1")
+            guard previous.map({ $0 < Int64.max }) ?? true else { return nil }
+            let sequence = max(max(nowMs, (previous ?? 0) + 1), 1)
+            if previous == nil {
+                try db.execute(
+                    sql: "INSERT INTO watch_app_snapshot_sequence(id, sequence) VALUES (1, ?)",
+                    arguments: [sequence])
+            } else {
+                try db.execute(
+                    sql: "UPDATE watch_app_snapshot_sequence SET sequence = ? WHERE id = 1",
+                    arguments: [sequence])
+            }
+            return sequence
+        }
+    }
 
     /// Reconcile every captured snapshot: an older app may write again after import.
     /// Hash-only receipts survive Forget and never grant permission to send.

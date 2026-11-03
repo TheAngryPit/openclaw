@@ -49,9 +49,35 @@ public actor OpenClawWatchMessageJournal {
     }
 
     public func route(gatewayStableID: String) async throws -> OpenClawWatchMessageRoute? {
+        try await self.route(
+            gatewayStableID: gatewayStableID, bindOwner: false, personalRecoveryScope: nil, routingIdentity: nil)
+    }
+
+    /// Bind only after the phone has admitted its current operator. The opaque
+    /// generation keeps the person's continuity scope off the Watch wire.
+    public func bindRoute(
+        gatewayStableID: String,
+        personalRecoveryScope: String?,
+        routingIdentity: OpenClawChatSessionRoutingIdentity? = nil) async throws -> OpenClawWatchMessageRoute?
+    {
+        try await self.route(
+            gatewayStableID: gatewayStableID, bindOwner: true, personalRecoveryScope: personalRecoveryScope,
+            routingIdentity: routingIdentity)
+    }
+
+    private func route(
+        gatewayStableID: String,
+        bindOwner: Bool,
+        personalRecoveryScope: String?,
+        routingIdentity: OpenClawChatSessionRoutingIdentity?) async throws -> OpenClawWatchMessageRoute?
+    {
         try await self.queue.write { db in
             try Self.requireImport(db)
             try Self.requireGatewayAvailable(db, gatewayID: gatewayStableID)
+            if let routingIdentity {
+                try OpenClawClientDatabases.storeSessionRoutingIdentity(
+                    routingIdentity, gatewayID: gatewayStableID, in: db)
+            }
             guard let row = try Row.fetchOne(
                 db,
                 sql: "SELECT * FROM gateway_routing_identity WHERE gateway_id = ?",
@@ -64,17 +90,23 @@ public actor OpenClawWatchMessageJournal {
             // Forget deletes this row. Never restore a generation captured before
             // the transaction: a newly paired owner must get a fresh identity.
             let generation: String
-            if let existing: String = row["watch_route_generation"] {
+            let previousScope: String? = row["watch_personal_recovery_scope"]
+            let nextScope = bindOwner ? personalRecoveryScope : previousScope
+            if let existing: String = row["watch_route_generation"], previousScope == nextScope {
                 generation = existing
             } else {
                 generation = UUID().uuidString
                 try db.execute(
-                    sql: "UPDATE gateway_routing_identity SET watch_route_generation = ? WHERE gateway_id = ?",
-                    arguments: [generation, gatewayStableID])
+                    sql: """
+                    UPDATE gateway_routing_identity
+                    SET watch_route_generation = ?, watch_personal_recovery_scope = ? WHERE gateway_id = ?
+                    """,
+                    arguments: [generation, nextScope, gatewayStableID])
             }
             return OpenClawWatchMessageRoute(
                 owner: OpenClawWatchMessageOwner(gatewayStableID: gatewayStableID, routeGeneration: generation),
-                routingIdentity: identity)
+                routingIdentity: identity,
+                personalRecoveryScope: nextScope)
         }
     }
 
@@ -109,6 +141,8 @@ public actor OpenClawWatchMessageJournal {
                 return existing
             }
             try Self.requireContext(db, context: command.context, matchRoutingContract: true)
+            let route = try Self.requirePersistedGeneration(db, context: command.context)
+            let personalRecoveryScope: String? = route["watch_personal_recovery_scope"]
             let unexpired = try Int.fetchOne(
                 db, sql: "SELECT COUNT(*) FROM watch_message_journal WHERE route_generation IS NOT NULL") ?? 0
             let pending = try Int.fetchOne(
@@ -123,14 +157,15 @@ public actor OpenClawWatchMessageJournal {
                 sql: """
                 INSERT INTO watch_message_journal(
                     command_id, gateway_id, route_generation, kind, command_json, command_fingerprint,
-                    submitted_at_ms, admitted_at_ms, expires_at_ms, phase, receipt_json, receipt_destination
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+                    submitted_at_ms, admitted_at_ms, expires_at_ms, phase, receipt_json, receipt_destination,
+                    personal_recovery_scope
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)
                 """,
                 arguments: [
                     command.commandId, command.context.gatewayStableID, command.context.routeGeneration,
                     command.kind.rawValue, commandJSON, commandFingerprint,
                     command.submittedAtMs, nowMs, command.expiresAtMs,
-                    receiptJSON, destination.rawValue,
+                    receiptJSON, destination.rawValue, personalRecoveryScope,
                 ])
             return try Self.requireEntry(db, id: command.commandId)
         }

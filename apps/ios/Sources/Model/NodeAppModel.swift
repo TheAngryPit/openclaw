@@ -545,6 +545,7 @@ final class NodeAppModel {
     }
 
     @ObservationIgnored private var watchReplyCoordinator: WatchReplyCoordinator?
+    @ObservationIgnored private var watchAppSnapshotTasks: [UUID: Task<Void, Never>] = [:]
     @ObservationIgnored private var preparedWatchJournal: OpenClawWatchMessageJournal?
     @ObservationIgnored private let appleReviewDemoChatTransport = LocalFixtureChatTransport(fixture: .appleReviewDemo)
     @ObservationIgnored private var clientDatabases: OpenClawClientDatabases?
@@ -4129,6 +4130,9 @@ extension NodeAppModel {
             !GatewayStableIdentifier.matches(self.personalChatOwnerGatewayID, stableID)
         else { return }
         self.operatorAuthorityGeneration &+= 1
+        self.retireWatchAppSnapshots()
+        self.watchReplyCoordinator?.stop()
+        self.watchReplyCoordinator = nil
         self.chatPresentation.viewModel?.detachTransport()
         self.chatTranscriptCacheGeneration &+= 1
         self.focusedChatSessionKey = nil
@@ -4795,6 +4799,7 @@ extension NodeAppModel {
         self.refreshOperatorAdminScopeFromStore()
         guard connected else {
             guard changed else { return }
+            self.retireWatchAppSnapshots()
             Task { [weak self] in
                 await self?.syncWatchAppSnapshot(reason: "operator_offline")
             }
@@ -4803,7 +4808,7 @@ extension NodeAppModel {
         Task { [weak self] in
             guard let self else { return }
             guard self.activeGatewayConnectConfig?.personalTailscaleAuthentication != true else {
-                // Watch queues predate personal attribution; retain them without replaying as another person.
+                await self.flushQueuedWatchMessagesIfAvailable(resetRetryBudget: changed)
                 await self.syncWatchAppSnapshot(reason: "operator_online")
                 return
             }
@@ -5008,7 +5013,7 @@ extension NodeAppModel {
     }
 
     func onNodeGatewayConnected(
-        shouldContinue: @MainActor @Sendable () -> Bool = { true }) async
+        shouldContinue: @escaping @MainActor @Sendable () -> Bool = { true }) async
     {
         guard shouldContinue() else { return }
         await self.registerAPNsTokenIfNeeded(shouldContinue: shouldContinue)
@@ -5945,8 +5950,10 @@ extension NodeAppModel {
                         status: OpenClawWatchAppStatus(code: .chatConnectIPhone),
                         statusText: "Connect iPhone chat to read messages")
                 }
+                guard let route = await self.operatorSession.currentRoute() else { throw CancellationError() }
                 payload = try await IOSGatewayChatTransport(gateway: self.operatorSession, globalAgentId: agentID)
-                    .requestHistory(sessionKey: sessionKey)
+                    .requestHistory(sessionKey: sessionKey, ifCurrentRoute: route)
+                guard await self.operatorSession.currentRoute() == route else { throw CancellationError() }
             }
 
             let items = OpenClawChatHistoryPresentation.makeWatchItems(from: payload.messages ?? [])
@@ -5978,7 +5985,8 @@ extension NodeAppModel {
 
     private func makeWatchAppSnapshot(
         chatPreview: WatchChatPreview? = nil,
-        chatDeliveryContext: OpenClawWatchChatDeliveryContext? = nil) -> OpenClawWatchAppSnapshotMessage
+        chatDeliveryContext: OpenClawWatchChatDeliveryContext? = nil,
+        snapshotSequence: Int64) -> OpenClawWatchAppSnapshotMessage
     {
         self.pruneExpiredWatchExecApprovalPrompts()
         let watchGatewayConnected = self.isAppleReviewDemoModeEnabled
@@ -6005,8 +6013,9 @@ extension NodeAppModel {
             chatItems: chatPreview?.items,
             chatStatus: chatPreview?.status,
             chatStatusText: chatPreview?.statusText,
-            sentAtMs: Int64(Date().timeIntervalSince1970 * 1000),
+            sentAtMs: snapshotSequence,
             snapshotId: UUID().uuidString,
+            snapshotSequence: snapshotSequence,
             chatDeliveryContext: chatDeliveryContext)
     }
 
@@ -6203,25 +6212,33 @@ extension NodeAppModel {
     }
 
     private func retireWatchMessageJournal() {
+        self.retireWatchAppSnapshots()
         self.watchReplyCoordinator?.stop()
         self.watchReplyCoordinator = nil
         self.preparedWatchJournal = nil
     }
 
     private func watchChatCoordinator() async throws -> WatchReplyCoordinator {
-        guard self.activeGatewayConnectConfig?.personalTailscaleAuthentication != true else {
+        let personal = self.activeGatewayConnectConfig?.personalTailscaleAuthentication == true
+        let scope = personal ? self.personalChatRecoveryScope : nil
+        guard !personal || (scope != nil && self.currentWatchChatGatewayStableID() != nil) else {
             throw WatchMessagingError.admissionUnavailable
         }
         let generation = self.operatorAuthorityGeneration
         let journal = try await self.watchMessageJournal()
-        guard self.activeGatewayConnectConfig?.personalTailscaleAuthentication != true,
-              self.operatorAuthorityGeneration == generation
+        guard self.operatorAuthorityGeneration == generation,
+              personal == (self.activeGatewayConnectConfig?.personalTailscaleAuthentication == true)
         else { throw CancellationError() }
+        if let gatewayID = self.currentWatchChatGatewayStableID() {
+            _ = try await journal.bindRoute(gatewayStableID: gatewayID, personalRecoveryScope: scope)
+        }
+        guard self.operatorAuthorityGeneration == generation else { throw CancellationError() }
         if let coordinator = self.watchReplyCoordinator { return coordinator }
         let coordinator = WatchReplyCoordinator(
             journal: journal,
             gateway: self.operatorSession,
             messaging: self.watchMessagingService,
+            personalRecoveryScope: scope,
             reportStorageWarning: { [weak self] message in
                 self?.updateWatchChatStorageWarning(message, for: journal)
             })
@@ -6265,7 +6282,7 @@ extension NodeAppModel {
                 reason: "watch_message",
                 routeGeneration: generation,
                 gatewayStableID: command.context.gatewayStableID)
-            if connected, self.activeGatewayConnectConfig?.personalTailscaleAuthentication != true {
+            if connected {
                 await coordinator.resume(gatewayStableID: command.context.gatewayStableID)
             }
         }
@@ -6283,7 +6300,6 @@ extension NodeAppModel {
     }
 
     private func flushQueuedWatchMessagesIfAvailable(resetRetryBudget: Bool = false) async {
-        guard self.activeGatewayConnectConfig?.personalTailscaleAuthentication != true else { return }
         do {
             let coordinator = try await self.watchChatCoordinator()
             await coordinator.resume(
@@ -6295,8 +6311,25 @@ extension NodeAppModel {
     }
 
     private func currentWatchChatGatewayStableID() -> String? {
-        guard self.activeGatewayConnectConfig?.personalTailscaleAuthentication != true else { return nil }
+        if self.activeGatewayConnectConfig?.personalTailscaleAuthentication == true {
+            guard self.operatorConnected, self.personalChatRecoveryScope != nil,
+                  GatewayStableIdentifier.matches(self.personalChatOwnerGatewayID, self.connectedGatewayID)
+            else { return nil }
+        }
         return GatewayStableIdentifier.exact(self.connectedGatewayID)
+    }
+
+    func canReviewWatchMessage(_ entry: OpenClawWatchMessageEntry) -> Bool {
+        let stableID = self.activeGatewayConnectConfig?.effectiveStableID
+            ?? GatewaySettingsStore.activeGatewayEntry()?.stableID
+        let personal = self.activeGatewayConnectConfig?.personalTailscaleAuthentication == true ||
+            stableID.map(GatewaySettingsStore.usesPersonalTailscaleAuthentication(stableID:)) == true
+        guard personal else { return entry.personalRecoveryScope == nil }
+        guard let gatewayID = self.currentWatchChatGatewayStableID(), let scope = self.personalChatRecoveryScope else {
+            return false
+        }
+        return entry.personalRecoveryScope == scope &&
+            GatewayStableIdentifier.matches(entry.owner?.gatewayStableID, gatewayID)
     }
 
     private func watchAppCommandTargetsCurrentGatewayIfTagged(_ event: WatchAppCommandEvent) -> Bool {
@@ -6331,14 +6364,35 @@ extension NodeAppModel {
             return nil
         }
         do {
+            let generation = self.operatorAuthorityGeneration
+            let personal = self.activeGatewayConnectConfig?.personalTailscaleAuthentication == true
+            let scope = personal ? self.personalChatRecoveryScope : nil
+            let routingIdentity: OpenClawChatSessionRoutingIdentity?
+            if personal {
+                guard let scope,
+                      let socket = await self.operatorSession.currentRoute(ifGatewayID: gatewayStableID),
+                      await self.operatorSession.currentAuthRecoveryScope(ifCurrentRoute: socket) == scope
+                else { return nil }
+                let data = try await self.operatorSession.request(
+                    OpenClawChatGatewayRequests.agentsList(), ifCurrentRoute: socket)
+                routingIdentity = try OpenClawChatGatewayPayloadCodec.decodeSessionRoutingIdentity(data)
+                guard await self.operatorSession.currentRoute(ifGatewayID: gatewayStableID) == socket else {
+                    return nil
+                }
+            } else {
+                routingIdentity = nil
+            }
             let journal = try await self.watchMessageJournal()
-            guard let route = try await journal.route(gatewayStableID: gatewayStableID),
-                  let generation = route.owner.routeGeneration
+            guard self.operatorAuthorityGeneration == generation,
+                  let route = try await journal.bindRoute(
+                      gatewayStableID: gatewayStableID, personalRecoveryScope: scope, routingIdentity: routingIdentity),
+                  let routeGeneration = route.owner.routeGeneration,
+                  self.operatorAuthorityGeneration == generation
             else { return nil }
             let target = IOSGatewayChatTransport.sessionTarget(for: key, selectedAgentID: agentID)
             let context = OpenClawWatchChatDeliveryContext(
                 gatewayStableID: gatewayStableID,
-                routeGeneration: generation,
+                routeGeneration: routeGeneration,
                 agentId: agentID,
                 sessionKey: key,
                 deliverySessionKey: target.sessionKey,
@@ -6353,32 +6407,85 @@ extension NodeAppModel {
     private func syncWatchAppSnapshot(
         reason: String,
         includeChat: Bool = false,
-        shouldContinue: @MainActor @Sendable () -> Bool = { true }) async
+        shouldContinue: @escaping @MainActor @Sendable () -> Bool = { true }) async
     {
-        guard shouldContinue() else { return }
+        let id = UUID()
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.deliverWatchAppSnapshot(
+                reason: reason, includeChat: includeChat, shouldContinue: shouldContinue)
+        }
+        self.watchAppSnapshotTasks[id] = task
+        await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+        self.watchAppSnapshotTasks[id] = nil
+    }
+
+    private func retireWatchAppSnapshots() {
+        for task in self.watchAppSnapshotTasks.values { task.cancel() }
+    }
+
+    private func deliverWatchAppSnapshot(
+        reason: String,
+        includeChat: Bool,
+        shouldContinue: @MainActor @Sendable () -> Bool) async
+    {
+        guard !Task.isCancelled, shouldContinue() else { return }
         let deliveryGeneration = self.gatewayConnectGeneration
+        let authorityGeneration = self.operatorAuthorityGeneration
         let sessionKey = self.chatSessionKey
         let agentID = self.chatDeliveryAgentId
         let context = await self.makeWatchChatDeliveryContext(
             sessionKey: sessionKey, agentID: agentID, gatewayStableID: self.currentWatchChatGatewayStableID())
         let chatPreview = includeChat ? await makeWatchChatPreview(sessionKey: sessionKey, agentID: agentID) : nil
-        guard shouldContinue() else { return }
+        guard !Task.isCancelled, shouldContinue() else { return }
         guard deliveryGeneration == self.gatewayConnectGeneration,
+              authorityGeneration == self.operatorAuthorityGeneration,
               sessionKey.utf8.elementsEqual(self.chatSessionKey.utf8), agentID == self.chatDeliveryAgentId
         else {
             await self.syncWatchAppSnapshot(reason: "\(reason)_route_repair")
             return
         }
-        let message = self.makeWatchAppSnapshot(chatPreview: chatPreview, chatDeliveryContext: context)
+        let snapshotSequence: Int64
         do {
-            guard shouldContinue() else { return }
-            _ = try await self.watchMessagingService.syncAppSnapshot(message)
-            if deliveryGeneration != self.gatewayConnectGeneration {
-                await self.syncWatchAppSnapshot(reason: "\(reason)_route_repair")
+            let journal = try await self.watchMessageJournal()
+            guard let sequence = try await journal.nextAppSnapshotSequence(
+                nowMs: Int64(Date().timeIntervalSince1970 * 1000))
+            else {
+                GatewayDiagnostics.log("watch app snapshot withheld: persistent sequence unavailable")
+                return
             }
+            snapshotSequence = sequence
+        } catch {
+            GatewayDiagnostics.log("watch app snapshot withheld: persistent sequence unavailable")
+            return
+        }
+        guard deliveryGeneration == self.gatewayConnectGeneration,
+              authorityGeneration == self.operatorAuthorityGeneration,
+              sessionKey.utf8.elementsEqual(self.chatSessionKey.utf8), agentID == self.chatDeliveryAgentId
+        else {
+            await self.syncWatchAppSnapshot(reason: "\(reason)_route_repair")
+            return
+        }
+        let message = self.makeWatchAppSnapshot(
+            chatPreview: chatPreview,
+            chatDeliveryContext: context,
+            snapshotSequence: snapshotSequence)
+        do {
+            guard !Task.isCancelled, shouldContinue() else { return }
+            _ = try await self.watchMessagingService.syncAppSnapshot(message)
         } catch {
             GatewayDiagnostics.log(
                 "watch app snapshot: failed reason=\(reason) error=\(error.localizedDescription)")
+        }
+        if deliveryGeneration != self.gatewayConnectGeneration ||
+            authorityGeneration != self.operatorAuthorityGeneration
+        {
+            // WatchConnectivity can finish a send that was already admitted when its task was cancelled.
+            await self.syncWatchAppSnapshot(reason: "\(reason)_route_repair")
         }
     }
 

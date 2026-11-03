@@ -422,6 +422,7 @@ public struct OpenClawWatchAppSnapshotMessage: Codable, Sendable, Equatable {
     public var chatStatusText: String?
     public var sentAtMs: Int64?
     public var snapshotId: String?
+    public var snapshotSequence: Int64?
     public var chatDeliveryContext: OpenClawWatchChatDeliveryContext?
 
     public init(
@@ -444,6 +445,7 @@ public struct OpenClawWatchAppSnapshotMessage: Codable, Sendable, Equatable {
         chatStatusText: String? = nil,
         sentAtMs: Int64? = nil,
         snapshotId: String? = nil,
+        snapshotSequence: Int64? = nil,
         chatDeliveryContext: OpenClawWatchChatDeliveryContext? = nil)
     {
         self.type = .appSnapshot
@@ -466,6 +468,7 @@ public struct OpenClawWatchAppSnapshotMessage: Codable, Sendable, Equatable {
         self.chatStatusText = chatStatusText ?? chatStatus.map(Self.legacyText)
         self.sentAtMs = sentAtMs
         self.snapshotId = snapshotId
+        self.snapshotSequence = snapshotSequence
         self.chatDeliveryContext = chatDeliveryContext
     }
 
@@ -486,6 +489,7 @@ public struct OpenClawWatchAppSnapshotMessage: Codable, Sendable, Equatable {
         chatStatusText: String? = nil,
         sentAtMs: Int64? = nil,
         snapshotId: String? = nil,
+        snapshotSequence: Int64? = nil,
         chatDeliveryContext: OpenClawWatchChatDeliveryContext? = nil)
     {
         // Preserve the shipped source API while producers migrate to semantic statuses.
@@ -515,6 +519,7 @@ public struct OpenClawWatchAppSnapshotMessage: Codable, Sendable, Equatable {
             chatStatusText: chatStatusText,
             sentAtMs: sentAtMs,
             snapshotId: snapshotId,
+            snapshotSequence: snapshotSequence,
             chatDeliveryContext: chatDeliveryContext)
     }
 
@@ -538,6 +543,7 @@ public struct OpenClawWatchAppSnapshotMessage: Codable, Sendable, Equatable {
         self.chatItems = try container.decodeIfPresent([OpenClawWatchChatItem].self, forKey: .chatItems)
         self.sentAtMs = try container.decodeIfPresent(Int64.self, forKey: .sentAtMs)
         self.snapshotId = try container.decodeIfPresent(String.self, forKey: .snapshotId)
+        self.snapshotSequence = try container.decodeIfPresent(Int64.self, forKey: .snapshotSequence)
         self.chatDeliveryContext = try container.decodeIfPresent(
             OpenClawWatchChatDeliveryContext.self, forKey: .chatDeliveryContext)
 

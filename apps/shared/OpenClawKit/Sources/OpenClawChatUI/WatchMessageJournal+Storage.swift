@@ -204,6 +204,7 @@ extension OpenClawWatchMessageJournal {
         return OpenClawWatchMessageEntry(
             commandId: row["command_id"],
             owner: owner,
+            personalRecoveryScope: row["personal_recovery_scope"],
             command: command,
             displayText: command?.text ?? row["legacy_text"],
             phase: phase,

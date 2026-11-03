@@ -23,6 +23,17 @@ public struct OpenClawWatchMessageOwner: Equatable, Sendable {
 public struct OpenClawWatchMessageRoute: Equatable, Sendable {
     public let owner: OpenClawWatchMessageOwner
     public let routingIdentity: OpenClawChatSessionRoutingIdentity
+    public let personalRecoveryScope: String?
+
+    public init(
+        owner: OpenClawWatchMessageOwner,
+        routingIdentity: OpenClawChatSessionRoutingIdentity,
+        personalRecoveryScope: String? = nil)
+    {
+        self.owner = owner
+        self.routingIdentity = routingIdentity
+        self.personalRecoveryScope = personalRecoveryScope
+    }
 }
 
 public enum OpenClawWatchMessagePhase: String, Codable, Sendable {
@@ -48,6 +59,7 @@ public struct OpenClawWatchMessageEntry: Identifiable, Equatable, Sendable {
     }
 
     public let owner: OpenClawWatchMessageOwner?
+    public let personalRecoveryScope: String?
     public let command: OpenClawWatchChatDeliveryCommand?
     public let displayText: String?
     public let phase: OpenClawWatchMessagePhase
@@ -61,6 +73,7 @@ public struct OpenClawWatchMessageEntry: Identifiable, Equatable, Sendable {
     public static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.id == rhs.id &&
             lhs.owner == rhs.owner &&
+            lhs.personalRecoveryScope == rhs.personalRecoveryScope &&
             lhs.command == rhs.command &&
             lhs.displayText == rhs.displayText &&
             lhs.phase == rhs.phase &&

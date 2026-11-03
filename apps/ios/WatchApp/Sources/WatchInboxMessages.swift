@@ -506,6 +506,7 @@ struct WatchAppSnapshotMessage: Equatable {
     var chatStatus: OpenClawWatchAppStatus?
     var sentAtMs: Int64?
     var snapshotId: String?
+    var snapshotSequence: Int64?
     var chatDeliveryContext: OpenClawWatchChatDeliveryContext?
 
     var validatedChatDeliveryContext: OpenClawWatchChatDeliveryContext? {
@@ -546,6 +547,7 @@ extension WatchAppSnapshotMessage: Codable {
         let sentAtMs = (payload["sentAtMs"] as? NSNumber)?.int64Value
         let snapshotId = (payload["snapshotId"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let snapshotSequence = (payload["snapshotSequence"] as? NSNumber)?.int64Value
         let chatItems = (payload["chatItems"] as? [Any])?.compactMap(Self.parseChatItem)
         return Self(
             gatewayStatus: Self.parseStatus(
@@ -581,6 +583,7 @@ extension WatchAppSnapshotMessage: Codable {
                     text: payload["chatStatusText"] as? String),
             sentAtMs: sentAtMs,
             snapshotId: snapshotId,
+            snapshotSequence: snapshotSequence,
             chatDeliveryContext: (payload["chatDeliveryContext"] as? [String: Any])
                 .flatMap { try? OpenClawWatchChatDeliveryCodec.decodeContext($0) })
     }
@@ -623,6 +626,7 @@ extension WatchAppSnapshotMessage: Codable {
         self.chatItems = try container.decodeIfPresent([WatchChatItem].self, forKey: .chatItems)
         self.sentAtMs = try container.decodeIfPresent(Int64.self, forKey: .sentAtMs)
         self.snapshotId = try container.decodeIfPresent(String.self, forKey: .snapshotId)
+        self.snapshotSequence = try container.decodeIfPresent(Int64.self, forKey: .snapshotSequence)
         self.chatDeliveryContext = try container.decodeIfPresent(
             OpenClawWatchChatDeliveryContext.self, forKey: .chatDeliveryContext)
         let gatewayStatusText = try legacy.decodeIfPresent(String.self, forKey: .gatewayStatusText)

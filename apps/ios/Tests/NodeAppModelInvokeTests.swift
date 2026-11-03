@@ -760,6 +760,7 @@ private final class MockWatchMessagingService: @preconcurrency WatchMessagingSer
     var lastSentAppSnapshot: OpenClawWatchAppSnapshotMessage?
     var syncExecApprovalSnapshotHandler: ((OpenClawWatchExecApprovalSnapshotMessage) async throws
         -> WatchNotificationSendResult)?
+    var syncAppSnapshotHandler: ((OpenClawWatchAppSnapshotMessage) async throws -> WatchNotificationSendResult)?
     var sentChatReceipts: [OpenClawWatchChatDeliveryReceipt] = []
     var lastChatDeliveryContext: OpenClawWatchChatDeliveryContext?
     private var statusHandler: (@Sendable (WatchMessagingStatus) -> Void)?
@@ -892,6 +893,9 @@ private final class MockWatchMessagingService: @preconcurrency WatchMessagingSer
         _ message: OpenClawWatchAppSnapshotMessage) async throws -> WatchNotificationSendResult
     {
         self.lastSentAppSnapshot = message
+        if let syncAppSnapshotHandler {
+            return try await syncAppSnapshotHandler(message)
+        }
         if let sendError {
             throw sendError
         }
@@ -1139,6 +1143,62 @@ private actor WatchSnapshotSendGate {
         }
         continuation.resume()
         self.continuation = nil
+    }
+}
+
+private actor WatchAppSnapshotSendOrderProbe {
+    private typealias Waiter = (count: Int, continuation: CheckedContinuation<Void, Never>)
+
+    private var started: [OpenClawWatchAppSnapshotMessage] = []
+    private var completed: [OpenClawWatchAppSnapshotMessage] = []
+    private var firstContinuation: CheckedContinuation<Void, Never>?
+    private var firstReleased = false
+    private var startedWaiters: [Waiter] = []
+    private var completedWaiters: [Waiter] = []
+
+    func send(_ message: OpenClawWatchAppSnapshotMessage) async {
+        self.started.append(message)
+        let startedCount = self.started.count
+        Self.resumeWaiters(&self.startedWaiters, reached: startedCount)
+        if self.started.count == 1, !self.firstReleased {
+            await withCheckedContinuation { self.firstContinuation = $0 }
+        }
+        self.completed.append(message)
+        let completedCount = self.completed.count
+        Self.resumeWaiters(&self.completedWaiters, reached: completedCount)
+    }
+
+    func waitForStarted(count: Int) async {
+        guard self.started.count < count else { return }
+        await withCheckedContinuation { continuation in
+            self.startedWaiters.append((count, continuation))
+        }
+    }
+
+    func waitForCompleted(count: Int) async {
+        guard self.completed.count < count else { return }
+        await withCheckedContinuation { continuation in
+            self.completedWaiters.append((count, continuation))
+        }
+    }
+
+    func completedSnapshots() -> [OpenClawWatchAppSnapshotMessage] { self.completed }
+
+    func releaseFirst() {
+        self.firstReleased = true
+        self.firstContinuation?.resume()
+        self.firstContinuation = nil
+    }
+
+    private static func resumeWaiters(
+        _ waiters: inout [Waiter],
+        reached count: Int)
+    {
+        let ready = waiters.filter { $0.count <= count }
+        waiters.removeAll { $0.count <= count }
+        for waiter in ready {
+            waiter.continuation.resume()
+        }
     }
 }
 
@@ -5792,6 +5852,82 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
         #expect(appModel.pendingExecApprovalPrompt?.id == "approval-a")
     }
 
+    @Test(arguments: [false, true])
+    @MainActor func `personal owner retirement cancels a Watch snapshot awaiting activation`(
+        changesPerson: Bool) async throws
+    {
+        let (watchService, appModel) = makeWatchModel()
+        appModel.adoptPersonalChatOwner(scope: "person-a", stableID: "synthetic-gateway")
+        let activation = WatchMessageSendGate()
+        let transfers = WatchMessageSendGate()
+        transfers.release()
+        defer { activation.release() }
+        let completed = AsyncStream<Void>.makeStream()
+        watchService.syncAppSnapshotHandler = { _ in
+            defer {
+                completed.continuation.yield(())
+                completed.continuation.finish()
+            }
+            return try await WatchConnectivityTransport.deliverPayload(
+                prepareSession: {
+                    _ = await activation.holdFirstSend(commandID: "snapshot-a")
+                },
+                sendImmediately: { _ in
+                    _ = await transfers.holdFirstSend(commandID: "snapshot-a")
+                    return true
+                },
+                enqueue: { _ in
+                    Issue.record("This fixture has no failed interactive transfer to enqueue")
+                    return "transferUserInfo"
+                })
+        }
+        watchService.emitAppSnapshotRequest(.init(requestId: "snapshot-a", transport: "sendMessage"))
+        try #require(try await activation.waitForFirstSend() == "snapshot-a")
+        if changesPerson {
+            appModel.adoptPersonalChatOwner(scope: "person-b", stableID: "synthetic-gateway")
+        }
+        activation.release()
+        var completion = completed.stream.makeAsyncIterator()
+        _ = await completion.next()
+        #expect(transfers.commandIDs == (changesPerson ? [] : ["snapshot-a"]))
+    }
+
+    @Test @MainActor func `retired Watch snapshot sequence cannot supersede a newer owner after send starts`() async throws {
+        let (watchService, appModel) = makeWatchModel()
+        let probe = WatchAppSnapshotSendOrderProbe()
+        watchService.syncAppSnapshotHandler = { message in
+            await probe.send(message)
+            return WatchNotificationSendResult(
+                deliveredImmediately: true, queuedForDelivery: false, transport: "sendMessage")
+        }
+        appModel.connectedGatewayID = "synthetic-gateway"
+        appModel.gatewayConnected = true
+        appModel.gatewayStatusText = "Connected as A"
+        appModel.adoptPersonalChatOwner(scope: "person-a", stableID: "synthetic-gateway")
+        appModel.setOperatorConnected(true)
+
+        await probe.waitForStarted(count: 1)
+        let oldSequence = try #require(watchService.lastSentAppSnapshot?.snapshotSequence)
+
+        appModel.adoptPersonalChatOwner(scope: "person-b", stableID: "synthetic-gateway")
+        appModel.gatewayStatusText = "Offline"
+        appModel.setOperatorConnected(false)
+        await probe.waitForStarted(count: 2)
+        await probe.waitForCompleted(count: 1)
+        let currentSequence = try #require(watchService.lastSentAppSnapshot?.snapshotSequence)
+        #expect(currentSequence > oldSequence)
+
+        await probe.releaseFirst()
+        await probe.waitForCompleted(count: 3)
+        let completed = await probe.completedSnapshots()
+        #expect(completed.count >= 3)
+        #expect(completed[0].snapshotSequence == currentSequence)
+        #expect(completed[1].snapshotSequence == oldSequence)
+        #expect(completed[2].gatewayConnected == false)
+        let repairSequence = try #require(completed[2].snapshotSequence)
+        #expect(repairSequence > currentSequence)
+    }
+
     @Test @MainActor func `watch app snapshot request publishes current dashboard state`() async throws {
         NodeAppModel._test_resetPersistedWatchExecApprovalBridgeState()
         defer { NodeAppModel._test_resetPersistedWatchExecApprovalBridgeState() }
@@ -7450,6 +7586,52 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
     }
 
     @Test @MainActor
+    func `retired personal Watch owner cannot resume its queued message or receipt`() async throws {
+        try await withWatchDeliveryFixture { fixture in
+            let identity = try #require(OpenClawChatSessionRoutingIdentity(
+                contract: "per-sender|main|main"))
+            let ownerA = try #require(try await fixture.journal.bindRoute(
+                gatewayStableID: fixture.context.gatewayStableID,
+                personalRecoveryScope: "synthetic-person-a",
+                routingIdentity: identity))
+            let contextA = try OpenClawWatchChatDeliveryContext(
+                gatewayStableID: fixture.context.gatewayStableID,
+                routeGeneration: #require(ownerA.owner.routeGeneration),
+                agentId: fixture.context.agentId,
+                sessionKey: fixture.context.sessionKey,
+                deliverySessionKey: fixture.context.deliverySessionKey,
+                sessionRoutingContract: identity.contract)
+            let commandA = OpenClawWatchChatDeliveryCommand(
+                context: contextA,
+                commandId: "retired-person-a-message",
+                submittedAtMs: WatchMessagingPayloadCodec.nowMs(),
+                body: .chat(text: "Synthetic work owned by person A"))
+            let admittedA = try await fixture.journal.admit(commandA, nowMs: WatchMessagingPayloadCodec.nowMs())
+            let coordinatorA = WatchReplyCoordinator(
+                journal: fixture.journal,
+                gateway: fixture.gateway,
+                messaging: fixture.messaging,
+                personalRecoveryScope: "synthetic-person-a",
+                reportStorageWarning: { message in
+                    if message != nil { Issue.record("unexpected journal failure") }
+                })
+
+            let ownerB = try #require(try await fixture.journal.bindRoute(
+                gatewayStableID: fixture.context.gatewayStableID,
+                personalRecoveryScope: "synthetic-person-b"))
+            #expect(ownerB.owner != ownerA.owner)
+            await coordinatorA.resume(gatewayStableID: fixture.context.gatewayStableID)
+            await coordinatorA.stopAndWait()
+
+            #expect(fixture.messaging.sentChatReceipts.isEmpty)
+            #expect(try await fixture.journal.resumableEntry(
+                id: commandA.commandId, context: contextA) == nil)
+            #expect(try await fixture.journal.entries() == [admittedA])
+            #expect(admittedA.personalRecoveryScope == "synthetic-person-a")
+        }
+    }
+
+    @Test @MainActor
     func `mirrored Watch action uses the cold canonical registry and commits phone custody`() async throws {
         let (_, model) = makeWatchModel(notificationCenter: MockBootstrapNotificationCenter())
         let previous = OpenClawAppModelRegistry.appModel
@@ -8913,7 +9095,8 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
                 pendingApprovalCount: 1,
                 chatStatus: OpenClawWatchAppStatus(code: .chatConnectIPhone),
                 chatStatusText: "Connect iPhone chat to read messages",
-                snapshotId: "app-a"))
+                snapshotId: "app-a",
+                snapshotSequence: 17))
         let approvalPayload = WatchMessagingPayloadCodec.encodeExecApprovalSnapshotPayload(
             OpenClawWatchExecApprovalSnapshotMessage(
                 approvals: [
@@ -8946,6 +9129,7 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
         #expect(nestedChatStatus["code"] as? String == "chatConnectIPhone")
         #expect(nestedApp["chatStatusCode"] == nil)
         #expect(nestedApp["snapshotId"] as? String == "app-a")
+        #expect((nestedApp["snapshotSequence"] as? NSNumber)?.int64Value == 17)
         #expect(nestedApprovals["snapshotId"] as? String == "approval-a")
         #expect(nestedApprovals["gatewayStableID"] as? String == "gateway-a")
         #expect((nestedApprovals["approvals"] as? [Any])?.count == 1)

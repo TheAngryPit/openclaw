@@ -132,6 +132,30 @@ struct PersonalGatewayAuthenticationTests {
         #expect(model.makeChatOfflineStore() == nil)
     }
 
+    @Test func `personal Watch outbox refuses a route whose verified owner was retired`() async throws {
+        let fixture = try await NativeGatewayWebSocketFixture.start(
+            issuedDeviceTokens: [], authMethod: "tailscale", recoveryScope: self.personalRecoveryScope)
+        defer { fixture.stop() }
+        let config = self.personalConfig(url: fixture.url())
+        let model = NodeAppModel(audioAdmissionInitiallyAllowed: false)
+        try await self.withConnectedPersonalOperator(model: model, config: config) {
+            model.adoptPersonalChatOwner(scope: self.personalRecoveryScope, stableID: config.effectiveStableID)
+            let route = try #require(await model.operatorSession.currentRoute(
+                ifGatewayID: config.effectiveStableID))
+            #expect(await model.operatorSession.currentAuthRecoveryScope(ifCurrentRoute: route) ==
+                self.personalRecoveryScope)
+
+            let retired = IOSGatewayChatTransport(
+                gateway: model.operatorSession,
+                globalAgentId: "main",
+                outboxGatewayID: config.effectiveStableID,
+                expectedPersonalRecoveryScope: "synthetic-successor-person")
+            if case .available(_) = await retired.acquireOutboxRouteLease() {
+                Issue.record("A Watch delivery must not use a socket authenticated for its retired owner")
+            }
+        }
+    }
+
     @Test(arguments: [false, true])
     func `native Dashboard bridge refuses foreign documents and retires lost authority`(
         foreignOrigin: Bool) async throws
@@ -586,7 +610,7 @@ struct PersonalGatewayAuthenticationTests {
         #expect(model.chatViewModelOwnerID != previousOwner)
     }
 
-    @Test func `personal Watch admission rejects before taking durable custody`() async throws {
+    @Test func `unverified personal Watch admission rejects before taking durable custody`() async throws {
         let model = NodeAppModel()
         model.activeGatewayConnectConfig = try self.config(personal: true)
         let commandID = UUID().uuidString
@@ -599,7 +623,7 @@ struct PersonalGatewayAuthenticationTests {
             body: .chat(text: "Synthetic Watch work"))
         do {
             try await model.admitWatchChatDelivery(command)
-            Issue.record("Personal mode must reject machine-owned Watch work")
+            Issue.record("Unverified personal mode must reject machine-owned Watch work")
         } catch let error as WatchMessagingError {
             guard case .admissionUnavailable = error else {
                 Issue.record("Unexpected Watch admission error")

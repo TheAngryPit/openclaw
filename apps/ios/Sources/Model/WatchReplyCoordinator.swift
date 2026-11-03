@@ -90,6 +90,7 @@ final class WatchReplyCoordinator {
     private let journal: OpenClawWatchMessageJournal
     private let gateway: GatewayNodeSession
     private let messaging: any WatchMessagingServicing
+    private let personalRecoveryScope: String?
     private let reportStorageWarning: @MainActor (String?) -> Void
     private var tasks: [CommandKey: Task<Void, Never>] = [:]
     private var pendingResumes: Set<CommandKey> = []
@@ -102,11 +103,13 @@ final class WatchReplyCoordinator {
         journal: OpenClawWatchMessageJournal,
         gateway: GatewayNodeSession,
         messaging: any WatchMessagingServicing,
+        personalRecoveryScope: String? = nil,
         reportStorageWarning: @escaping @MainActor (String?) -> Void)
     {
         self.journal = journal
         self.gateway = gateway
         self.messaging = messaging
+        self.personalRecoveryScope = personalRecoveryScope
         self.reportStorageWarning = reportStorageWarning
     }
 
@@ -115,7 +118,10 @@ final class WatchReplyCoordinator {
         _ command: OpenClawWatchChatDeliveryCommand,
         destination: OpenClawWatchMessageReceiptDestination = .watch) async throws -> OpenClawWatchMessageEntry
     {
-        guard !self.stopped else { throw WatchMessagingError.admissionUnavailable }
+        guard !self.stopped,
+              try await self.isCurrentOwner(gatewayStableID: command.context.gatewayStableID),
+              self.personalRecoveryScope == nil || command.kind == .chat
+        else { throw WatchMessagingError.admissionUnavailable }
         try await self.journal.recoverInterruptedWork(nowMs: WatchMessagingPayloadCodec.nowMs())
         guard !self.stopped, !Task.isCancelled else { throw CancellationError() }
         let entry = try await self.journal.admit(
@@ -228,10 +234,15 @@ final class WatchReplyCoordinator {
 
     private func process(_ entry: OpenClawWatchMessageEntry) async -> Bool {
         guard let command = entry.command, let owner = entry.owner, !Task.isCancelled else { return false }
+        guard (try? await self.isCurrentOwner(gatewayStableID: owner.gatewayStableID)) == true,
+              self.personalRecoveryScope == nil || command.kind == .chat,
+              !self.stopped, !Task.isCancelled
+        else { return false }
         let transport = IOSGatewayChatTransport(
             gateway: self.gateway,
             globalAgentId: command.context.agentId,
-            outboxGatewayID: command.context.gatewayStableID)
+            outboxGatewayID: command.context.gatewayStableID,
+            expectedPersonalRecoveryScope: self.personalRecoveryScope)
         if entry.phase == .accepted {
             await self.observe(entry, transport: transport)
             return false
@@ -297,6 +308,11 @@ final class WatchReplyCoordinator {
             return
         }
         guard let route = await self.gateway.currentRoute(ifGatewayID: command.context.gatewayStableID) else { return }
+        if let personalRecoveryScope,
+           await self.gateway.currentAuthRecoveryScope(ifCurrentRoute: route) != personalRecoveryScope
+        {
+            return
+        }
         let deadline = Date().addingTimeInterval(75)
         let observation = await transport.waitForRunCompletion(runId: runID, timeoutMs: 60000, ifCurrentRoute: route)
         if case let .terminal(.failed(message)) = observation {
@@ -360,6 +376,18 @@ final class WatchReplyCoordinator {
         }
     }
 
+    private func isCurrentOwner(gatewayStableID: String) async throws -> Bool {
+        guard let route = try await self.journal.route(gatewayStableID: gatewayStableID),
+              route.personalRecoveryScope == self.personalRecoveryScope
+        else { return false }
+        if let personalRecoveryScope {
+            guard let socket = await self.gateway.currentRoute(ifGatewayID: gatewayStableID),
+                  await self.gateway.currentAuthRecoveryScope(ifCurrentRoute: socket) == personalRecoveryScope
+            else { return false }
+        }
+        return !self.stopped && !Task.isCancelled
+    }
+
     private func sendReceipt(_ entry: OpenClawWatchMessageEntry) {
         guard !self.stopped, entry.destination == .watch, let receipt = entry.receipt else {
             return
@@ -382,6 +410,7 @@ final class WatchReplyCoordinator {
             guard !self.stopped, !Task.isCancelled else { return }
             do {
                 guard let owner = entry.owner,
+                      try await self.isCurrentOwner(gatewayStableID: owner.gatewayStableID),
                       try await self.journal.route(gatewayStableID: owner.gatewayStableID)?.owner == owner,
                       let current = try await self.journal.entries(owner: owner).first(where: {
                           $0.id == entry.id

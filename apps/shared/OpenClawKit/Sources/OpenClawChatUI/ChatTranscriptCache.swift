@@ -354,24 +354,7 @@ public actor OpenClawChatSQLiteTranscriptCache: OpenClawChatTranscriptCache,
         let gatewayID = self.gatewayID
         do {
             try await self.databases.stateQueue.write { db in
-                try db.execute(
-                    sql: """
-                    INSERT INTO gateway_routing_identity(
-                        gateway_id, scope, main_session_key, default_agent_id, updated_at
-                    ) VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(gateway_id) DO UPDATE SET
-                        scope = excluded.scope,
-                        main_session_key = excluded.main_session_key,
-                        default_agent_id = excluded.default_agent_id,
-                        updated_at = excluded.updated_at
-                    """,
-                    arguments: [
-                        gatewayID,
-                        identity.scope,
-                        identity.mainSessionKey,
-                        identity.defaultAgentID,
-                        Date().timeIntervalSince1970,
-                    ])
+                try OpenClawClientDatabases.storeSessionRoutingIdentity(identity, gatewayID: gatewayID, in: db)
             }
         } catch {
             cacheLogger.error("client state routing write failed: \(error.localizedDescription, privacy: .public)")

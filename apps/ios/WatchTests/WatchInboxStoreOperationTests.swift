@@ -107,6 +107,74 @@ struct WatchInboxStoreOperationTests {
         }
     }
 
+    @Test func `app snapshot sequence rejects an older owner after a newer snapshot despite clock rollback`() throws {
+        try Self.withStore { store, _ in
+            var ownerB = Self.snapshot(id: "owner-b", sentAtMs: 1_000)
+            ownerB.snapshotSequence = 42
+            ownerB.agentName = "Owner B"
+            store.consume(appSnapshot: ownerB)
+
+            var lateOwnerA = Self.snapshot(id: "owner-a-late", sentAtMs: 9_000)
+            lateOwnerA.snapshotSequence = 41
+            lateOwnerA.agentName = "Owner A"
+            store.consume(appSnapshot: lateOwnerA)
+            #expect(store.appSnapshot?.snapshotId == "owner-b")
+            #expect(store.appSnapshot?.agentName == "Owner B")
+
+            var legacy = Self.snapshot(id: "legacy-late", sentAtMs: 10_000)
+            legacy.agentName = "Legacy owner"
+            store.consume(appSnapshot: legacy)
+            #expect(store.appSnapshot?.snapshotId == "owner-b")
+
+            var ownerBRefresh = Self.snapshot(id: "owner-b-refresh", sentAtMs: 1)
+            ownerBRefresh.snapshotSequence = 43
+            ownerBRefresh.agentName = "Owner B refreshed"
+            store.consume(appSnapshot: ownerBRefresh)
+            #expect(store.appSnapshot?.snapshotId == "owner-b-refresh")
+            #expect(store.appSnapshot?.agentName == "Owner B refreshed")
+        }
+    }
+
+    @Test func `first sequenced snapshot cannot replace a newer persisted legacy snapshot after clock rollback`() throws {
+        try Self.withStore { store, _ in
+            var persistedLegacy = Self.snapshot(id: "legacy-current", sentAtMs: 10_000)
+            persistedLegacy.agentName = "Legacy current"
+            store.consume(appSnapshot: persistedLegacy)
+
+            var clockRolledBack = Self.snapshot(id: "sequenced-after-rollback", sentAtMs: 1_000)
+            clockRolledBack.snapshotSequence = 42
+            clockRolledBack.agentName = "Stale sequenced owner"
+            store.consume(appSnapshot: clockRolledBack)
+
+            #expect(store.appSnapshot?.snapshotId == "legacy-current")
+            #expect(store.appSnapshot?.agentName == "Legacy current")
+
+            var laterSequenced = Self.snapshot(id: "sequenced-current", sentAtMs: 10_001)
+            laterSequenced.snapshotSequence = 43
+            laterSequenced.agentName = "Sequenced current"
+            store.consume(appSnapshot: laterSequenced)
+
+            #expect(store.appSnapshot?.snapshotId == "sequenced-current")
+            #expect(store.appSnapshot?.agentName == "Sequenced current")
+        }
+    }
+
+    @Test func `app snapshot payload decodes its optional sequence`() throws {
+        let payload: [String: Any] = [
+            "type": OpenClawWatchPayloadType.appSnapshot.rawValue,
+            "gatewayConnected": true,
+            "agentName": "Main",
+            "sessionKey": "main",
+            "talkEnabled": false,
+            "talkListening": false,
+            "talkSpeaking": false,
+            "pendingApprovalCount": 0,
+            "snapshotSequence": NSNumber(value: 73),
+        ]
+        let snapshot = try #require(WatchAppSnapshotMessage.parsePayload(payload))
+        #expect(snapshot.snapshotSequence == 73)
+    }
+
     @Test func `reply accepts current delivered queued and failed outcomes`() throws {
         try Self.withStore { store, _ in
             let outcomes: [(WatchReplySendResult, WatchDeliveryStatusCode)] = [

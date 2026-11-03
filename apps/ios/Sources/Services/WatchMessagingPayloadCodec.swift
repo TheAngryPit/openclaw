@@ -176,6 +176,7 @@ enum WatchMessagingPayloadCodec {
         payload["chatStatus"] = message.chatStatus.map(self.encodeAppStatus)
         payload["chatStatusText"] = message.chatStatusText?.trimmedNonEmpty
         payload["snapshotId"] = message.snapshotId?.trimmedNonEmpty
+        payload["snapshotSequence"] = message.snapshotSequence
         if let context = message.chatDeliveryContext,
            let encoded = try? OpenClawWatchChatDeliveryCodec.encode(context)
         {

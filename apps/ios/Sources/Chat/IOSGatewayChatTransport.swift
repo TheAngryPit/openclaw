@@ -18,6 +18,7 @@ struct IOSGatewayChatTransport: OpenClawChatGatewayTransport {
     private let widgetGateway: GatewayNodeSession?
     private(set) var globalAgentId: String?
     let outboxGatewayID: String?
+    private let expectedPersonalRecoveryScope: String?
     private let mediaArtifactLoader: IOSMediaArtifactLoader?
     private let sourceResourceLoader: IOSSourceResourceLoader?
 
@@ -36,6 +37,7 @@ struct IOSGatewayChatTransport: OpenClawChatGatewayTransport {
         widgetGateway: GatewayNodeSession? = nil,
         globalAgentId: String? = nil,
         outboxGatewayID: String? = nil,
+        expectedPersonalRecoveryScope: String? = nil,
         mediaArtifactLoader: IOSMediaArtifactLoader? = nil,
         sourceResourceLoader: IOSSourceResourceLoader? = nil)
     {
@@ -43,6 +45,7 @@ struct IOSGatewayChatTransport: OpenClawChatGatewayTransport {
         self.widgetGateway = widgetGateway
         self.globalAgentId = globalAgentId?.trimmedNonEmpty?.lowercased()
         self.outboxGatewayID = GatewayStableIdentifier.exact(outboxGatewayID)
+        self.expectedPersonalRecoveryScope = expectedPersonalRecoveryScope
         self.mediaArtifactLoader = mediaArtifactLoader
         self.sourceResourceLoader = sourceResourceLoader
     }
@@ -51,6 +54,11 @@ struct IOSGatewayChatTransport: OpenClawChatGatewayTransport {
         guard let outboxGatewayID,
               let route = await gateway.currentRoute(ifGatewayID: outboxGatewayID)
         else { return .unavailable(reason: nil) }
+        if let expectedPersonalRecoveryScope,
+           await self.gateway.currentAuthRecoveryScope(ifCurrentRoute: route) != expectedPersonalRecoveryScope
+        {
+            return .unavailable(reason: nil)
+        }
         guard let supportsRoutingContract = await gateway.supportsServerCapability(
             .chatSendRoutingContract,
             ifCurrentRoute: route)
@@ -65,6 +73,11 @@ struct IOSGatewayChatTransport: OpenClawChatGatewayTransport {
             ifCurrentRoute: route) == true
         guard let routingContract = try? await self.sessionRoutingContract(ifCurrentRoute: route)
         else { return .unavailable(reason: nil) }
+        if let expectedPersonalRecoveryScope,
+           await self.gateway.currentAuthRecoveryScope(ifCurrentRoute: route) != expectedPersonalRecoveryScope
+        {
+            return .unavailable(reason: nil)
+        }
         return .available(OpenClawChatTransportRouteLease(
             sendTargetedMessage: { key, target, text, thinking, id, attachments in
                 try await self.sendMessage(

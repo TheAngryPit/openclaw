@@ -960,8 +960,45 @@ final class ChatTranscriptCacheStoreTests: ClientDatabaseTestSuite, @unchecked S
             "client-state-outbox-settings-claim-v8",
             "client-state-watch-message-journal-v9",
             "client-state-watch-message-legacy-receipts-v1",
+            "client-state-watch-personal-owner-v1",
+            "client-state-watch-app-snapshot-sequence-v1",
             "client-state-outbox-queue-mode-v10",
         ])
+    }
+
+    @Test func `Watch snapshot sequence is atomic across database owners and persists across reopen`() async throws {
+        let initial = try #require(try await databases.watchMessages.nextAppSnapshotSequence(nowMs: 1_000))
+        let secondQueue = try DatabaseQueue(
+            path: directory.appendingPathComponent(OpenClawClientDatabases.clientStateFilename).path)
+        let secondJournal = OpenClawWatchMessageJournal(queue: secondQueue)
+        let firstJournal = databases.watchMessages
+        let values = try await withThrowingTaskGroup(of: Int64?.self, returning: [Int64?].self) { group in
+            for index in 0..<16 {
+                let journal = index.isMultiple(of: 2) ? firstJournal : secondJournal
+                group.addTask { try await journal.nextAppSnapshotSequence(nowMs: 900) }
+            }
+            var values: [Int64?] = []
+            for try await value in group { values.append(value) }
+            return values
+        }
+        let allocated = values.compactMap { $0 }
+        #expect(allocated.count == 16)
+        #expect(Set(allocated).count == allocated.count)
+        #expect(allocated.allSatisfy { $0 > initial })
+
+        try databases.close()
+        try secondQueue.close()
+        let reopened = try OpenClawClientDatabases(directoryURL: directory)
+        let afterRestart = try #require(try await reopened.watchMessages.nextAppSnapshotSequence(nowMs: 1))
+        #expect(afterRestart > (allocated.max() ?? initial))
+
+        try await reopened.stateQueue.write { db in
+            try db.execute(
+                sql: "UPDATE watch_app_snapshot_sequence SET sequence = ? WHERE id = 1",
+                arguments: [Int64.max])
+        }
+        #expect(try await reopened.watchMessages.nextAppSnapshotSequence(nowMs: 2) == nil)
+        try reopened.close()
     }
 }
 
@@ -1957,6 +1994,7 @@ final class WatchMessageJournalStoreTests: ClientDatabaseTestSuite, @unchecked S
         defer { try? reopened.close() }
         #expect(try await reopened.watchMessages.entries() == [admitted])
         #expect(try await reopened.watchMessages.route(gatewayStableID: "gw-a")?.owner == admitted.owner)
+        #expect(try await reopened.watchMessages.resumableEntry(id: input.commandId, context: input.context) == admitted)
 
         let changed = OpenClawWatchChatDeliveryCommand(
             context: input.context, commandId: input.commandId, submittedAtMs: self.now, body: .chat(text: "different"))
@@ -1967,6 +2005,131 @@ final class WatchMessageJournalStoreTests: ClientDatabaseTestSuite, @unchecked S
             _ = try await self.journal.admit(input, nowMs: self.now, destination: .phone)
         }
         #expect(try await self.journal.entries() == [admitted])
+    }
+
+    @Test func `personal Watch owner survives restart and never replays across A B A`() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("watch-personal-owner-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var databases = try OpenClawClientDatabases(directoryURL: directory)
+        defer { try? databases.close() }
+        let journal = databases.watchMessages
+        try await journal.importLegacy(.init(messages: [], recentMessageIDs: []), nowMs: self.now)
+        #expect(try await journal.route(gatewayStableID: "gw-a") == nil)
+        let identity = try #require(OpenClawChatSessionRoutingIdentity(contract: "per-sender|main|main"))
+        let personA = try #require(try await journal.bindRoute(
+            gatewayStableID: "gw-a", personalRecoveryScope: "verified-phone-person-a", routingIdentity: identity))
+        let contextA = try OpenClawWatchChatDeliveryContext(
+            gatewayStableID: "gw-a", routeGeneration: #require(personA.owner.routeGeneration),
+            agentId: "main", sessionKey: "main", deliverySessionKey: "agent:main:main",
+            sessionRoutingContract: personA.routingIdentity.contract)
+        let queuedA = OpenClawWatchChatDeliveryCommand(
+            context: contextA, commandId: "person-a-message", submittedAtMs: self.now,
+            body: .chat(text: "Only send as A"))
+        let admitted = try await journal.admit(queuedA, nowMs: self.now)
+        #expect(admitted.personalRecoveryScope == "verified-phone-person-a")
+        try databases.close()
+        databases = try OpenClawClientDatabases(directoryURL: directory)
+        let reopenedJournal = databases.watchMessages
+        #expect(try await reopenedJournal.bindRoute(
+            gatewayStableID: "gw-a", personalRecoveryScope: "verified-phone-person-a") == personA)
+        #expect(try await reopenedJournal.resumableEntry(id: queuedA.commandId, context: contextA) == admitted)
+
+        let personB = try #require(try await reopenedJournal.bindRoute(
+            gatewayStableID: "gw-a", personalRecoveryScope: "verified-phone-person-b"))
+        #expect(personB.owner != personA.owner)
+        #expect(try await reopenedJournal.resumableEntry(id: queuedA.commandId, context: contextA) == nil)
+        await #expect(throws: OpenClawWatchChatDeliveryError.self) {
+            _ = try await reopenedJournal.admit(queuedA, nowMs: self.now)
+        }
+        #expect(try await reopenedJournal.entries() == [admitted])
+        #expect(try await reopenedJournal.route(gatewayStableID: "gw-a") == personB)
+
+        try databases.close()
+        databases = try OpenClawClientDatabases(directoryURL: directory)
+        let afterRestart = databases.watchMessages
+        #expect(try await afterRestart.bindRoute(
+            gatewayStableID: "gw-a", personalRecoveryScope: "verified-phone-person-b") == personB)
+        let personAAgain = try #require(try await afterRestart.bindRoute(
+            gatewayStableID: "gw-a", personalRecoveryScope: "verified-phone-person-a"))
+        #expect(personAAgain.personalRecoveryScope == "verified-phone-person-a")
+        #expect(personAAgain.owner != personA.owner)
+        #expect(try await afterRestart.resumableEntry(id: queuedA.commandId, context: contextA) == nil)
+
+        let sharedAgain = try #require(try await afterRestart.bindRoute(
+            gatewayStableID: "gw-a", personalRecoveryScope: nil))
+        #expect(sharedAgain.personalRecoveryScope == nil)
+        #expect(sharedAgain.owner != personAAgain.owner)
+        #expect(try await afterRestart.resumableEntry(id: queuedA.commandId, context: contextA) == nil)
+    }
+
+    @Test func `personal Watch migration preserves old queued rows without granting personal ownership`() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("watch-personal-migration-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var databases = try OpenClawClientDatabases(directoryURL: directory)
+        defer { try? databases.close() }
+        let identity = try #require(OpenClawChatSessionRoutingIdentity(contract: "per-sender|main|main"))
+        await databases.store(gatewayID: "gw-a").storeSessionRoutingIdentity(identity)
+        let journal = databases.watchMessages
+        try await journal.importLegacy(.init(messages: [], recentMessageIDs: []), nowMs: self.now)
+        let sharedRoute = try #require(try await journal.route(gatewayStableID: "gw-a"))
+        let sharedCommand = try OpenClawWatchChatDeliveryCommand(
+            context: OpenClawWatchChatDeliveryContext(
+                gatewayStableID: "gw-a", routeGeneration: #require(sharedRoute.owner.routeGeneration),
+                agentId: "main", sessionKey: "main", deliverySessionKey: "agent:main:main",
+                sessionRoutingContract: identity.contract),
+            commandId: "shared-queued-before-personal-mode",
+            submittedAtMs: self.now,
+            body: .chat(text: "Preserve this existing shared-mode row"))
+        let oldEntry = try await journal.admit(sharedCommand, nowMs: self.now)
+        #expect(oldEntry.personalRecoveryScope == nil)
+
+        try databases.close()
+        let stateURL = directory.appendingPathComponent(OpenClawClientDatabases.clientStateFilename)
+        try withRawDatabase(at: stateURL) { raw in
+            execute(raw, """
+            ALTER TABLE gateway_routing_identity DROP COLUMN watch_personal_recovery_scope;
+            ALTER TABLE watch_message_journal DROP COLUMN personal_recovery_scope;
+            DELETE FROM grdb_migrations WHERE identifier = 'client-state-watch-personal-owner-v1';
+            """)
+        }
+
+        databases = try OpenClawClientDatabases(directoryURL: directory)
+        let upgraded = databases.watchMessages
+        #expect(try await upgraded.entries() == [oldEntry])
+        #expect(try await upgraded.route(gatewayStableID: "gw-a") == sharedRoute)
+        let personA = try #require(try await upgraded.bindRoute(
+            gatewayStableID: "gw-a", personalRecoveryScope: "verified-phone-person-a"))
+        #expect(personA.owner != sharedRoute.owner)
+        #expect(try await upgraded.resumableEntry(id: sharedCommand.commandId, context: sharedCommand.context) == nil)
+        #expect(try await upgraded.entries() == [oldEntry])
+    }
+
+    @Test func `legacy Watch work remains unowned and non replayable after personal bind`() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("watch-personal-legacy-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let databases = try OpenClawClientDatabases(directoryURL: directory)
+        defer { try? databases.close() }
+        let journal = databases.watchMessages
+        try await journal.importLegacy(.init(messages: [
+            .init(id: "legacy-message", gatewayStableID: "gw-a", text: "old work", submittedAtMs: self.now),
+        ], recentMessageIDs: []), nowMs: self.now)
+        let legacy = try #require(try await journal.entries().first)
+        #expect(legacy.phase == .needsReview)
+        #expect(legacy.owner == nil)
+        #expect(legacy.personalRecoveryScope == nil)
+
+        let identity = try #require(OpenClawChatSessionRoutingIdentity(contract: "per-sender|main|main"))
+        let route = try #require(try await journal.bindRoute(
+            gatewayStableID: "gw-a", personalRecoveryScope: "verified-phone-person-a", routingIdentity: identity))
+        let context = try OpenClawWatchChatDeliveryContext(
+            gatewayStableID: "gw-a", routeGeneration: #require(route.owner.routeGeneration),
+            agentId: "main", sessionKey: "main", deliverySessionKey: "agent:main:main",
+            sessionRoutingContract: identity.contract)
+        #expect(try await journal.resumableEntry(id: legacy.commandId, context: context) == nil)
+        #expect(try await journal.entries() == [legacy])
     }
 
     @Test func `failed Watch insert rolls back without an admission receipt`() async throws {

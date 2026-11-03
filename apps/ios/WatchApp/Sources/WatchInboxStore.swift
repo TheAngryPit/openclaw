@@ -563,11 +563,14 @@ import WatchKit
         if let snapshotID, !snapshotID.isEmpty, snapshotID == appSnapshot?.snapshotId {
             return
         }
-        if let sentAtMs = message.sentAtMs,
-           let currentSentAtMs = appSnapshot?.sentAtMs,
-           sentAtMs < currentSentAtMs
-        {
-            return
+        if let currentSequence = appSnapshot?.snapshotSequence {
+            guard let incomingSequence = message.snapshotSequence,
+                  incomingSequence > currentSequence
+            else { return }
+        } else if let currentSentAtMs = appSnapshot?.sentAtMs {
+            guard let incomingSentAtMs = message.sentAtMs,
+                  incomingSentAtMs > currentSentAtMs
+            else { return }
         }
         let hasExistingAppSnapshot = self.appSnapshot != nil
         let previousGatewayID = WatchGatewayID.exact(self.appSnapshot?.gatewayStableID)

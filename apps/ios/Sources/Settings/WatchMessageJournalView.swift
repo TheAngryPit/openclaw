@@ -53,7 +53,9 @@ struct WatchMessageJournalView: View {
             }
         }
         .navigationTitle("Message Delivery")
-        .task(id: self.refreshID) { await self.observeMessages() }
+        .task(id: "\(self.refreshID)|\(self.appModel.chatViewModelOwnerID)|\(self.appModel.isOperatorGatewayConnected)") {
+            await self.observeMessages()
+        }
         .confirmationDialog(
             "Discard this saved message?",
             isPresented: Binding(
@@ -186,7 +188,7 @@ struct WatchMessageJournalView: View {
             let changes = try await journal.changes()
             for try await entries in changes {
                 try Task.checkCancellation()
-                self.entries = entries.filter { $0.displayText != nil }
+                self.entries = entries.filter { $0.displayText != nil && self.appModel.canReviewWatchMessage($0) }
                 self.didLoad = true
                 self.appModel.clearWatchChatStorageWarning(for: journal)
             }
@@ -210,6 +212,7 @@ struct WatchMessageJournalView: View {
         self.isUpdating = true
         defer { self.isUpdating = false }
         do {
+            guard self.appModel.canReviewWatchMessage(entry) else { return }
             let result = if entry.phase == .needsReview {
                 try await journal.discard(id: entry.commandId, exactOwner: entry.owner)
             } else {
