@@ -61,7 +61,9 @@ public actor OpenClawWatchMessageJournal {
         routingIdentity: OpenClawChatSessionRoutingIdentity? = nil) async throws -> OpenClawWatchMessageRoute?
     {
         try await self.route(
-            gatewayStableID: gatewayStableID, bindOwner: true, personalRecoveryScope: personalRecoveryScope,
+            gatewayStableID: gatewayStableID,
+            bindOwner: true,
+            personalRecoveryScope: personalRecoveryScope,
             routingIdentity: routingIdentity)
     }
 
