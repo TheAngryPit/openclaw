@@ -1,0 +1,54 @@
+[openclaw] Staging pinned Bun fork openclaw-v1.4.4-20261026-191755ec11-webkit-b82bc917e9 (one-time download)…
+[openclaw] Bun fork unavailable (could not stage the pinned fork: Command failed: /bin/bash <worktree>/scripts/stage-openclaw-bun.sh <local-path> linux x64); using Node. Set OPENCLAW_VITEST_RUNTIME=node to silence.
+5:52:45 PM [vite] (inline) warning: 
+<worktree>/scripts/lib/tsx-cli-shim.mjs
+76 |  export async function registerToolingTsx() {
+77 |    configureToolingTsx();
+78 |    await import(resolveTsxImport(SHIM_CHECKOUT_ROOT));
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+79 |  }
+80 |  
+The above dynamic import cannot be analyzed by Vite.
+See https://vite.dev/guide/features#dynamic-import for supported dynamic import formats. If this is intended to be left as-is, you can use the /* @vite-ignore */ comment inside the import() call to suppress this warning.
+
+  Plugin: vite:import-analysis
+  File: <worktree>/scripts/lib/tsx-cli-shim.mjs
+
+[1m[30m[46m RUN [49m[39m[22m [36mv5.0.5 [39m[90m<worktree>[39m
+
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mcollapses a replacement diagnostic (mobile=false)
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mcollapses a replacement diagnostic (mobile=true)
+ [32m✓[39m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mkeeps default-model recovery help in the flexible content column[33m 500[2mms[22m[39m
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mpreserves caller-owned recovery instructions in request notices
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mshows transferring worker progress
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mshows installing worker progress
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mrenders buffering provider notice as plain text
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mrenders blocked provider notice as plain text
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mrenders fallback provider notice as plain text
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mrenders escalated provider notice as plain text
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mrenders unavailable provider notice as plain text
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22moffers an explicit discard action with the full warning when unsaved starts block recovery
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mrefreshes without retrying (contention=false, connected=true)
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mrefreshes without retrying (contention=false, connected=false)
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mrefreshes without retrying (contention=true, connected=true)
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mrefreshes without retrying (contention=true, connected=false)
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mpreserves expanded diagnostics and focus (run, mobile=false)
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mpreserves expanded diagnostics and focus (run, mobile=true)
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mpreserves expanded diagnostics and focus (placement, mobile=false)
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mkeeps chatgpt_business_usage_limit recovery beside a transcript error and resets dismissal for a new run
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mkeeps chatgpt_consumer_usage_limit recovery beside a transcript error and resets dismissal for a new run
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mkeeps available mobile error actions and diagnostics (refresh)
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mkeeps available mobile error actions and diagnostics (details)
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mkeeps available mobile error actions and diagnostics (message)
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mchat view notice integration[2m > [22mchat run error[2m > [22mstrips only the decorative prefix from a run error display and copies the raw diagnostic
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mchat view notice integration[2m > [22mchat run error[2m > [22mstrips only the decorative prefix from a request error display and copies the raw diagnostic
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mchat view notice integration[2m > [22mchat run error[2m > [22mkeeps startup Retry owned by retryable=true
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mchat view notice integration[2m > [22mcloud workspace conflict notice[2m > [22mbounds conflict guidance and copies the selected path recovery command
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mchat view notice integration[2m > [22mcloud workspace conflict notice[2m > [22mkeeps terminal-control paths visible without building copyable commands ("")
+ [2m[90m↓[39m[22m [30m[45m ui [49m[39m ui/src/pages/chat/chat-view-notices.test.tsx[2m > [22mchat view notice integration[2m > [22mcloud worker disk-space notice[2m > [22mupdates persistent disk guidance and clears it after recovery
+
+[2m Test Files [22m [1m[32m1 passed[39m[22m[90m (1)[39m
+[2m      Tests [22m [1m[32m1 passed[39m[22m[2m | [22m[33m29 skipped[39m[90m (30)[39m
+[2m   Start at [22m 17:52:46
+[2m   Duration [22m 7.37s[2m (transform 37%, worker 26%, import 17%, environment 11%, tests 8%, setup 1%)[22m
+
