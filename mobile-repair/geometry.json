@@ -1,0 +1,45 @@
+{
+  "children": [
+    {
+      "class": "chat-composer-neighbor-card__icon",
+      "rect": {
+        "x": 29,
+        "y": 752.859375,
+        "width": 18,
+        "height": 16,
+        "top": 752.859375,
+        "right": 47,
+        "bottom": 768.859375,
+        "left": 29
+      }
+    },
+    {
+      "class": "chat-composer-neighbor-card__copy",
+      "rect": {
+        "x": 57,
+        "y": 743.3125,
+        "width": 314,
+        "height": 35.09375,
+        "top": 743.3125,
+        "right": 371,
+        "bottom": 778.40625,
+        "left": 57
+      }
+    },
+    {
+      "class": "btn btn--sm chat-error__refresh",
+      "rect": {
+        "x": 57,
+        "y": 788.40625,
+        "width": 314,
+        "height": 32.59375,
+        "top": 788.40625,
+        "right": 371,
+        "bottom": 821,
+        "left": 57
+      }
+    }
+  ],
+  "scrollWidth": 366,
+  "clientWidth": 366
+}
