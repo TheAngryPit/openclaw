@@ -32,6 +32,7 @@ import { STARTUP_UNAVAILABLE_GATEWAY_METHODS } from "./methods/core-method-polic
 import { startNodeConnectionNotifications } from "./node-connection-notifications.js";
 import { waitForNodeWorkerSupervisor } from "./node-registry-private.js";
 import { clearNodeWakeState } from "./node-wake-state.js";
+import { closeGatewayPersonalIdentityBindings } from "./personal-identity-binding.js";
 import { measureGatewayCloseStep } from "./restart-trace.js";
 import { createLazyGatewayCronState } from "./server-cron-lazy.js";
 import { createGatewayCronReconciliation } from "./server-cron-reconciled.js";
@@ -522,6 +523,7 @@ export async function prepareGatewayLifecycle(params: {
   };
   const prepareClose = async (optsValue?: GatewayCloseOptions) => {
     exitAfterClose = optsValue?.exitAfterClose === true;
+    closeGatewayPersonalIdentityBindings(clients);
     // Fence admission now; database cleanup must wait for restart marker persistence.
     fenceSessionSuspensionWritesForGatewayShutdown();
     lifecycle.closePreludeStarted = true;
@@ -665,16 +667,13 @@ export async function prepareGatewayLifecycle(params: {
       throw error;
     }));
   const closeStartupFailure = async (error: unknown) => {
-    const closeOptions = {
-      reason: "gateway startup failed",
-      exitAfterClose: params.exitAfterStartupFailure?.(error) === true,
-    };
+    const exitOnError = params.exitAfterStartupFailure?.(error) === true;
     runtime.startupTrace.close();
     await runGatewayCloseSteps({
       owner: closeStepOwner,
-      exitAfterClose: closeOptions.exitAfterClose,
+      exitAfterClose: exitOnError,
       // Prepare before the plan runs so earlier teardown steps see closed admission.
-      close: await prepareClose(closeOptions),
+      close: await prepareClose({ reason: "gateway startup failed", exitAfterClose: exitOnError }),
       onError: (message) => log.error(message),
     });
   };

@@ -19,6 +19,10 @@ import { ensureProfileForEmail } from "../state/user-profiles.js";
 import { createChannelTestPluginBase, createTestRegistry } from "../test-utils/channel-plugins.js";
 import { expectCallCount as expectCalls } from "../test-utils/mock-call-assertions.js";
 import { CLI_DEFAULT_OPERATOR_SCOPES } from "./method-scopes.js";
+import {
+  captureGatewayPersonalIdentityBinding,
+  captureGatewayPersonalIdentityBindingAuthority,
+} from "./personal-identity-binding.js";
 import { dispatchGatewayRequestInProcess } from "./server-in-process-dispatch.js";
 import { closeKernelFixture, createKernelFixture } from "./server-kernel.fixture-test-support.js";
 import { createGatewayKernel } from "./server-kernel.js";
@@ -224,6 +228,41 @@ describe("createGatewayKernel", () => {
           kernel.kernel.setDispatchReady(true);
         }
         assert(kernel, "Expected the real Gateway kernel to be captured");
+        const bindingTime = Date.now();
+        const bindingDevice = { deviceId: "shutdown-personal-device", key: "paired-generation" };
+        expect(
+          captureGatewayPersonalIdentityBinding(
+            kernel.clients,
+            {
+              ingress: "tailscale-serve",
+              authMethod: "tailscale",
+              tailscaleLogin: "person@example.test",
+              sourceClientIp: "100.64.0.10",
+              canonicalProfileId: "person",
+              scopes: ["operator.read"],
+              device: bindingDevice,
+              gatewayId: "shutdown-boot",
+              signedAtMs: bindingTime,
+              verifiedAtMs: bindingTime,
+            },
+            {
+              mode: "personal-identity",
+              provider: "tailscale",
+              phase: "bind",
+              bindingId: "shutdown-binding",
+              issuedAtMs: bindingTime,
+            },
+            bindingTime,
+          ),
+        ).toBe(true);
+        const binding = captureGatewayPersonalIdentityBindingAuthority({
+          gateway: kernel.clients,
+          bindingId: "shutdown-binding",
+          device: bindingDevice,
+          gatewayId: "shutdown-boot",
+          scopes: ["operator.read"],
+        });
+        expect(binding?.isCurrent()).toBe(true);
         const projection = getSessionRowProjection(kernel.gatewayRequestContext);
         assert(projection, "Expected the real session row projection");
         const projectionDispose = vi.spyOn(projection, "dispose");
@@ -304,6 +343,8 @@ describe("createGatewayKernel", () => {
         closing = server
           ? server.close({ reason: "close ordering test" })
           : kernel.closeOnStartupFailure();
+        expect(binding?.isCurrent()).toBe(false);
+        expect(binding?.signal.aborted).toBe(true);
 
         expect(getStartup()).toMatchObject({ ok: false, status: "draining" });
         expect(getReadiness()).toMatchObject({ ready: false, failing: ["gateway-draining"] });

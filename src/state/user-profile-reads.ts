@@ -94,6 +94,19 @@ export async function resolveCanonicalCachedGitHubIdentity(
   return reply.identity;
 }
 
+export async function resolveCanonicalTailscaleProfileId(
+  login: string,
+): Promise<string | undefined> {
+  const reply = await executeExistingOpenClawStateRead(
+    {},
+    {
+      type: "userProfiles.tailscaleIdentity.resolve",
+      login,
+    },
+  );
+  return reply?.profileId;
+}
+
 export async function listProfiles(options: ProfileReadOptions = {}) {
   return (await readUserProfileSnapshot(undefined, options)).profiles;
 }

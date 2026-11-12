@@ -15,6 +15,7 @@ import {
 } from "./user-profile-github-identity.js";
 import {
   readUserProfileSnapshotCommand,
+  selectCanonicalTailscaleProfileIdInDatabase,
   selectUserProfileIdentityInDatabase,
 } from "./user-profile-identity.read.js";
 import {
@@ -59,6 +60,11 @@ export function readUserProfileCommand(
       return {
         type: command.type,
         linked: resolveUserChannelIdentityInDatabase(db, command.identity),
+      };
+    case "userProfiles.tailscaleIdentity.resolve":
+      return {
+        type: command.type,
+        profileId: selectCanonicalTailscaleProfileIdInDatabase(db, command.login),
       };
     case "userProfiles.reconcile":
     case "userProfiles.catalog":

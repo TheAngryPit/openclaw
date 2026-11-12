@@ -39,6 +39,21 @@ export function resolveAuthenticatedDeviceTokenIdentity(
   return identity ? Object.freeze(identity) : null;
 }
 
+export function resolveAuthenticatedPairedDeviceIdentity(
+  device: PairedDevice | null,
+  authenticated: { role: string; publicKey: string; scopes: readonly string[] },
+): PairedDeviceTokenIdentity | null {
+  if (!device || device.publicKey !== authenticated.publicKey) {
+    return null;
+  }
+  const identity = resolvePairedDeviceTokenIdentity(
+    device,
+    authenticated.role,
+    authenticated.scopes,
+  );
+  return identity ? Object.freeze(identity) : null;
+}
+
 function listActiveTokenRoles(
   tokens: Record<string, DeviceAuthToken> | undefined,
 ): string[] | undefined {

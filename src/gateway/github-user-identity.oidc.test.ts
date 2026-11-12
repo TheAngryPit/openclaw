@@ -26,6 +26,7 @@ import {
 } from "./github-user-identity.oidc.test-support.js";
 import { resolveAuthenticatedHttpUserProfile } from "./http-auth-user-profile.js";
 import { invalidateOperatorRolePolicy } from "./operator-role-policy.js";
+import { GatewayClientRegistry } from "./server/client-registry.js";
 import { resolveGatewayConnectProfileAdmission } from "./server/ws-connection/connect-user-profile.js";
 
 const accessIdentityUrl = `${accessOrigin}/cdn-cgi/access/get-identity`;
@@ -71,8 +72,18 @@ function disposableAccessRequest(...args: Parameters<typeof accessRequest>) {
 async function resolveWsProfileAdmission(request: ReturnType<typeof accessRequest>) {
   const admission = await resolveGatewayConnectProfileAdmission({
     context: {
+      connectParams: {},
+      isLocalClient: false,
       configSnapshot: request.cfg,
       handler: {
+        clients: new GatewayClientRegistry(),
+        bootId: "fixture-boot",
+        ingressAttribution: {
+          kind: "direct-remote",
+          clientIp: "192.0.2.1",
+          rateLimit: { subject: { key: "fixture" }, resetOnSuccess: true },
+        },
+        buildRequestContext: () => ({}),
         connId: "oidc-profile-admission",
         logWsControl: createSubsystemLogger("test/oidc-profile-admission"),
         close: vi.fn(),

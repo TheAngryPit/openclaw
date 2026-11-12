@@ -28,6 +28,10 @@ import { ensureProfileForEmail } from "../state/user-profiles.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { captureGatewayDeviceRevocation } from "./device-revocation.js";
 import { prepareGatewayRecipientProfile } from "./expected-profile.js";
+import {
+  captureGatewayPersonalIdentityBinding,
+  captureGatewayPersonalIdentityBindingAuthority,
+} from "./personal-identity-binding.js";
 import { createGatewayBroadcaster } from "./server-broadcast.js";
 import { handleGatewayRequest } from "./server-methods.js";
 import type { GatewayRequestContext, GatewayRequestHandler } from "./server-methods/types.js";
@@ -462,6 +466,54 @@ describe("createGatewayRequestContext", () => {
       }),
     ).toEqual(new Set(["ios"]));
   });
+
+  it.each(["invalidateClientsForDevice", "disconnectClientsForDevice"] as const)(
+    "%s retires personal bindings for operator changes, not node-only changes",
+    (operation) => {
+      const clients = new GatewayClientRegistry();
+      const context = createGatewayRequestContext(makeContextParams({ clients }));
+      const device = { deviceId: "device-personal", key: "paired-generation" };
+      const now = Date.now();
+      expect(
+        captureGatewayPersonalIdentityBinding(
+          clients,
+          {
+            ingress: "tailscale-serve",
+            authMethod: "tailscale",
+            tailscaleLogin: "person@example.test",
+            sourceClientIp: "100.64.0.10",
+            canonicalProfileId: "person",
+            scopes: ["operator.read"],
+            device,
+            gatewayId: "boot",
+            signedAtMs: now,
+            verifiedAtMs: now,
+          },
+          {
+            mode: "personal-identity",
+            provider: "tailscale",
+            phase: "bind",
+            bindingId: "binding",
+            issuedAtMs: now,
+          },
+          now,
+        ),
+      ).toBe(true);
+      const authority = captureGatewayPersonalIdentityBindingAuthority({
+        gateway: clients,
+        bindingId: "binding",
+        device,
+        gatewayId: "boot",
+        scopes: ["operator.read"],
+      });
+      expect(authority?.isCurrent()).toBe(true);
+      context[operation]?.(device.deviceId, { role: "node" });
+      expect(authority?.isCurrent()).toBe(true);
+      context[operation]?.(device.deviceId, { role: "operator" });
+      expect(authority?.isCurrent()).toBe(false);
+      expect(authority?.signal.aborted).toBe(true);
+    },
+  );
 
   it("invalidateClientsForDevice sets the flag on matching clients without closing the socket", () => {
     const target = makeDeviceClient("conn-target", "device-1");

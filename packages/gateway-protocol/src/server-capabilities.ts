@@ -39,6 +39,7 @@ export const GATEWAY_SERVER_CAPS = {
   NODE_WORKER_STATUS_WAIT: "node-worker-status-wait-v1",
   PUBLISHED_MODEL_CATALOG: "published-model-catalog",
   PROFILE_BINDING: "profile-binding-v1",
+  NATIVE_PERSONAL_IDENTITY_BINDING: "native-personal-identity-binding-v1",
   PROGRESS_CARD_AGENT_SCOPE: "progress-card-agent-scope-v1",
   SESSION_SCOPED_CHAT_METADATA: "session-scoped-chat-metadata",
   SESSION_SCOPED_MODEL_CATALOG: "session-scoped-model-catalog",

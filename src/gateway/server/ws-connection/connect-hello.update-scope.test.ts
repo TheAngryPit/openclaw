@@ -294,14 +294,22 @@ describe("sendGatewayHello update detail scope", () => {
     });
   });
 
-  it("advertises input custody without changing negotiated scopes", async () => {
-    const context = makeContext("operator", ["operator.read"]);
+  it.each(["chat-input-custody-v1", "native-personal-identity-binding-v1"])(
+    "advertises %s without changing negotiated scopes",
+    async (capability) => {
+      const context = makeContext("operator", ["operator.read"]);
 
-    await sendGatewayHello(context as never, makeState("operator", ["operator.read"]) as never, {});
+      await sendGatewayHello(
+        context as never,
+        makeState("operator", ["operator.read"]) as never,
+        {},
+      );
 
-    expect(helloPayload(context)?.features.capabilities).toContain("chat-input-custody-v1");
-    expect(helloPayload(context)?.auth.scopes).toEqual(["operator.read"]);
-  });
+      expect(helloPayload(context)?.features.capabilities).toContain(capability);
+      expect(helloPayload(context)).not.toHaveProperty("personalIdentityBinding");
+      expect(helloPayload(context)?.auth.scopes).toEqual(["operator.read"]);
+    },
+  );
 
   it.each([
     { origin: "https://gateway.example.test", local: false, expected: true },

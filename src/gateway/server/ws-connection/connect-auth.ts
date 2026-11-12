@@ -54,6 +54,7 @@ import {
 import { resolveControlUiBuildMismatch } from "./control-ui-build-admission.js";
 import {
   resolvePairingLocality,
+  DEVICE_SIGNATURE_SKEW_MS,
   resolveDeviceSignaturePayloadVersion,
   resolveUnauthorizedHandshakeContext,
   shouldPreserveLocalCliSharedAuthScopes,
@@ -66,7 +67,6 @@ import type {
 } from "./message-handler-types.js";
 
 const unauthorizedHandshakeLogLimiter = new HandshakeAuthLogLimiter();
-const DEVICE_SIGNATURE_SKEW_MS = 2 * 60 * 1000;
 
 export async function authenticateGatewayConnect(
   context: GatewayConnectPhaseContext,
@@ -343,12 +343,23 @@ async function authenticateGatewayConnectCore(
     await rejectGatewayStartupConnect(context);
     return undefined;
   }
+  if (connectParams.personalIdentity && !device) {
+    markHandshakeFailure("personal-identity-device-required");
+    sendHandshakeErrorResponse(
+      ErrorCodes.INVALID_REQUEST,
+      "personal identity requires a signed device identity",
+      { details: { code: ConnectErrorDetailCodes.DEVICE_IDENTITY_REQUIRED } },
+    );
+    close(1008, "personal identity requires a signed device identity");
+    await settleRejectedSharedAuthFailure();
+    return undefined;
+  }
   if (!handleMissingDeviceIdentity()) {
     await settleRejectedSharedAuthFailure();
     return undefined;
   }
   let devicePublicKey: string | null = null;
-  let deviceAuthPayloadVersion: "v2" | "v3" | null = null;
+  let deviceAuthPayloadVersion: "v2" | "v3" | "v4" | null = null;
   if (device) {
     const rejectDeviceAuthInvalid = async (reason: string, message: string): Promise<undefined> => {
       emitGatewayAuthSecurityEvent({
